@@ -176,19 +176,22 @@ Three modes must be supported:
 #### 4.9.1 Native Tool Calling Adapter
 - Uses provider-native tool calling (e.g., OpenAI)
 - Converts ToolSpec → provider schema
-- Parses provider tool call → ToolInvocationRequest
+- Parses provider output into either tool invocations or a final assistant response
 
 #### 4.9.2 Structured Response Adapter
 - Model emits structured JSON matching a defined schema
 - No native tool calling required
-- Output is parsed into ToolInvocationRequest
+- Output is parsed into either tool invocations or a final assistant response
 
 #### 4.9.3 Prompt Schema Adapter
 - Model is instructed via prompt to return JSON
 - Output is parsed post hoc
 - Includes retry/repair handling
 
-All adapters must produce ToolInvocationRequest objects.
+All adapters must produce a canonical model-turn outcome that contains either:
+
+- one or more ToolInvocationRequest objects
+- or a final assistant response with no tool use
 
 ---
 

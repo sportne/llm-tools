@@ -212,25 +212,27 @@ Step 0 note:
 ## 8. LLM adapters
 
 ### 8.1 Shared adapter abstractions
-- [ ] Implement adapter base interfaces
-- [ ] Separate tool exposure from invocation parsing cleanly
+- [x] Implement adapter base interfaces
+- [x] Separate tool exposure from invocation parsing cleanly
+- [x] Support parsing model turns into tool invocations or a final response
 
 ### 8.2 OpenAI tool-calling adapter
-- [ ] Export OpenAI-compatible tool schemas from canonical tool definitions
-- [ ] Parse OpenAI tool call payloads into `ToolInvocationRequest`
-- [ ] Add adapter tests
+- [x] Export OpenAI-compatible tool schemas from canonical tool definitions
+- [x] Parse OpenAI tool call payloads into canonical turn outcomes
+- [x] Parse plain final assistant responses when no tool call is present
+- [x] Add adapter tests
 
 ### 8.3 Structured response adapter
-- [ ] Define canonical structured action schema
-- [ ] Export structured response schema
-- [ ] Parse structured action payloads into `ToolInvocationRequest`
-- [ ] Add adapter tests
+- [x] Define canonical structured action/final-response schema
+- [x] Export structured response schema
+- [x] Parse structured model outputs into canonical turn outcomes
+- [x] Add adapter tests
 
 ### 8.4 Prompt-schema adapter
-- [ ] Render prompt instructions for expected JSON action shape
-- [ ] Parse prompt-returned JSON into `ToolInvocationRequest`
-- [ ] Add basic repair/retry handling
-- [ ] Add adapter tests
+- [x] Render prompt instructions for expected JSON action/final-response shape
+- [x] Parse prompt-returned JSON into canonical turn outcomes
+- [x] Add basic repair/retry handling
+- [x] Add adapter tests
 
 ---
 

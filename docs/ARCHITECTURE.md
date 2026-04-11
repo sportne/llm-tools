@@ -904,7 +904,7 @@ class LLMAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def parse_invocation_output(self, payload: object) -> list[ToolInvocationRequest]:
+    def parse_model_output(self, payload: object) -> ParsedModelResponse:
         raise NotImplementedError
 ```
 
@@ -915,8 +915,8 @@ class LLMAdapter(ABC):
 Responsibilities:
 
 * export OpenAI-compatible tool schemas
-* parse returned tool call payloads
-* normalize them into `ToolInvocationRequest`
+* parse returned model payloads
+* normalize them into either tool invocations or a final assistant response
 
 This adapter uses canonical `ToolSpec` and `input_model` information as source material.
 
@@ -927,7 +927,7 @@ This adapter uses canonical `ToolSpec` and `input_model` information as source m
 Responsibilities:
 
 * define a structured action schema for model output
-* parse structured JSON into `ToolInvocationRequest`
+* parse structured JSON into either tool invocations or a final assistant response
 
 Suggested action envelope:
 
@@ -941,6 +941,7 @@ class ToolAction(BaseModel):
 
 class ToolActionEnvelope(BaseModel):
     actions: list[ToolAction]
+    final_response: str | None = None
 ```
 
 Even if v0.1 typically executes one action at a time, using an envelope creates a clean future path.
