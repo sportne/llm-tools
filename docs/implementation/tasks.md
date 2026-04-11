@@ -253,18 +253,18 @@ Step 0 note:
 ## 10. Documentation and examples
 
 ### 10.1 Developer documentation
-- [ ] Document how to define a new tool
-- [ ] Document how to register tools
-- [ ] Document runtime behavior
-- [ ] Document policy behavior
-- [ ] Document adapter behavior
+- [x] Document how to define a new tool
+- [x] Document how to register tools
+- [x] Document runtime behavior
+- [x] Document policy behavior
+- [x] Document adapter behavior
 
 ### 10.2 Examples
-- [ ] Add minimal example project
-- [ ] Add example using built-in tools directly
-- [ ] Add example using OpenAI tool calling
-- [ ] Add example using structured response fallback
-- [ ] Add example using prompt-schema fallback
+- [x] Add minimal example project
+- [x] Add example using built-in tools directly
+- [x] Add example using OpenAI tool calling
+- [x] Add example using structured response fallback
+- [x] Add example using prompt-schema fallback
 
 ---
 
