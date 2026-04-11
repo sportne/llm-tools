@@ -42,10 +42,11 @@ def test_offline_examples_run_successfully(example_name: str) -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_live_openai_example_fails_cleanly_without_api_key() -> None:
+def test_live_ollama_example_fails_cleanly_when_server_is_unreachable() -> None:
     env = dict(os.environ)
-    env.pop("OPENAI_API_KEY", None)
     env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    env["OLLAMA_BASE_URL"] = "http://127.0.0.1:9/v1"
+    env["OLLAMA_MODEL"] = "gemma4"
 
     result = subprocess.run(
         [sys.executable, str(EXAMPLES_DIR / "openai_live.py")],
@@ -57,4 +58,4 @@ def test_live_openai_example_fails_cleanly_without_api_key() -> None:
     )
 
     assert result.returncode == 1
-    assert "OPENAI_API_KEY is required" in result.stderr
+    assert "Failed to reach Ollama" in result.stderr

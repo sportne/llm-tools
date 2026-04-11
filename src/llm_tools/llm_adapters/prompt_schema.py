@@ -8,7 +8,10 @@ import re
 from pydantic import BaseModel
 
 from llm_tools.llm_adapters.base import LLMAdapter, ParsedModelResponse
-from llm_tools.llm_adapters.structured_responses import _normalize_structured_payload
+from llm_tools.llm_adapters.structured_output import (
+    StructuredOutputAdapter,
+    normalize_structured_output_payload,
+)
 from llm_tools.tool_api import ToolSpec
 
 _FENCED_JSON_PATTERN = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
@@ -57,14 +60,10 @@ class PromptSchemaAdapter(LLMAdapter):
 
     def parse_model_output(self, payload: object) -> ParsedModelResponse:
         """Parse prompt-returned payloads with one deterministic repair pass."""
-        normalized = _normalize_structured_payload(
+        normalized = normalize_structured_output_payload(
             self._normalize_prompt_payload(payload)
         )
-        from llm_tools.llm_adapters.structured_responses import (
-            StructuredResponseAdapter,
-        )
-
-        return StructuredResponseAdapter().parse_model_output(normalized)
+        return StructuredOutputAdapter().parse_model_output(normalized)
 
     def _normalize_prompt_payload(self, payload: object) -> object:
         if not isinstance(payload, str):

@@ -1,4 +1,4 @@
-"""Tests for the OpenAI tool-calling adapter."""
+"""Tests for the native tool-calling adapter."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from openai.types.chat import (
 )
 from pydantic import BaseModel
 
-from llm_tools.llm_adapters import OpenAIToolCallingAdapter
+from llm_tools.llm_adapters import NativeToolCallingAdapter
 from llm_tools.tool_api import ToolSpec
 
 
@@ -21,8 +21,8 @@ class ReadFileInput(BaseModel):
     path: str
 
 
-def test_openai_adapter_exports_tool_schemas() -> None:
-    adapter = OpenAIToolCallingAdapter()
+def test_native_adapter_exports_canonical_tool_descriptions() -> None:
+    adapter = NativeToolCallingAdapter()
 
     tools = adapter.export_tool_descriptions(
         specs=[
@@ -43,8 +43,8 @@ def test_openai_adapter_exports_tool_schemas() -> None:
     assert tools[0]["function"]["parameters"]["type"] == "object"
 
 
-def test_openai_adapter_parses_sdk_tool_call_message() -> None:
-    adapter = OpenAIToolCallingAdapter()
+def test_native_adapter_parses_sdk_tool_call_message() -> None:
+    adapter = NativeToolCallingAdapter()
     payload = ChatCompletionMessage(
         role="assistant",
         content=None,
@@ -102,8 +102,8 @@ def test_openai_adapter_parses_sdk_tool_call_message() -> None:
         },
     ],
 )
-def test_openai_adapter_parses_raw_tool_call_payloads(payload: object) -> None:
-    adapter = OpenAIToolCallingAdapter()
+def test_native_adapter_parses_raw_tool_call_payloads(payload: object) -> None:
+    adapter = NativeToolCallingAdapter()
 
     response = adapter.parse_model_output(payload)
 
@@ -111,8 +111,8 @@ def test_openai_adapter_parses_raw_tool_call_payloads(payload: object) -> None:
     assert response.invocations[0].tool_name == "read_file"
 
 
-def test_openai_adapter_parses_final_response_text_message() -> None:
-    adapter = OpenAIToolCallingAdapter()
+def test_native_adapter_parses_final_response_text_message() -> None:
+    adapter = NativeToolCallingAdapter()
     payload = ChatCompletionMessage(
         role="assistant",
         content="Here is the answer.",
@@ -125,8 +125,8 @@ def test_openai_adapter_parses_final_response_text_message() -> None:
     assert response.final_response == "Here is the answer."
 
 
-def test_openai_adapter_parses_final_response_text_parts() -> None:
-    adapter = OpenAIToolCallingAdapter()
+def test_native_adapter_parses_final_response_text_parts() -> None:
+    adapter = NativeToolCallingAdapter()
 
     response = adapter.parse_model_output(
         {
@@ -158,8 +158,8 @@ def test_openai_adapter_parses_final_response_text_parts() -> None:
         {"content": [{"type": "refusal", "text": "Nope"}]},
     ],
 )
-def test_openai_adapter_rejects_invalid_payloads(payload: dict[str, Any]) -> None:
-    adapter = OpenAIToolCallingAdapter()
+def test_native_adapter_rejects_invalid_payloads(payload: dict[str, Any]) -> None:
+    adapter = NativeToolCallingAdapter()
 
     with pytest.raises(ValueError):
         adapter.parse_model_output(payload)
@@ -178,17 +178,17 @@ def test_openai_adapter_rejects_invalid_payloads(payload: dict[str, Any]) -> Non
         {"content": None},
     ],
 )
-def test_openai_adapter_rejects_additional_invalid_payload_shapes(
+def test_native_adapter_rejects_additional_invalid_payload_shapes(
     payload: object,
 ) -> None:
-    adapter = OpenAIToolCallingAdapter()
+    adapter = NativeToolCallingAdapter()
 
     with pytest.raises(ValueError):
         adapter.parse_model_output(payload)
 
 
-def test_openai_adapter_accepts_text_value_dict_parts() -> None:
-    adapter = OpenAIToolCallingAdapter()
+def test_native_adapter_accepts_text_value_dict_parts() -> None:
+    adapter = NativeToolCallingAdapter()
 
     response = adapter.parse_model_output(
         {
@@ -202,8 +202,8 @@ def test_openai_adapter_accepts_text_value_dict_parts() -> None:
     assert response.final_response == "Hello world"
 
 
-def test_openai_adapter_accepts_objects_with_model_dump() -> None:
-    adapter = OpenAIToolCallingAdapter()
+def test_native_adapter_accepts_objects_with_model_dump() -> None:
+    adapter = NativeToolCallingAdapter()
 
     class FakeModelDump:
         def model_dump(self, *, mode: str, exclude_none: bool) -> dict[str, object]:

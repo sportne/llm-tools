@@ -155,7 +155,7 @@ class ReadFileTool(Tool[ReadFileInput, ReadFileOutput]):
             content_format = "markdown"
             cached = _read_cached_conversion(resolved)
             if cached is None:
-                from markitdown import MarkItDown  # type: ignore[import-not-found]
+                from markitdown import MarkItDown
 
                 content = MarkItDown().convert(str(resolved)).text_content
                 cached_path = _write_cached_conversion(resolved, content)

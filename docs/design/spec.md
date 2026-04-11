@@ -9,7 +9,7 @@ The system is designed as a foundational substrate—not an agent framework. It 
 Instead, it provides a strongly-typed, Pydantic-based tool system that can be used by:
 
 - LLM tool-calling systems
-- structured response pipelines
+- structured output pipelines
 - prompt-driven integrations
 - CLI or application logic
 - workflow engines
@@ -174,11 +174,11 @@ Adapters translate between external LLM interaction modes and the internal tool 
 Three modes must be supported:
 
 #### 4.9.1 Native Tool Calling Adapter
-- Uses provider-native tool calling (e.g., OpenAI)
-- Converts ToolSpec → provider schema
+- Uses a provider's native tool-calling surface when available
+- Converts `ToolSpec` into a native tool schema
 - Parses provider output into either tool invocations or a final assistant response
 
-#### 4.9.2 Structured Response Adapter
+#### 4.9.2 Structured Output Adapter
 - Model emits structured JSON matching a defined schema
 - No native tool calling required
 - Output is parsed into either tool invocations or a final assistant response
@@ -196,6 +196,17 @@ All adapters must produce a canonical model-turn outcome that contains either:
 `workflow_api` may consume that model-turn outcome and execute any returned
 tool invocations sequentially, but this remains a thin one-turn bridge rather
 than a planning or agent loop.
+
+### 4.9.4 LLM Providers
+
+Provider clients are a separate layer above adapters.
+
+- They use the OpenAI Python SDK and OpenAI-compatible request semantics.
+- They can target multiple actual providers only when those providers expose an
+  OpenAI-compatible endpoint.
+- They do not execute tools directly.
+- They call a model, extract the raw response payload, and hand it to an
+  adapter for parsing.
 
 ---
 
@@ -303,7 +314,7 @@ No manifest-based loading in v0.1.
 The system must:
 
 * export tool schemas for LLMs
-* support structured response fallback
+* support structured output fallback
 * support prompt-based fallback
 
 ---
@@ -449,9 +460,12 @@ project/
         decorators.py
       llm_adapters/
         base.py
-        openai_tool_calling.py
-        structured_responses.py
+        native_tool_calling.py
+        structured_output.py
         prompt_schema.py
+      llm_providers/
+        __init__.py
+        openai_compatible.py
       tools/
         filesystem/
         git/
@@ -487,9 +501,15 @@ runtime behavior described in this spec begin in later implementation steps.
 
 ### Milestone 3: LLM adapters
 
-* OpenAI tool calling
-* structured response adapter
+* native tool-calling adapter
+* structured output adapter
 * prompt schema adapter
+
+### Milestone 3.5: LLM providers
+
+* OpenAI-compatible provider layer
+* provider-managed request construction
+* provider response extraction before adapter parsing
 
 ### Milestone 4: Built-in tools
 

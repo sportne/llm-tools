@@ -1,14 +1,14 @@
-"""Tests for the structured-response adapter."""
+"""Tests for the structured-output adapter."""
 
 from __future__ import annotations
 
 import pytest
 
-from llm_tools.llm_adapters import StructuredResponseAdapter
+from llm_tools.llm_adapters import StructuredOutputAdapter
 
 
-def test_structured_response_adapter_exports_canonical_schema() -> None:
-    adapter = StructuredResponseAdapter()
+def test_structured_output_adapter_exports_canonical_schema() -> None:
+    adapter = StructuredOutputAdapter()
 
     schema = adapter.export_tool_descriptions(specs=[], input_models={})
 
@@ -16,10 +16,10 @@ def test_structured_response_adapter_exports_canonical_schema() -> None:
     assert "final_response" in schema["properties"]
 
 
-def test_structured_response_adapter_restricts_tool_names_in_schema() -> None:
+def test_structured_output_adapter_restricts_tool_names_in_schema() -> None:
     from llm_tools.tool_api import ToolSpec
 
-    adapter = StructuredResponseAdapter()
+    adapter = StructuredOutputAdapter()
     schema = adapter.export_tool_descriptions(
         specs=[ToolSpec(name="read_file", description="Read a file.")],
         input_models={},
@@ -42,10 +42,10 @@ def test_structured_response_adapter_restricts_tool_names_in_schema() -> None:
         ([{"tool_name": "read_file", "arguments": {"path": "README.md"}}], "read_file"),
     ],
 )
-def test_structured_response_adapter_parses_action_payloads(
+def test_structured_output_adapter_parses_action_payloads(
     payload: object, tool_name: str
 ) -> None:
-    adapter = StructuredResponseAdapter()
+    adapter = StructuredOutputAdapter()
 
     response = adapter.parse_model_output(payload)
 
@@ -53,8 +53,8 @@ def test_structured_response_adapter_parses_action_payloads(
     assert response.invocations[0].tool_name == tool_name
 
 
-def test_structured_response_adapter_parses_final_response_payload() -> None:
-    adapter = StructuredResponseAdapter()
+def test_structured_output_adapter_parses_final_response_payload() -> None:
+    adapter = StructuredOutputAdapter()
 
     response = adapter.parse_model_output({"final_response": "Done."})
 
@@ -72,8 +72,8 @@ def test_structured_response_adapter_parses_final_response_payload() -> None:
         123,
     ],
 )
-def test_structured_response_adapter_rejects_invalid_payloads(payload: object) -> None:
-    adapter = StructuredResponseAdapter()
+def test_structured_output_adapter_rejects_invalid_payloads(payload: object) -> None:
+    adapter = StructuredOutputAdapter()
 
     with pytest.raises((ValueError, Exception)):
         adapter.parse_model_output(payload)

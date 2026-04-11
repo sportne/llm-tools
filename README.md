@@ -14,7 +14,8 @@ The core v0.1 foundation is implemented:
 - canonical tool and runtime models
 - registry, runtime, policy, and observability
 - built-in filesystem, git, Atlassian, and text tools
-- OpenAI, structured-response, and prompt-schema adapters
+- native-tool-calling, structured-output, and prompt-schema adapters
+- an OpenAI-compatible provider layer built on the OpenAI Python SDK
 - a thin `workflow_api` bridge for one parsed model turn
 
 ## Core Concepts
@@ -24,6 +25,7 @@ The core v0.1 foundation is implemented:
 - `ToolSpec` plus `input_model` and `output_model` are canonical
 - `ToolRuntime` executes one invocation with validation and normalization
 - adapters expose tools and parse model output into canonical turn results
+- providers handle model requests through OpenAI-compatible endpoints
 - `WorkflowExecutor` bridges one parsed model turn into sequential tool
   execution when needed
 
@@ -35,6 +37,7 @@ The library uses a `src` layout rooted at `src/llm_tools/`.
 src/llm_tools/
   tool_api/
   llm_adapters/
+  llm_providers/
   tools/
   workflow_api/
 ```

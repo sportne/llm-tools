@@ -6,18 +6,21 @@ This document defines the architecture for `llm-tools`, a low-level Python libra
 
 The project is intentionally **not** an agent framework. It does not treat planning, memory, prompt orchestration, or workflows as foundational concerns. Instead, it provides a strict, typed substrate for tools that higher-level systems may build on top of later.
 
-The first implemented subsystem is `tool_api`. Additional layers such as `llm_adapters`, built-in `tools`, and later `workflow_api` are built on top of that substrate.
+The first implemented subsystem is `tool_api`. Additional layers such as
+`llm_adapters`, `llm_providers`, built-in `tools`, and later `workflow_api` are
+built on top of that substrate.
 
 ---
 
 ## 2. Architectural overview
 
-The system is organized into four primary layers:
+The system is organized into five primary layers:
 
 1. `tool_api`
 2. `llm_adapters`
-3. `tools`
-4. `workflow_api` (deferred / optional early layer)
+3. `llm_providers`
+4. `tools`
+5. `workflow_api`
 
 Relationship:
 
@@ -26,6 +29,9 @@ External callers
   ├─ Python application code
   ├─ CLI / service layers
   └─ LLM integrations
+          │
+          ▼
+    llm_providers
           │
           ▼
     llm_adapters
@@ -55,13 +61,19 @@ Defines the canonical internal model for:
 
 #### `llm_adapters`
 
-Translate between model-facing interaction modes and the canonical internal invocation model.
+Translate between model-facing interaction modes and the canonical internal
+invocation model.
 
 Supported modes:
 
 * native tool calling
-* structured response action selection
+* structured output action selection
 * prompt-schema action selection
+
+#### `llm_providers`
+
+Own model-call setup and response extraction using the OpenAI Python SDK
+against OpenAI-compatible endpoints.
 
 #### `tools`
 
@@ -76,10 +88,10 @@ Examples:
 
 #### `workflow_api`
 
-A later composition layer for explicit multi-step tool execution. It is intentionally not part of the base tool abstraction.
-In v0.1 it may provide a thin one-turn bridge that takes a parsed adapter
-result and executes the returned invocations sequentially without any replanning
-or follow-up model calls.
+A composition layer for explicit multi-step tool execution. It is intentionally
+not part of the base tool abstraction. In v0.1 it provides a thin one-turn
+bridge that takes a parsed adapter result and executes the returned invocations
+sequentially without any replanning or follow-up model calls.
 
 ---
 
@@ -141,7 +153,8 @@ Strictness is preferred early because loosening later is easier than tightening 
 
 ### 3.7 Provider-facing schemas are derived artifacts
 
-OpenAI tool definitions, structured output schemas, and prompt-rendered schemas are generated from canonical internal models. They are not the source of truth.
+Native tool definitions, structured output schemas, and prompt-rendered schemas
+are generated from canonical internal models. They are not the source of truth.
 
 ---
 
@@ -254,9 +267,12 @@ project/
       llm_adapters/
         __init__.py
         base.py
-        openai_tool_calling.py
-        structured_responses.py
+        native_tool_calling.py
+        structured_output.py
         prompt_schema.py
+      llm_providers/
+        __init__.py
+        openai_compatible.py
       tools/
         __init__.py
         filesystem/
@@ -295,6 +311,7 @@ interfaces and behavior described below begin in later implementation steps.
 
 * `tool_api` is the foundational subsystem, not a generic “core.”
 * `llm_adapters` is explicitly layered above `tool_api`.
+* `llm_providers` is layered above `llm_adapters`.
 * `tools` contains concrete implementations, not framework internals.
 * `workflow_api` is separated to avoid contaminating the base abstraction with orchestration concerns.
 
@@ -411,8 +428,8 @@ class ToolInvocationRequest(BaseModel):
 
 This is the normalization point across:
 
-* OpenAI tool calling
-* structured response mode
+* native tool-calling mode
+* structured output mode
 * prompt-schema mode
 * direct Python callers
 
@@ -861,7 +878,7 @@ A simple early implementation may:
 
 ---
 
-## 13. LLM adapter architecture
+## 13. LLM adapter and provider architecture
 
 ## 13.1 Design goal
 
@@ -913,11 +930,11 @@ class LLMAdapter(ABC):
 
 ---
 
-## 13.4 OpenAI tool-calling adapter
+## 13.4 Native tool-calling adapter
 
 Responsibilities:
 
-* export OpenAI-compatible tool schemas
+* export canonical native tool schemas
 * parse returned model payloads
 * normalize them into either tool invocations or a final assistant response
 
@@ -925,7 +942,7 @@ This adapter uses canonical `ToolSpec` and `input_model` information as source m
 
 ---
 
-## 13.5 Structured response adapter
+## 13.5 Structured output adapter
 
 Responsibilities:
 
@@ -960,6 +977,25 @@ Responsibilities:
 * support repair/retry behavior where useful
 
 This is the least reliable mode and is treated as fallback compatibility mode.
+
+---
+
+## 13.7 Provider layer
+
+Provider clients sit above adapters and own transport concerns.
+
+Responsibilities:
+
+* call models through the OpenAI Python SDK
+* target OpenAI-compatible endpoints via configurable `base_url`
+* construct requests from adapter-exported artifacts
+* extract raw response payloads and hand them back to adapters for parsing
+
+Provider clients must not:
+
+* execute tools directly
+* reimplement runtime validation or policy
+* depend on vendor-native SDKs in v0.1
 
 ---
 
@@ -1034,6 +1070,7 @@ Required dependency direction:
 ```text
 tool_api        ← foundational
 llm_adapters    ← depends on tool_api
+llm_providers   ← depends on llm_adapters
 tools           ← depends on tool_api
 workflow_api    ← depends on tool_api
 applications    ← compose everything
@@ -1042,8 +1079,10 @@ applications    ← compose everything
 Prohibited directions:
 
 * `tool_api` must not depend on `llm_adapters`
+* `tool_api` must not depend on `llm_providers`
 * `tool_api` must not depend on `tools`
 * `tools` should not depend on `llm_adapters`
+* `tools` should not depend on `llm_providers`
 * `tools` should not depend on `workflow_api`
 
 ---
@@ -1070,8 +1109,8 @@ Testing should happen at several levels.
 
 ### Adapter tests
 
-* OpenAI schema generation
-* structured response parsing
+* native tool schema generation
+* structured output parsing
 * prompt-schema parsing and repair behavior
 
 ### Integration tests
@@ -1141,9 +1180,17 @@ Implement a small starter set:
 
 Implement:
 
-* OpenAI tool schema export
-* structured response adapter
+* native tool schema export
+* structured output adapter
 * prompt-schema adapter
+
+### Phase 5.5: Providers
+
+Implement:
+
+* OpenAI-compatible provider client
+* provider-managed request construction
+* response extraction before adapter parsing
 
 ### Phase 6: Polish
 

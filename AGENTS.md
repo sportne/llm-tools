@@ -9,20 +9,6 @@ The project is intentionally not an agent framework. Avoid introducing planning,
 memory, workflow orchestration, or prompt-management concepts into the base tool
 abstraction.
 
-## Step 0 Boundaries
-
-Step 0 is limited to repository foundation work:
-
-- package layout and scaffolding
-- packaging metadata
-- formatter, linter, type checker, test runner, and coverage setup
-- CI workflow setup
-- documentation alignment
-
-Do not implement canonical models, runtime logic, registry behavior, adapters,
-or built-in tools in Step 0 unless a tiny placeholder is required for package
-importability.
-
 ## Package Structure
 
 Use the `src` layout rooted at `src/llm_tools/`.
@@ -61,8 +47,6 @@ make package
 
 - Keep runtime dependencies minimal.
 - Prefer simplicity and explicitness over convenience abstractions.
-- Do not add LLM provider packages during Step 0 unless the docs and task scope
-  explicitly require them.
 
 ## Documentation Guidance
 

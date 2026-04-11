@@ -29,7 +29,7 @@ def _build_jira_client(context: ToolContext) -> Any:
     username = _get_required_env(context, "JIRA_USERNAME")
     api_token = _get_required_env(context, "JIRA_API_TOKEN")
 
-    from atlassian import Jira  # type: ignore[import-not-found]
+    from atlassian import Jira
 
     return Jira(
         url=base_url,

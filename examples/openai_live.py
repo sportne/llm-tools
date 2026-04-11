@@ -1,4 +1,4 @@
-"""Live OpenAI API example using the OpenAI Python SDK."""
+"""Live Ollama example using the OpenAI-compatible provider layer."""
 
 from __future__ import annotations
 
@@ -6,26 +6,27 @@ import os
 import sys
 from tempfile import TemporaryDirectory
 
-from openai import OpenAI
-
-from llm_tools.llm_adapters import OpenAIToolCallingAdapter
+from llm_tools.llm_adapters import NativeToolCallingAdapter, StructuredOutputAdapter
+from llm_tools.llm_providers import OpenAICompatibleProvider
 from llm_tools.tool_api import SideEffectClass, ToolContext, ToolPolicy, ToolRegistry
 from llm_tools.tools import register_filesystem_tools
 from llm_tools.workflow_api import WorkflowExecutor
 
 
 def main() -> int:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        print("OPENAI_API_KEY is required to run examples/openai_live.py.", file=sys.stderr)
-        return 1
+    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    model = os.getenv("OLLAMA_MODEL", "gemma4")
 
-    model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-    client = OpenAI(api_key=api_key)
+    provider = OpenAICompatibleProvider.for_ollama(
+        model=model,
+        base_url=base_url,
+        api_key=os.getenv("OLLAMA_API_KEY", "ollama"),
+    )
 
     registry = ToolRegistry()
     register_filesystem_tools(registry)
-    adapter = OpenAIToolCallingAdapter()
+    native_adapter = NativeToolCallingAdapter()
+    setup_adapter = StructuredOutputAdapter()
     executor = WorkflowExecutor(
         registry,
         policy=ToolPolicy(
@@ -39,15 +40,15 @@ def main() -> int:
 
     with TemporaryDirectory() as workspace:
         setup = executor.execute_model_output(
-            adapter,
+            setup_adapter,
             {
-                "tool_calls": [
+                "actions": [
                     {
-                        "id": "setup_call",
-                        "type": "function",
-                        "function": {
-                            "name": "write_file",
-                            "arguments": '{"path":"notes/demo.txt","content":"hello from llm-tools","create_parents":true}',
+                        "tool_name": "write_file",
+                        "arguments": {
+                            "path": "notes/demo.txt",
+                            "content": "hello from llm-tools",
+                            "create_parents": True,
                         },
                     }
                 ]
@@ -56,20 +57,36 @@ def main() -> int:
         )
         print("Setup turn:", setup.model_dump(mode="json"))
 
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": "Read notes/demo.txt and either call a tool or answer directly.",
-                }
-            ],
-            tools=executor.export_tools(adapter),
-        )
+        try:
+            parsed = provider.run_native_tool_calling(
+                adapter=native_adapter,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": (
+                            "Read notes/demo.txt and either call a tool or answer "
+                            "directly."
+                        ),
+                    }
+                ],
+                registry=registry,
+            )
+        except Exception as exc:
+            print(
+                (
+                    "Failed to reach Ollama at "
+                    f"{base_url!r} with model {model!r}: {exc}"
+                ),
+                file=sys.stderr,
+            )
+            print(
+                "Make sure Ollama is running and the requested model is available.",
+                file=sys.stderr,
+            )
+            return 1
 
-        turn_result = executor.execute_model_output(
-            adapter,
-            response.choices[0].message,
+        turn_result = executor.execute_parsed_response(
+            parsed,
             ToolContext(invocation_id="live-turn", workspace=workspace),
         )
         print("Model turn:", turn_result.model_dump(mode="json"))

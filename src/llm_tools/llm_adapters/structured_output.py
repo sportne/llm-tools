@@ -1,4 +1,4 @@
-"""Structured-response adapter helpers and parser."""
+"""Structured-output adapter helpers and parser."""
 
 from __future__ import annotations
 
@@ -18,14 +18,14 @@ class StructuredToolAction(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
 
 
-class StructuredModelEnvelope(BaseModel):
-    """Canonical structured-response envelope for one model turn."""
+class StructuredOutputEnvelope(BaseModel):
+    """Canonical structured-output envelope for one model turn."""
 
     actions: list[StructuredToolAction] = Field(default_factory=list)
     final_response: str | None = None
 
     @model_validator(mode="after")
-    def validate_mode(self) -> StructuredModelEnvelope:
+    def validate_mode(self) -> StructuredOutputEnvelope:
         """Require either actions or a final response."""
         has_actions = len(self.actions) > 0
         final_response = self.final_response
@@ -36,16 +36,17 @@ class StructuredModelEnvelope(BaseModel):
 
         if has_actions == has_final_response:
             raise ValueError(
-                "StructuredModelEnvelope must contain either actions or final_response."
+                "StructuredOutputEnvelope must contain either actions or "
+                "final_response."
             )
 
         return self
 
 
-def _build_structured_response_schema(tool_names: list[str]) -> dict[str, Any]:
-    """Create the canonical envelope schema for structured responses."""
+def build_structured_output_schema(tool_names: list[str]) -> dict[str, Any]:
+    """Create the canonical structured-output schema."""
     return {
-        "title": "StructuredModelEnvelope",
+        "title": "StructuredOutputEnvelope",
         "type": "object",
         "additionalProperties": False,
         "properties": {
@@ -78,22 +79,20 @@ def _build_structured_response_schema(tool_names: list[str]) -> dict[str, Any]:
     }
 
 
-def _normalize_structured_payload(payload: object) -> dict[str, Any]:
+def normalize_structured_output_payload(payload: object) -> dict[str, Any]:
     """Normalize convenience payload shapes into the canonical envelope."""
     normalized = payload
     if isinstance(normalized, str):
         try:
             normalized = json.loads(normalized)
         except json.JSONDecodeError as exc:
-            raise ValueError("Structured response payload is not valid JSON.") from exc
+            raise ValueError("Structured output payload is not valid JSON.") from exc
 
     if isinstance(normalized, list):
         return {"actions": normalized, "final_response": None}
 
     if not isinstance(normalized, dict):
-        raise ValueError(
-            "Structured response payload must decode to an object or list."
-        )
+        raise ValueError("Structured output payload must decode to an object or list.")
 
     if "actions" in normalized or "final_response" in normalized:
         return dict(normalized)
@@ -101,10 +100,10 @@ def _normalize_structured_payload(payload: object) -> dict[str, Any]:
     if "tool_name" in normalized:
         return {"actions": [normalized], "final_response": None}
 
-    raise ValueError("Structured response payload does not match a supported shape.")
+    raise ValueError("Structured output payload does not match a supported shape.")
 
 
-class StructuredResponseAdapter(LLMAdapter):
+class StructuredOutputAdapter(LLMAdapter):
     """Adapter for structured JSON model output."""
 
     def export_tool_descriptions(
@@ -112,15 +111,15 @@ class StructuredResponseAdapter(LLMAdapter):
         specs: list[ToolSpec],
         input_models: dict[str, type[BaseModel]],
     ) -> dict[str, Any]:
-        """Return the canonical structured-response schema."""
+        """Return the canonical structured-output schema."""
         del input_models
         tool_names = [spec.name for spec in specs]
-        return _build_structured_response_schema(tool_names)
+        return build_structured_output_schema(tool_names)
 
     def parse_model_output(self, payload: object) -> ParsedModelResponse:
         """Parse structured payloads into a canonical model-turn outcome."""
-        normalized = _normalize_structured_payload(payload)
-        envelope = StructuredModelEnvelope.model_validate(normalized)
+        normalized = normalize_structured_output_payload(payload)
+        envelope = StructuredOutputEnvelope.model_validate(normalized)
 
         return ParsedModelResponse(
             invocations=[

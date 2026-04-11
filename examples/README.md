@@ -12,18 +12,21 @@ These examples do not make network calls:
 - `builtins_direct.py`
   Registers built-in tools and executes them directly.
 - `openai_wiring.py`
-  Uses the OpenAI adapter shape without making an API call.
+  Uses the native-tool-calling adapter plus the provider layer without making a
+  live API call.
 - `structured_response.py`
-  Parses structured JSON output and executes it through `WorkflowExecutor`.
+  Uses the structured-output adapter through the provider layer and executes the
+  parsed result through `WorkflowExecutor`.
 - `prompt_schema.py`
-  Renders prompt instructions, parses prompt-style JSON, and executes it through
-  `WorkflowExecutor`.
+  Uses the prompt-schema adapter through the provider layer and executes the
+  parsed result through `WorkflowExecutor`.
 
-## Live OpenAI Example
+## Live Ollama Example
 
 - `openai_live.py`
-  Makes a real OpenAI API call using `OPENAI_API_KEY`.
+  Uses the OpenAI-compatible provider layer against Ollama's local
+  OpenAI-compatible endpoint.
+  It defaults to `http://localhost:11434/v1` and model `gemma4`.
 
 This example is intentionally not run in CI. It should fail with a clear
-message if `OPENAI_API_KEY` is not set.
-
+message if Ollama is not reachable.

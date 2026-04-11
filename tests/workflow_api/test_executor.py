@@ -11,10 +11,10 @@ from pydantic import ValidationError
 
 import llm_tools.tools.git.tools as git_tools
 from llm_tools.llm_adapters import (
-    OpenAIToolCallingAdapter,
+    NativeToolCallingAdapter,
     ParsedModelResponse,
     PromptSchemaAdapter,
-    StructuredResponseAdapter,
+    StructuredOutputAdapter,
 )
 from llm_tools.tool_api import (
     ErrorCode,
@@ -92,8 +92,8 @@ def test_workflow_turn_result_rejects_mismatched_invocation_and_result_counts() 
 @pytest.mark.parametrize(
     ("adapter", "expected_type"),
     [
-        (OpenAIToolCallingAdapter(), list),
-        (StructuredResponseAdapter(), dict),
+        (NativeToolCallingAdapter(), list),
+        (StructuredOutputAdapter(), dict),
         (PromptSchemaAdapter(), str),
     ],
 )
@@ -159,7 +159,7 @@ def test_workflow_executor_executes_single_parsed_invocation(tmp_path: str) -> N
     context = ToolContext(invocation_id="turn-2", workspace=str(tmp_path))
 
     write_result = executor.execute_model_output(
-        StructuredResponseAdapter(),
+        StructuredOutputAdapter(),
         {
             "actions": [
                 {
@@ -189,7 +189,7 @@ def test_workflow_executor_executes_multiple_invocations_sequentially(
     executor = _executor(registry, allow_write=True)
 
     setup_result = executor.execute_model_output(
-        StructuredResponseAdapter(),
+        StructuredOutputAdapter(),
         {
             "actions": [
                 {
@@ -207,7 +207,7 @@ def test_workflow_executor_executes_multiple_invocations_sequentially(
     assert setup_result.tool_results[0].ok is True
 
     result = executor.execute_model_output(
-        StructuredResponseAdapter(),
+        StructuredOutputAdapter(),
         {
             "actions": [
                 {"tool_name": "read_file", "arguments": {"path": "docs/note.txt"}},
@@ -241,13 +241,13 @@ def test_workflow_executor_executes_multiple_invocations_sequentially(
     assert "base-log" not in result.tool_results[1].logs
 
 
-def test_workflow_executor_executes_openai_adapter_tool_path(tmp_path: str) -> None:
+def test_workflow_executor_executes_native_tool_calling_path(tmp_path: str) -> None:
     registry = ToolRegistry()
     register_filesystem_tools(registry)
     executor = _executor(registry, allow_write=True)
 
     setup = executor.execute_model_output(
-        StructuredResponseAdapter(),
+        StructuredOutputAdapter(),
         {
             "actions": [
                 {
@@ -265,7 +265,7 @@ def test_workflow_executor_executes_openai_adapter_tool_path(tmp_path: str) -> N
     assert setup.tool_results[0].ok is True
 
     result = executor.execute_model_output(
-        OpenAIToolCallingAdapter(),
+        NativeToolCallingAdapter(),
         {
             "tool_calls": [
                 {
@@ -285,7 +285,7 @@ def test_workflow_executor_executes_openai_adapter_tool_path(tmp_path: str) -> N
     assert result.tool_results[0].output["content"] == "hello openai"
 
 
-def test_workflow_executor_executes_openai_adapter_final_response_path(
+def test_workflow_executor_executes_native_tool_calling_final_response_path(
     tmp_path: str,
 ) -> None:
     registry = ToolRegistry()
@@ -293,7 +293,7 @@ def test_workflow_executor_executes_openai_adapter_final_response_path(
     executor = _executor(registry)
 
     result = executor.execute_model_output(
-        OpenAIToolCallingAdapter(),
+        NativeToolCallingAdapter(),
         {"content": "No tool needed."},
         ToolContext(invocation_id="turn-5", workspace=str(tmp_path)),
     )
@@ -308,7 +308,7 @@ def test_workflow_executor_executes_prompt_schema_paths(tmp_path: str) -> None:
     executor = _executor(registry, allow_write=True)
 
     setup = executor.execute_model_output(
-        StructuredResponseAdapter(),
+        StructuredOutputAdapter(),
         {
             "actions": [
                 {
@@ -348,7 +348,7 @@ def test_workflow_executor_normalizes_unknown_tool_failure(tmp_path: str) -> Non
     executor = _executor(registry)
 
     result = executor.execute_model_output(
-        StructuredResponseAdapter(),
+        StructuredOutputAdapter(),
         {"actions": [{"tool_name": "missing_tool", "arguments": {}}]},
         ToolContext(invocation_id="turn-8", workspace=str(tmp_path)),
     )
@@ -363,7 +363,7 @@ def test_workflow_executor_normalizes_policy_denied_failure(tmp_path: str) -> No
     executor = _executor(registry)
 
     result = executor.execute_model_output(
-        StructuredResponseAdapter(),
+        StructuredOutputAdapter(),
         {
             "actions": [
                 {
@@ -389,7 +389,7 @@ def test_workflow_executor_normalizes_input_validation_failure(tmp_path: str) ->
     executor = _executor(registry)
 
     result = executor.execute_model_output(
-        StructuredResponseAdapter(),
+        StructuredOutputAdapter(),
         {
             "actions": [
                 {
@@ -464,12 +464,12 @@ def test_workflow_executor_executes_git_and_jira_paths(
     executor = _executor(registry)
 
     git_result = executor.execute_model_output(
-        StructuredResponseAdapter(),
+        StructuredOutputAdapter(),
         {"actions": [{"tool_name": "run_git_status", "arguments": {"path": "."}}]},
         ToolContext(invocation_id="turn-12", workspace=str(tmp_path)),
     )
     jira_result = executor.execute_model_output(
-        StructuredResponseAdapter(),
+        StructuredOutputAdapter(),
         {
             "actions": [
                 {"tool_name": "search_jira", "arguments": {"jql": "project = DEMO"}}

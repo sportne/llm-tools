@@ -1,27 +1,26 @@
-"""OpenAI tool-calling adapter built around the OpenAI Python SDK shapes."""
+"""Provider-agnostic native tool-calling adapter."""
 
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from openai.types.chat import ChatCompletionToolParam
 from pydantic import BaseModel
 
 from llm_tools.llm_adapters.base import LLMAdapter, ParsedModelResponse
 from llm_tools.tool_api import ToolInvocationRequest, ToolSpec
 
 
-class OpenAIToolCallingAdapter(LLMAdapter):
-    """Export and parse OpenAI chat-completions tool-calling payloads."""
+class NativeToolCallingAdapter(LLMAdapter):
+    """Translate native tool definitions and tool-call payloads."""
 
     def export_tool_descriptions(
         self,
         specs: list[ToolSpec],
         input_models: dict[str, type[BaseModel]],
-    ) -> list[ChatCompletionToolParam]:
-        """Return OpenAI SDK-compatible tool definitions."""
-        tools: list[ChatCompletionToolParam] = []
+    ) -> list[dict[str, Any]]:
+        """Return canonical native tool descriptions."""
+        tools: list[dict[str, Any]] = []
         for spec in specs:
             input_model = input_models[spec.name]
             tools.append(
@@ -37,7 +36,7 @@ class OpenAIToolCallingAdapter(LLMAdapter):
         return tools
 
     def parse_model_output(self, payload: object) -> ParsedModelResponse:
-        """Parse OpenAI assistant output into invocations or a final reply."""
+        """Parse native tool-calling output into a canonical turn result."""
         normalized = self._normalize_payload(payload)
 
         if isinstance(normalized, list):
@@ -47,7 +46,7 @@ class OpenAIToolCallingAdapter(LLMAdapter):
 
         if not isinstance(normalized, dict):
             raise ValueError(
-                "OpenAI payload must normalize to an object or tool-call list."
+                "Native tool-calling payload must normalize to an object or list."
             )
 
         tool_calls = normalized.get("tool_calls")
@@ -69,13 +68,13 @@ class OpenAIToolCallingAdapter(LLMAdapter):
             normalized
         ):
             raise ValueError(
-                "OpenAI tool call payload is missing a function definition."
+                "Native tool call payload is missing a function definition."
             )
 
         function_payload = normalized["function"]
         function_name = function_payload.get("name")
         if not isinstance(function_name, str) or function_name.strip() == "":
-            raise ValueError("OpenAI tool call is missing a valid function name.")
+            raise ValueError("Native tool call is missing a valid function name.")
 
         arguments = self._parse_arguments(function_payload.get("arguments"))
         return ToolInvocationRequest(tool_name=function_name, arguments=arguments)
@@ -91,11 +90,11 @@ class OpenAIToolCallingAdapter(LLMAdapter):
                 normalized = json.loads(normalized)
             except json.JSONDecodeError as exc:
                 raise ValueError(
-                    "OpenAI tool-call arguments are not valid JSON."
+                    "Native tool-call arguments are not valid JSON."
                 ) from exc
 
         if not isinstance(normalized, dict):
-            raise ValueError("OpenAI tool-call arguments must decode to an object.")
+            raise ValueError("Native tool-call arguments must decode to an object.")
 
         return normalized
 
@@ -105,7 +104,7 @@ class OpenAIToolCallingAdapter(LLMAdapter):
         if isinstance(content, str):
             final_response = content.strip()
             if final_response == "":
-                raise ValueError("OpenAI assistant response content must not be empty.")
+                raise ValueError("Assistant response content must not be empty.")
             return final_response
 
         if isinstance(content, list):
@@ -113,24 +112,22 @@ class OpenAIToolCallingAdapter(LLMAdapter):
             for item in content:
                 normalized_item = self._normalize_payload(item)
                 if not isinstance(normalized_item, dict):
-                    raise ValueError("OpenAI assistant content parts must be objects.")
+                    raise ValueError("Assistant content parts must be objects.")
                 if normalized_item.get("type") != "text":
-                    raise ValueError(
-                        "OpenAI assistant content parts must be text only."
-                    )
+                    raise ValueError("Assistant content parts must be text only.")
                 text = normalized_item.get("text")
                 if isinstance(text, dict):
                     text = text.get("value")
                 if not isinstance(text, str):
-                    raise ValueError("OpenAI assistant text content must be a string.")
+                    raise ValueError("Assistant text content must be a string.")
                 parts.append(text)
 
             final_response = "".join(parts).strip()
             if final_response == "":
-                raise ValueError("OpenAI assistant response content must not be empty.")
+                raise ValueError("Assistant response content must not be empty.")
             return final_response
 
-        raise ValueError("OpenAI assistant response content must be plain text.")
+        raise ValueError("Assistant response content must be plain text.")
 
     def _normalize_payload(self, payload: object) -> object:
         if isinstance(payload, BaseModel):
