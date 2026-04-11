@@ -23,6 +23,7 @@ dist/
 .pytest_cache/
 coverage.xml
 htmlcov/
+coverage.json
 
 # Type checker and linter caches
 .mypy_cache/

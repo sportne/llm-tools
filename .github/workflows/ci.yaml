@@ -62,8 +62,8 @@ jobs:
       - name: Install project and dev dependencies
         run: make install-dev
 
-      - name: Run coverage report
-        run: make coverage
+      - name: Run CI target with coverage gates
+        run: make ci
 
   package:
     runs-on: ubuntu-latest
