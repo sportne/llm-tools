@@ -101,7 +101,7 @@ class BrokenPolicy(ToolPolicy):
         self,
         tool: Tool[Any, Any],
         context: ToolContext,
-    ):  # type: ignore[override]
+    ) -> Any:
         del tool, context
         raise RuntimeError("policy exploded")
 
