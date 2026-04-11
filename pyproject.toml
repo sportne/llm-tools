@@ -52,8 +52,12 @@ respect-gitignore = true
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["B", "E", "F", "I", "UP", "W"]
+select = ["B", "E", "F", "I", "UP", "W", "C90"]
 ignore = ["E501"]
+
+[tool.ruff.lint.mccabe]
+# Set the maximum cyclomatic complexity threshold (default is 10)
+max-complexity = 10
 
 [tool.ruff.format]
 quote-style = "double"

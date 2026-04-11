@@ -122,36 +122,36 @@ Step 0 note:
 ## 5. Runtime
 
 ### 5.1 Runtime structure
-- [ ] Implement `ToolRuntime`
-- [ ] Implement explicit execution phases:
-  - [ ] resolve tool
-  - [ ] evaluate policy
-  - [ ] validate input
-  - [ ] invoke tool
-  - [ ] validate output
-  - [ ] normalize result
-  - [ ] record execution
+- [x] Implement `ToolRuntime`
+- [x] Implement explicit execution phases:
+  - [x] resolve tool
+  - [x] evaluate policy
+  - [x] validate input
+  - [x] invoke tool
+  - [x] validate output
+  - [x] normalize result
+  - [x] record execution
 
 ### 5.2 Input and output validation
-- [ ] Validate raw arguments into the declared input model before invocation
-- [ ] Enforce strict output validation against the declared output model
-- [ ] Reject wrong output types with normalized errors
+- [x] Validate raw arguments into the declared input model before invocation
+- [x] Enforce strict output validation against the declared output model
+- [x] Reject wrong output types with normalized errors
 
 ### 5.3 Error normalization
-- [ ] Normalize tool-not-found errors
-- [ ] Normalize input validation failures
-- [ ] Normalize policy denials
-- [ ] Normalize tool execution exceptions
-- [ ] Normalize output validation failures
-- [ ] Normalize unexpected runtime failures
+- [x] Normalize tool-not-found errors
+- [x] Normalize input validation failures
+- [x] Normalize policy denials
+- [x] Normalize tool execution exceptions
+- [x] Normalize output validation failures
+- [x] Normalize unexpected runtime failures
 
 ### 5.4 Runtime tests
-- [ ] Test successful execution path
-- [ ] Test invalid input path
-- [ ] Test denied policy path
-- [ ] Test tool exception path
-- [ ] Test invalid output path
-- [ ] Test tool-not-found path
+- [x] Test successful execution path
+- [x] Test invalid input path
+- [x] Test denied policy path
+- [x] Test tool exception path
+- [x] Test invalid output path
+- [x] Test tool-not-found path
 
 ---
 
