@@ -1,5 +1,17 @@
-"""Foundation package for canonical tool abstractions.
+"""Public tool API surface for canonical models and related types."""
 
-Step 0 scaffolds importable package boundaries only. Functional types and
-runtime behavior are introduced in later implementation steps.
-"""
+from __future__ import annotations
+
+from llm_tools.tool_api.models import (
+    ErrorCode,
+    PolicyVerdict,
+    RiskLevel,
+    SideEffectClass,
+)
+
+__all__ = [
+    "ErrorCode",
+    "PolicyVerdict",
+    "RiskLevel",
+    "SideEffectClass",
+]

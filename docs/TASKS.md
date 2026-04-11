@@ -40,10 +40,10 @@ Step 0 note:
 ## 1. Canonical models
 
 ### 1.1 Enumerations
-- [ ] Implement `SideEffectClass`
-- [ ] Implement `RiskLevel`
-- [ ] Implement `ErrorCode`
-- [ ] Implement any policy-related enums actually needed in v0.1
+- [x] Implement `SideEffectClass`
+- [x] Implement `RiskLevel`
+- [x] Implement `ErrorCode`
+- [x] Implement any policy-related enums actually needed in v0.1
 
 ### 1.2 Tool metadata and runtime models
 - [ ] Implement `ToolSpec`
