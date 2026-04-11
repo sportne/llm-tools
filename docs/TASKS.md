@@ -79,21 +79,21 @@ Step 0 note:
 ## 3. Registry
 
 ### 3.1 Registry implementation
-- [ ] Implement `ToolRegistry.register()`
-- [ ] Implement `ToolRegistry.get()`
-- [ ] Implement `ToolRegistry.list_tools()`
-- [ ] Implement `ToolRegistry.filter_tools()`
+- [x] Implement `ToolRegistry.register()`
+- [x] Implement `ToolRegistry.get()`
+- [x] Implement `ToolRegistry.list_tools()`
+- [x] Implement `ToolRegistry.filter_tools()`
 
 ### 3.2 Registry behavior
-- [ ] Reject duplicate tool names
-- [ ] Define and implement registry-specific errors
-- [ ] Ensure registry returns canonical class-level metadata cleanly
+- [x] Reject duplicate tool names
+- [x] Define and implement registry-specific errors
+- [x] Ensure registry returns canonical class-level metadata cleanly
 
 ### 3.3 Registry tests
-- [ ] Test successful registration
-- [ ] Test duplicate-name rejection
-- [ ] Test lookup behavior
-- [ ] Test filtering behavior
+- [x] Test successful registration
+- [x] Test duplicate-name rejection
+- [x] Test lookup behavior
+- [x] Test filtering behavior
 
 ---
 

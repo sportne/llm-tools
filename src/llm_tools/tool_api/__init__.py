@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from llm_tools.tool_api.errors import (
+    DuplicateToolError,
+    ToolNotRegisteredError,
+    ToolRegistryError,
+)
 from llm_tools.tool_api.models import (
     ErrorCode,
     ExecutionRecord,
@@ -15,9 +20,11 @@ from llm_tools.tool_api.models import (
     ToolResult,
     ToolSpec,
 )
+from llm_tools.tool_api.registry import ToolRegistry
 from llm_tools.tool_api.tool import InputT, OutputT, Tool
 
 __all__ = [
+    "DuplicateToolError",
     "ErrorCode",
     "ExecutionRecord",
     "InputT",
@@ -30,6 +37,9 @@ __all__ = [
     "ToolContext",
     "ToolError",
     "ToolInvocationRequest",
+    "ToolNotRegisteredError",
+    "ToolRegistry",
+    "ToolRegistryError",
     "ToolResult",
     "ToolSpec",
 ]
