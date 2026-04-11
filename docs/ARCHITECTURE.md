@@ -77,6 +77,9 @@ Examples:
 #### `workflow_api`
 
 A later composition layer for explicit multi-step tool execution. It is intentionally not part of the base tool abstraction.
+In v0.1 it may provide a thin one-turn bridge that takes a parsed adapter
+result and executes the returned invocations sequentially without any replanning
+or follow-up model calls.
 
 ---
 

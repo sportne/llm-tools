@@ -34,6 +34,10 @@ class ToolRegistry:
         """Return registered tool specs in registration order."""
         return [tool.spec for tool in self._tools.values()]
 
+    def list_registered_tools(self) -> list[Tool[Any, Any]]:
+        """Return registered tool instances in registration order."""
+        return list(self._tools.values())
+
     def filter_tools(
         self,
         *,

@@ -239,14 +239,14 @@ Step 0 note:
 ## 9. End-to-end integration
 
 ### 9.1 Integration flows
-- [ ] Register built-in tools and execute through runtime
-- [ ] Execute through OpenAI adapter path
-- [ ] Execute through structured response path
-- [ ] Execute through prompt-schema path
+- [x] Register built-in tools and execute through runtime
+- [x] Execute through OpenAI adapter path
+- [x] Execute through structured response path
+- [x] Execute through prompt-schema path
 
 ### 9.2 Integration tests
-- [ ] Add end-to-end tests for each adapter mode
-- [ ] Add tests for common failure modes across adapters
+- [x] Add end-to-end tests for each adapter mode
+- [x] Add tests for common failure modes across adapters
 
 ---
 

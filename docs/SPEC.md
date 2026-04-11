@@ -193,6 +193,10 @@ All adapters must produce a canonical model-turn outcome that contains either:
 - one or more ToolInvocationRequest objects
 - or a final assistant response with no tool use
 
+`workflow_api` may consume that model-turn outcome and execute any returned
+tool invocations sequentially, but this remains a thin one-turn bridge rather
+than a planning or agent loop.
+
 ---
 
 ### 4.10 Tool Exposure vs Invocation
