@@ -100,22 +100,22 @@ Step 0 note:
 ## 4. Policy
 
 ### 4.1 Policy model
-- [ ] Implement `ToolPolicy`
-- [ ] Define default policy behavior for v0.1
+- [x] Implement `ToolPolicy`
+- [x] Define default policy behavior for v0.1
 
 ### 4.2 Policy evaluation
-- [ ] Implement policy evaluation against tool metadata
-- [ ] Support allow/deny by tool name
-- [ ] Support allow/deny by tag
-- [ ] Support allow/deny by side-effect class
-- [ ] Support network/filesystem/subprocess restrictions
-- [ ] Produce `PolicyDecision`
+- [x] Implement policy evaluation against tool metadata
+- [x] Support allow/deny by tool name
+- [x] Support allow/deny by tag
+- [x] Support allow/deny by side-effect class
+- [x] Support network/filesystem/subprocess restrictions
+- [x] Produce `PolicyDecision`
 
 ### 4.3 Policy tests
-- [ ] Test allowed execution cases
-- [ ] Test denied execution cases
-- [ ] Test approval-required cases
-- [ ] Test resource restriction cases
+- [x] Test allowed execution cases
+- [x] Test denied execution cases
+- [x] Test approval-required cases
+- [x] Test resource restriction cases
 
 ---
 

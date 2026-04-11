@@ -20,6 +20,7 @@ from llm_tools.tool_api.models import (
     ToolResult,
     ToolSpec,
 )
+from llm_tools.tool_api.policy import ToolPolicy
 from llm_tools.tool_api.registry import ToolRegistry
 from llm_tools.tool_api.tool import InputT, OutputT, Tool
 
@@ -31,6 +32,7 @@ __all__ = [
     "OutputT",
     "PolicyVerdict",
     "PolicyDecision",
+    "ToolPolicy",
     "RiskLevel",
     "SideEffectClass",
     "Tool",
