@@ -54,7 +54,7 @@ respect-gitignore = true
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["B", "E", "F", "I", "UP", "W", "C90"]
+select = ["B", "E", "F", "I", "UP", "W", "C90", "D", "S", "ASYNC", "SIM", "N"]
 ignore = ["E501"]
 
 [tool.ruff.lint.mccabe]

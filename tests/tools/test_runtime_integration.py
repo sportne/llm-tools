@@ -82,7 +82,13 @@ def test_runtime_executes_filesystem_and_text_builtins(tmp_path: str) -> None:
         "path": "docs/note.txt",
         "resolved_path": str((tmp_path / "docs" / "note.txt").resolve()),
         "content": "hello world",
-        "mode": "text",
+        "content_format": "text",
+        "line_start": 1,
+        "line_end": 1,
+        "total_lines": 1,
+        "truncated": False,
+        "cached_markdown_path": None,
+        "used_cached_conversion": False,
     }
     assert [entry["path"] for entry in list_result.output["entries"]] == [
         "docs",
