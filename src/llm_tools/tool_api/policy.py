@@ -35,6 +35,17 @@ class ToolPolicy(BaseModel):
     allow_network: bool = True
     allow_filesystem: bool = True
     allow_subprocess: bool = True
+    redacted_field_names: set[str] = Field(
+        default_factory=lambda: {
+            "password",
+            "secret",
+            "token",
+            "api_key",
+            "access_token",
+            "refresh_token",
+            "authorization",
+        }
+    )
 
     def evaluate(self, tool: Tool[Any, Any], context: ToolContext) -> PolicyDecision:
         """Evaluate whether a tool is allowed under the current policy."""

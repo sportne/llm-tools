@@ -37,6 +37,8 @@ class EchoTool(Tool[RuntimeInput, RuntimeOutput]):
     output_model = RuntimeOutput
 
     def invoke(self, context: ToolContext, args: RuntimeInput) -> RuntimeOutput:
+        context.logs.append("echo-start")
+        context.artifacts.append("echo.txt")
         return RuntimeOutput(value=f"{context.invocation_id}:{args.value}")
 
 
@@ -78,8 +80,35 @@ class FailingTool(Tool[RuntimeInput, RuntimeOutput]):
     output_model = RuntimeOutput
 
     def invoke(self, context: ToolContext, args: RuntimeInput) -> RuntimeOutput:
-        del context, args
+        del args
+        context.logs.append("about-to-fail")
+        context.artifacts.append("failure.log")
         raise ValueError("boom")
+
+
+class SecretInput(BaseModel):
+    username: str
+    password: str
+    nested: dict[str, Any]
+
+
+class SecretOutput(BaseModel):
+    status: str
+
+
+class SecretLoggingTool(Tool[SecretInput, SecretOutput]):
+    spec = ToolSpec(
+        name="secret_logging",
+        description="Capture sensitive input and emit observability data.",
+        side_effects=SideEffectClass.NONE,
+    )
+    input_model = SecretInput
+    output_model = SecretOutput
+
+    def invoke(self, context: ToolContext, args: SecretInput) -> SecretOutput:
+        context.logs.append("processing-secret-input")
+        context.artifacts.append("secret.json")
+        return SecretOutput(status=args.username)
 
 
 class InvalidOutputTool(Tool[RuntimeInput, RuntimeOutput]):
@@ -128,6 +157,8 @@ def test_runtime_executes_successfully_and_attaches_execution_record() -> None:
     assert result.ok is True
     assert result.output == {"value": "inv-1:hi"}
     assert result.error is None
+    assert result.logs == ["echo-start"]
+    assert result.artifacts == ["echo.txt"]
 
     record = result.metadata["execution_record"]
     assert record["invocation_id"] == "inv-1"
@@ -135,8 +166,15 @@ def test_runtime_executes_successfully_and_attaches_execution_record() -> None:
     assert record["tool_version"] == "0.1.0"
     assert record["request"] == {"tool_name": "echo", "arguments": {"value": "hi"}}
     assert record["validated_input"] == {"value": "hi"}
+    assert record["redacted_input"] == {"value": "hi"}
     assert record["ok"] is True
     assert record["error_code"] is None
+    assert record["duration_ms"] is not None
+    assert record["duration_ms"] >= 0
+    assert record["started_at"].endswith("Z")
+    assert record["ended_at"].endswith("Z")
+    assert record["logs"] == ["echo-start"]
+    assert record["artifacts"] == ["echo.txt"]
 
 
 def test_runtime_accepts_output_that_validates_against_output_model() -> None:
@@ -207,7 +245,11 @@ def test_runtime_normalizes_tool_execution_exceptions() -> None:
     assert result.error.code is ErrorCode.EXECUTION_FAILED
     assert result.error.details["exception_type"] == "ValueError"
     assert result.error.details["exception_message"] == "boom"
+    assert result.logs == ["about-to-fail"]
+    assert result.artifacts == ["failure.log"]
     assert result.metadata["execution_record"]["error_code"] == "execution_failed"
+    assert result.metadata["execution_record"]["logs"] == ["about-to-fail"]
+    assert result.metadata["execution_record"]["artifacts"] == ["failure.log"]
 
 
 def test_runtime_normalizes_invalid_output() -> None:
@@ -259,3 +301,89 @@ def test_runtime_normalizes_unexpected_runtime_failures() -> None:
     assert result.error.details["exception_message"] == "policy exploded"
     assert result.metadata["execution_record"]["tool_name"] == "echo"
     assert result.metadata["execution_record"]["error_code"] == "runtime_error"
+
+
+def test_runtime_records_redacted_input_and_tool_emitted_observability() -> None:
+    runtime = ToolRuntime(_registry(SecretLoggingTool()))
+
+    result = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="secret_logging",
+            arguments={
+                "username": "alice",
+                "password": "super-secret",
+                "nested": {
+                    "api_key": "abc123",
+                    "items": [
+                        {"authorization": "Bearer token"},
+                        {"note": "keep"},
+                    ],
+                },
+            },
+        ),
+        _context(),
+    )
+
+    assert result.ok is True
+    assert result.logs == ["processing-secret-input"]
+    assert result.artifacts == ["secret.json"]
+
+    record = result.metadata["execution_record"]
+    assert record["validated_input"] == {
+        "username": "alice",
+        "password": "super-secret",
+        "nested": {
+            "api_key": "abc123",
+            "items": [
+                {"authorization": "Bearer token"},
+                {"note": "keep"},
+            ],
+        },
+    }
+    assert record["redacted_input"] == {
+        "username": "alice",
+        "password": "[REDACTED]",
+        "nested": {
+            "api_key": "[REDACTED]",
+            "items": [
+                {"authorization": "[REDACTED]"},
+                {"note": "keep"},
+            ],
+        },
+    }
+    assert record["logs"] == ["processing-secret-input"]
+    assert record["artifacts"] == ["secret.json"]
+
+
+def test_runtime_redaction_normalizes_field_name_variants() -> None:
+    runtime = ToolRuntime(
+        _registry(SecretLoggingTool()),
+        policy=ToolPolicy(redacted_field_names={"API_KEY", "api-key", "access_token"}),
+    )
+
+    result = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="secret_logging",
+            arguments={
+                "username": "alice",
+                "password": "visible",
+                "nested": {
+                    "API_KEY": "secret-1",
+                    "api-key": "secret-2",
+                    "access_token": "secret-3",
+                },
+            },
+        ),
+        _context(),
+    )
+
+    assert result.ok is True
+    assert result.metadata["execution_record"]["redacted_input"] == {
+        "username": "alice",
+        "password": "visible",
+        "nested": {
+            "API_KEY": "[REDACTED]",
+            "api-key": "[REDACTED]",
+            "access_token": "[REDACTED]",
+        },
+    }

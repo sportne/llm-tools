@@ -33,7 +33,10 @@ class _ExecutionState:
     tool_name: str
     tool_version: str = "unknown"
     validated_input: dict[str, Any] | None = None
+    redacted_input: dict[str, Any] | None = None
     policy_decision: PolicyDecision | None = None
+    logs: list[str] | None = None
+    artifacts: list[str] | None = None
     ok: bool | None = None
     error_code: ErrorCode | None = None
 
@@ -67,6 +70,7 @@ class ToolRuntime:
         except ToolNotRegisteredError as exc:
             return self._finalize_failure(
                 state,
+                context,
                 self._make_error(
                     code=ErrorCode.TOOL_NOT_FOUND,
                     message=str(exc),
@@ -76,6 +80,7 @@ class ToolRuntime:
         except Exception as exc:
             return self._finalize_failure(
                 state,
+                context,
                 self._make_runtime_error(state, exc),
             )
 
@@ -87,6 +92,7 @@ class ToolRuntime:
         except Exception as exc:
             return self._finalize_failure(
                 state,
+                context,
                 self._make_runtime_error(state, exc),
             )
 
@@ -94,6 +100,7 @@ class ToolRuntime:
         if not policy_decision.allowed:
             return self._finalize_failure(
                 state,
+                context,
                 self._make_error(
                     code=ErrorCode.POLICY_DENIED,
                     message=f"Policy denied execution for tool '{state.tool_name}'.",
@@ -109,6 +116,7 @@ class ToolRuntime:
         except ValidationError as exc:
             return self._finalize_failure(
                 state,
+                context,
                 self._make_error(
                     code=ErrorCode.INPUT_VALIDATION_ERROR,
                     message=f"Input validation failed for tool '{state.tool_name}'.",
@@ -121,16 +129,19 @@ class ToolRuntime:
         except Exception as exc:
             return self._finalize_failure(
                 state,
+                context,
                 self._make_runtime_error(state, exc),
             )
 
         state.validated_input = validated_input.model_dump(mode="json")
+        state.redacted_input = self._redact_input(state.validated_input)
 
         try:
             raw_output = self._invoke_tool(tool, context, validated_input)
         except Exception as exc:
             return self._finalize_failure(
                 state,
+                context,
                 self._make_error(
                     code=ErrorCode.EXECUTION_FAILED,
                     message=f"Tool '{state.tool_name}' execution failed.",
@@ -147,6 +158,7 @@ class ToolRuntime:
         except ValidationError as exc:
             return self._finalize_failure(
                 state,
+                context,
                 self._make_error(
                     code=ErrorCode.OUTPUT_VALIDATION_ERROR,
                     message=f"Output validation failed for tool '{state.tool_name}'.",
@@ -159,11 +171,13 @@ class ToolRuntime:
         except Exception as exc:
             return self._finalize_failure(
                 state,
+                context,
                 self._make_runtime_error(state, exc),
             )
 
         return self._finalize_success(
             state,
+            context,
             output=validated_output.model_dump(mode="json"),
         )
 
@@ -198,10 +212,13 @@ class ToolRuntime:
     def _finalize_success(
         self,
         state: _ExecutionState,
+        context: ToolContext,
         *,
         output: dict[str, Any],
     ) -> ToolResult:
         state.ok = True
+        state.logs = list(context.logs)
+        state.artifacts = list(context.artifacts)
         result = self._normalize_result(state, output=output, error=None)
         record = self._record_execution(state)
         result.metadata["execution_record"] = record.model_dump(mode="json")
@@ -210,10 +227,13 @@ class ToolRuntime:
     def _finalize_failure(
         self,
         state: _ExecutionState,
+        context: ToolContext,
         error: ToolError,
     ) -> ToolResult:
         state.ok = False
         state.error_code = error.code
+        state.logs = list(context.logs)
+        state.artifacts = list(context.artifacts)
         result = self._normalize_result(state, output=None, error=error)
         record = self._record_execution(state)
         result.metadata["execution_record"] = record.model_dump(mode="json")
@@ -232,10 +252,13 @@ class ToolRuntime:
             tool_version=state.tool_version,
             output=output,
             error=error,
+            logs=list(state.logs or []),
+            artifacts=list(state.artifacts or []),
         )
 
     def _record_execution(self, state: _ExecutionState) -> ExecutionRecord:
         ended_at = self._utc_now()
+        logs, artifacts = self._snapshot_observability(state)
         return ExecutionRecord(
             invocation_id=state.invocation_id,
             tool_name=state.tool_name,
@@ -245,10 +268,51 @@ class ToolRuntime:
             duration_ms=self._duration_ms(state.started_at, ended_at),
             request=state.request,
             validated_input=state.validated_input,
+            redacted_input=state.redacted_input,
             ok=state.ok,
             error_code=state.error_code,
             policy_decision=state.policy_decision,
+            logs=logs,
+            artifacts=artifacts,
         )
+
+    def _snapshot_observability(
+        self, state: _ExecutionState
+    ) -> tuple[list[str], list[str]]:
+        state.logs = list(state.logs or [])
+        state.artifacts = list(state.artifacts or [])
+        return state.logs, state.artifacts
+
+    def _redact_input(self, value: dict[str, Any]) -> dict[str, Any]:
+        redacted = self._redact_value(value)
+        if not isinstance(redacted, dict):
+            return {}
+        return redacted
+
+    def _redact_value(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: (
+                    "[REDACTED]"
+                    if self._is_redacted_field_name(key)
+                    else self._redact_value(item)
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [self._redact_value(item) for item in value]
+        return value
+
+    def _is_redacted_field_name(self, field_name: str) -> bool:
+        normalized = self._normalize_field_name(field_name)
+        return any(
+            normalized == self._normalize_field_name(candidate)
+            for candidate in self._policy.redacted_field_names
+        )
+
+    @staticmethod
+    def _normalize_field_name(field_name: str) -> str:
+        return field_name.casefold().replace("-", "_")
 
     @staticmethod
     def _make_error(

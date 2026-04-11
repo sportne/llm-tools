@@ -158,24 +158,24 @@ Step 0 note:
 ## 6. Observability
 
 ### 6.1 Execution records
-- [ ] Implement `ExecutionRecord` generation in runtime
-- [ ] Capture start/end time
-- [ ] Capture duration
-- [ ] Capture validated input
-- [ ] Capture policy decision
-- [ ] Capture result status
-- [ ] Capture normalized error code
-- [ ] Capture logs and artifacts
+- [x] Implement `ExecutionRecord` generation in runtime
+- [x] Capture start/end time
+- [x] Capture duration
+- [x] Capture validated input
+- [x] Capture policy decision
+- [x] Capture result status
+- [x] Capture normalized error code
+- [x] Capture logs and artifacts
 
 ### 6.2 Redaction
-- [ ] Add a simple initial redaction mechanism
-- [ ] Define extension points for future richer redaction rules
+- [x] Add a simple initial redaction mechanism
+- [x] Define extension points for future richer redaction rules
 
 ### 6.3 Observability tests
-- [ ] Test execution record creation
-- [ ] Test success record contents
-- [ ] Test failure record contents
-- [ ] Test redaction behavior
+- [x] Test execution record creation
+- [x] Test success record contents
+- [x] Test failure record contents
+- [x] Test redaction behavior
 
 ---
 

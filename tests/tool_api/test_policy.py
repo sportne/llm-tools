@@ -243,3 +243,17 @@ def test_present_required_secrets_allow_execution_if_nothing_else_blocks() -> No
 
     assert decision.allowed is True
     assert decision.reason == "allowed"
+
+
+def test_policy_defaults_include_sensitive_redacted_field_names() -> None:
+    policy = ToolPolicy()
+
+    assert policy.redacted_field_names >= {
+        "password",
+        "secret",
+        "token",
+        "api_key",
+        "access_token",
+        "refresh_token",
+        "authorization",
+    }

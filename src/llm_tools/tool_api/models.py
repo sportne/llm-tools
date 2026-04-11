@@ -75,6 +75,8 @@ class ToolContext(BaseModel):
     invocation_id: str = Field(min_length=1)
     workspace: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
+    logs: list[str] = Field(default_factory=list)
+    artifacts: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

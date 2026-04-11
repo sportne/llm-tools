@@ -108,6 +108,14 @@ def test_tool_spec_defaults_match_the_canonical_contract() -> None:
     assert spec.cost_hint is None
 
 
+def test_tool_context_defaults_include_observability_sinks() -> None:
+    context = ToolContext(invocation_id="inv-123")
+
+    assert context.logs == []
+    assert context.artifacts == []
+    assert context.metadata == {}
+
+
 @pytest.mark.parametrize(
     ("model_type", "payload", "field_name"),
     [
