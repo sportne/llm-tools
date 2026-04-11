@@ -182,26 +182,30 @@ Step 0 note:
 ## 7. Built-in tools
 
 ### 7.1 Filesystem tools
-- [ ] Implement `ReadFileTool`
-- [ ] Implement `WriteFileTool`
-- [ ] Implement `ListDirectoryTool`
-- [ ] Add `register_filesystem_tools(...)`
+- [x] Implement `ReadFileTool` (text files or select files using markitdown for conversion)
+- [x] Implement `WriteFileTool` (text files only)
+- [x] Implement `ListDirectoryTool` (recursive is optional)
+- [x] Add `register_filesystem_tools(...)`
 
-### 7.2 Process tools
-- [ ] Implement `RunProcessTool`
-- [ ] Add `register_process_tools(...)`
+### 7.2 Git tools
+- [x] Implement `RunGitStatusTool`
+- [x] Implement `RunGitDiffTool`
+- [x] Implement `RunGitLogTool`
+- [x] Add `register_git_tools(...)`
 
-### 7.3 HTTP tools
-- [ ] Implement `FetchUrlTool`
-- [ ] Add `register_http_tools(...)`
+### 7.3 Atlassian tools
+- [x] Implement `SearchJiraTool`
+- [x] Implement `ReadJiraIssueTool`
+- [x] Add `register_atlassian_tools(...)`
 
-### 7.4 Optional early text tools
-- [ ] Implement one simple text utility tool
-- [ ] Add `register_text_tools(...)`
+### 7.4 Text tools
+- [x] Implement `FileTextSearchTool`
+- [x] Implement `DirectoryTextSearchTool`
+- [x] Add `register_text_tools(...)`
 
 ### 7.5 Built-in tool tests
-- [ ] Add unit tests for each built-in tool
-- [ ] Add runtime integration tests using built-in tools
+- [x] Add unit tests for each built-in tool
+- [x] Add runtime integration tests using built-in tools
 
 ---
 

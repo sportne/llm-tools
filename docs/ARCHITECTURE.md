@@ -70,8 +70,8 @@ Concrete tool implementations built against `tool_api`.
 Examples:
 
 * filesystem tools
-* process tools
-* HTTP tools
+* git tools
+* Atlassian tools
 * text tools
 
 #### `workflow_api`
@@ -262,13 +262,16 @@ project/
           write_file.py
           list_directory.py
           register.py
-        process/
+        git/
           __init__.py
-          run_process.py
+          run_git_status.py
+          run_git_diff.py
+          run_git_log.py
           register.py
-        http/
+        atlassian/
           __init__.py
-          fetch_url.py
+          search_jira.py
+          read_jira_issue.py
           register.py
         text/
           __init__.py
@@ -965,8 +968,8 @@ Concrete tools live under `src/llm_tools/tools/`.
 Example domains:
 
 * `src/llm_tools/tools/filesystem`
-* `src/llm_tools/tools/process`
-* `src/llm_tools/tools/http`
+* `src/llm_tools/tools/git`
+* `src/llm_tools/tools/atlassian`
 * `src/llm_tools/tools/text`
 
 Each tool is a normal subclass of `Tool`.

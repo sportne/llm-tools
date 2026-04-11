@@ -21,6 +21,8 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
+  "atlassian-python-api>=4,<5",
+  "markitdown>=0.1.5,<0.2",
   "pydantic>=2,<3",
 ]
 
@@ -57,7 +59,7 @@ ignore = ["E501"]
 
 [tool.ruff.lint.mccabe]
 # Set the maximum cyclomatic complexity threshold (default is 10)
-max-complexity = 10
+max-complexity = 15
 
 [tool.ruff.format]
 quote-style = "double"

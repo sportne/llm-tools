@@ -217,8 +217,8 @@ Tools are grouped under:
 ```text
 src/llm_tools/tools/
   filesystem/
-  http/
-  process/
+  git/
+  atlassian/
   text/
 ```
 
@@ -323,8 +323,8 @@ Each execution must record:
 The project must include example tools:
 
 * filesystem operations
-* subprocess execution
-* HTTP requests
+* git repository inspection
+* Atlassian Jira reads
 * text processing
 
 ---
@@ -447,8 +447,8 @@ project/
         prompt_schema.py
       tools/
         filesystem/
-        process/
-        http/
+        git/
+        atlassian/
         text/
       workflow_api/
         models.py
@@ -487,8 +487,9 @@ runtime behavior described in this spec begin in later implementation steps.
 ### Milestone 4: Built-in tools
 
 * filesystem
-* subprocess
-* HTTP
+* git
+* Atlassian
+* text
 
 ### Milestone 5: Workflows (optional early)
 
