@@ -46,13 +46,13 @@ Step 0 note:
 - [x] Implement any policy-related enums actually needed in v0.1
 
 ### 1.2 Tool metadata and runtime models
-- [ ] Implement `ToolSpec`
-- [ ] Implement `ToolContext`
-- [ ] Implement `ToolInvocationRequest`
-- [ ] Implement `ToolError`
-- [ ] Implement `ToolResult`
-- [ ] Implement `PolicyDecision`
-- [ ] Implement `ExecutionRecord`
+- [x] Implement `ToolSpec`
+- [x] Implement `ToolContext`
+- [x] Implement `ToolInvocationRequest`
+- [x] Implement `ToolError`
+- [x] Implement `ToolResult`
+- [x] Implement `PolicyDecision`
+- [x] Implement `ExecutionRecord`
 
 ### 1.3 Model tests
 - [ ] Add validation tests for canonical models
