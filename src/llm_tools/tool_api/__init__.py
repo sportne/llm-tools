@@ -15,14 +15,18 @@ from llm_tools.tool_api.models import (
     ToolResult,
     ToolSpec,
 )
+from llm_tools.tool_api.tool import InputT, OutputT, Tool
 
 __all__ = [
     "ErrorCode",
     "ExecutionRecord",
+    "InputT",
+    "OutputT",
     "PolicyVerdict",
     "PolicyDecision",
     "RiskLevel",
     "SideEffectClass",
+    "Tool",
     "ToolContext",
     "ToolError",
     "ToolInvocationRequest",

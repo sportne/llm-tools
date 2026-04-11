@@ -64,15 +64,15 @@ Step 0 note:
 ## 2. Base tool contract
 
 ### 2.1 Tool base class
-- [ ] Implement generic `Tool[InputT, OutputT]` base class
-- [ ] Enforce `spec` as a class attribute
-- [ ] Enforce `input_model` as a class attribute
-- [ ] Enforce `output_model` as a class attribute
-- [ ] Define strict `invoke(context, args) -> OutputT` contract
+- [x] Implement generic `Tool[InputT, OutputT]` base class
+- [x] Enforce `spec` as a class attribute
+- [x] Enforce `input_model` as a class attribute
+- [x] Enforce `output_model` as a class attribute
+- [x] Define strict `invoke(context, args) -> OutputT` contract
 
 ### 2.2 Tool contract tests
-- [ ] Add tests for valid tool subclass definitions
-- [ ] Add tests for invalid/misconfigured tool subclasses
+- [x] Add tests for valid tool subclass definitions
+- [x] Add tests for invalid/misconfigured tool subclasses
 
 ---
 
