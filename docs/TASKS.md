@@ -55,9 +55,9 @@ Step 0 note:
 - [x] Implement `ExecutionRecord`
 
 ### 1.3 Model tests
-- [ ] Add validation tests for canonical models
-- [ ] Add serialization tests
-- [ ] Add schema snapshot tests where useful
+- [x] Add validation tests for canonical models
+- [x] Add serialization tests
+- [x] Add schema snapshot tests where useful
 
 ---
 
