@@ -1,0 +1,83 @@
+[build-system]
+requires = ["setuptools>=82,<83", "wheel>=0.46,<0.47"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-tools"
+version = "0.1.0"
+description = "Strict, typed tools for LLM and non-LLM Python applications."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "llm-tools Contributors" }]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3 :: Only",
+  "Typing :: Typed",
+]
+dependencies = [
+  "pydantic>=2,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2,<2",
+  "mypy>=1.10,<2",
+  "pytest>=8.3,<9",
+  "pytest-cov>=5,<7",
+  "ruff>=0.6,<1",
+  "setuptools>=82,<83",
+  "wheel>=0.46,<0.47",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["llm_tools*"]
+
+[tool.setuptools.package-data]
+llm_tools = ["py.typed"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+respect-gitignore = true
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP", "W"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = ["src"]
+packages = ["llm_tools"]
+strict = true
+warn_unused_configs = true
+pretty = true
+show_error_codes = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+
+[tool.coverage.run]
+source = ["llm_tools"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
