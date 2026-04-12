@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from types import ModuleType
 
 import pytest
@@ -29,6 +30,11 @@ from llm_tools.tools.filesystem import register_filesystem_tools
 from llm_tools.tools.git import register_git_tools
 from llm_tools.tools.text import register_text_tools
 from llm_tools.workflow_api import WorkflowExecutor, WorkflowTurnResult
+from llm_tools.workflow_api.models import (
+    ApprovalRequest,
+    WorkflowInvocationOutcome,
+    WorkflowInvocationStatus,
+)
 
 
 def _executor(registry: ToolRegistry, *, allow_write: bool = False) -> WorkflowExecutor:
@@ -46,24 +52,52 @@ def _executor(registry: ToolRegistry, *, allow_write: bool = False) -> WorkflowE
     )
 
 
-def test_workflow_turn_result_rejects_mismatched_final_response_and_tool_results() -> (
-    None
-):
+def _executed_tool_results(result: WorkflowTurnResult) -> list[ToolResult]:
+    return [
+        outcome.tool_result
+        for outcome in result.outcomes
+        if outcome.status is WorkflowInvocationStatus.EXECUTED
+        and outcome.tool_result is not None
+    ]
+
+
+def _approval_request(index: int = 1) -> ApprovalRequest:
+    return ApprovalRequest(
+        approval_id=f"approval-{index}",
+        invocation_index=index,
+        request={"tool_name": "read_file", "arguments": {"path": "README.md"}},
+        tool_name="read_file",
+        tool_version="0.1.0",
+        policy_reason="approval required",
+        policy_metadata={"tool_name": "read_file"},
+        requested_at="2026-01-01T00:00:00Z",
+        expires_at="2026-01-01T00:05:00Z",
+    )
+
+
+def test_workflow_turn_result_rejects_mismatched_final_response_and_outcomes() -> None:
     with pytest.raises(ValidationError):
         WorkflowTurnResult(
             parsed_response=ParsedModelResponse(final_response="done"),
-            tool_results=[
-                ToolResult(
-                    ok=True,
-                    tool_name="read_file",
-                    tool_version="0.1.0",
-                    output={},
+            outcomes=[
+                WorkflowInvocationOutcome(
+                    invocation_index=1,
+                    request={"tool_name": "read_file", "arguments": {}},
+                    status=WorkflowInvocationStatus.EXECUTED,
+                    tool_result=ToolResult(
+                        ok=True,
+                        tool_name="read_file",
+                        tool_version="0.1.0",
+                        output={},
+                    ),
                 )
             ],
         )
 
 
-def test_workflow_turn_result_rejects_mismatched_invocation_and_result_counts() -> None:
+def test_workflow_turn_result_rejects_outcome_indices_outside_parsed_invocations() -> (
+    None
+):
     with pytest.raises(ValidationError):
         WorkflowTurnResult(
             parsed_response=ParsedModelResponse(
@@ -78,13 +112,88 @@ def test_workflow_turn_result_rejects_mismatched_invocation_and_result_counts() 
                     },
                 ]
             ),
-            tool_results=[
-                ToolResult(
-                    ok=True,
-                    tool_name="read_file",
-                    tool_version="0.1.0",
-                    output={},
+            outcomes=[
+                WorkflowInvocationOutcome(
+                    invocation_index=3,
+                    request={"tool_name": "read_file", "arguments": {}},
+                    status=WorkflowInvocationStatus.EXECUTED,
+                    tool_result=ToolResult(
+                        ok=True,
+                        tool_name="read_file",
+                        tool_version="0.1.0",
+                        output={},
+                    ),
                 )
+            ],
+        )
+
+
+def test_workflow_invocation_outcome_validators_reject_invalid_payload_shapes() -> None:
+    with pytest.raises(ValidationError):
+        WorkflowInvocationOutcome(
+            invocation_index=1,
+            request={"tool_name": "read_file", "arguments": {}},
+            status=WorkflowInvocationStatus.EXECUTED,
+        )
+
+    with pytest.raises(ValidationError):
+        WorkflowInvocationOutcome(
+            invocation_index=1,
+            request={"tool_name": "read_file", "arguments": {}},
+            status=WorkflowInvocationStatus.EXECUTED,
+            tool_result=ToolResult(
+                ok=True,
+                tool_name="read_file",
+                tool_version="0.1.0",
+                output={},
+            ),
+            approval_request=_approval_request(),
+        )
+
+    with pytest.raises(ValidationError):
+        WorkflowInvocationOutcome(
+            invocation_index=1,
+            request={"tool_name": "read_file", "arguments": {}},
+            status=WorkflowInvocationStatus.APPROVAL_REQUESTED,
+        )
+
+    with pytest.raises(ValidationError):
+        WorkflowInvocationOutcome(
+            invocation_index=1,
+            request={"tool_name": "read_file", "arguments": {}},
+            status=WorkflowInvocationStatus.APPROVAL_REQUESTED,
+            approval_request=_approval_request(),
+            tool_result=ToolResult(
+                ok=False,
+                tool_name="read_file",
+                tool_version="0.1.0",
+                error={"code": "policy_denied", "message": "denied"},
+            ),
+        )
+
+
+def test_workflow_turn_result_rejects_non_ascending_outcome_indices() -> None:
+    with pytest.raises(ValidationError):
+        WorkflowTurnResult(
+            parsed_response=ParsedModelResponse(
+                invocations=[
+                    {"tool_name": "read_file", "arguments": {}},
+                    {"tool_name": "list_directory", "arguments": {}},
+                ]
+            ),
+            outcomes=[
+                WorkflowInvocationOutcome(
+                    invocation_index=2,
+                    request={"tool_name": "list_directory", "arguments": {}},
+                    status=WorkflowInvocationStatus.APPROVAL_REQUESTED,
+                    approval_request=_approval_request(index=2),
+                ),
+                WorkflowInvocationOutcome(
+                    invocation_index=1,
+                    request={"tool_name": "read_file", "arguments": {}},
+                    status=WorkflowInvocationStatus.APPROVAL_REQUESTED,
+                    approval_request=_approval_request(index=1),
+                ),
             ],
         )
 
@@ -198,7 +307,7 @@ def test_workflow_executor_returns_final_response_without_tool_execution(
     )
 
     assert result.parsed_response.final_response == "All set."
-    assert result.tool_results == []
+    assert result.outcomes == []
 
 
 def test_workflow_executor_executes_single_parsed_invocation(tmp_path: str) -> None:
@@ -224,9 +333,10 @@ def test_workflow_executor_executes_single_parsed_invocation(tmp_path: str) -> N
         context,
     )
 
-    assert len(write_result.tool_results) == 1
-    assert write_result.tool_results[0].ok is True
-    record = write_result.tool_results[0].metadata["execution_record"]
+    executed_results = _executed_tool_results(write_result)
+    assert len(executed_results) == 1
+    assert executed_results[0].ok is True
+    record = executed_results[0].metadata["execution_record"]
     assert record["invocation_id"] == "turn-2"
 
 
@@ -253,7 +363,7 @@ def test_workflow_executor_executes_multiple_invocations_sequentially(
         },
         ToolContext(invocation_id="setup", workspace=str(tmp_path)),
     )
-    assert setup_result.tool_results[0].ok is True
+    assert _executed_tool_results(setup_result)[0].ok is True
 
     result = executor.execute_model_output(
         StructuredOutputAdapter(),
@@ -274,20 +384,21 @@ def test_workflow_executor_executes_multiple_invocations_sequentially(
         ),
     )
 
-    assert [tool_result.tool_name for tool_result in result.tool_results] == [
+    executed_results = _executed_tool_results(result)
+    assert [tool_result.tool_name for tool_result in executed_results] == [
         "read_file",
         "list_directory",
     ]
-    first_record = result.tool_results[0].metadata["execution_record"]
-    second_record = result.tool_results[1].metadata["execution_record"]
+    first_record = executed_results[0].metadata["execution_record"]
+    second_record = executed_results[1].metadata["execution_record"]
     assert first_record["invocation_id"] == "turn-3:1"
     assert second_record["invocation_id"] == "turn-3:2"
-    assert result.tool_results[0].artifacts != []
-    assert result.tool_results[1].artifacts == []
-    assert "base-artifact" not in result.tool_results[0].artifacts
-    assert "base-log" not in result.tool_results[0].logs
-    assert "base-artifact" not in result.tool_results[1].artifacts
-    assert "base-log" not in result.tool_results[1].logs
+    assert executed_results[0].artifacts != []
+    assert executed_results[1].artifacts == []
+    assert "base-artifact" not in executed_results[0].artifacts
+    assert "base-log" not in executed_results[0].logs
+    assert "base-artifact" not in executed_results[1].artifacts
+    assert "base-log" not in executed_results[1].logs
 
 
 def test_workflow_executor_executes_native_tool_calling_path(tmp_path: str) -> None:
@@ -311,7 +422,7 @@ def test_workflow_executor_executes_native_tool_calling_path(tmp_path: str) -> N
         },
         ToolContext(invocation_id="setup-openai", workspace=str(tmp_path)),
     )
-    assert setup.tool_results[0].ok is True
+    assert _executed_tool_results(setup)[0].ok is True
 
     result = executor.execute_model_output(
         NativeToolCallingAdapter(),
@@ -330,8 +441,9 @@ def test_workflow_executor_executes_native_tool_calling_path(tmp_path: str) -> N
         ToolContext(invocation_id="turn-4", workspace=str(tmp_path)),
     )
 
-    assert result.tool_results[0].ok is True
-    assert result.tool_results[0].output["content"] == "hello openai"
+    executed_results = _executed_tool_results(result)
+    assert executed_results[0].ok is True
+    assert executed_results[0].output["content"] == "hello openai"
 
 
 def test_workflow_executor_executes_native_tool_calling_final_response_path(
@@ -348,7 +460,7 @@ def test_workflow_executor_executes_native_tool_calling_final_response_path(
     )
 
     assert result.parsed_response.final_response == "No tool needed."
-    assert result.tool_results == []
+    assert result.outcomes == []
 
 
 def test_workflow_executor_executes_prompt_schema_paths(tmp_path: str) -> None:
@@ -372,7 +484,7 @@ def test_workflow_executor_executes_prompt_schema_paths(tmp_path: str) -> None:
         },
         ToolContext(invocation_id="setup-prompt", workspace=str(tmp_path)),
     )
-    assert setup.tool_results[0].ok is True
+    assert _executed_tool_results(setup)[0].ok is True
 
     action_result = executor.execute_model_output(
         PromptSchemaAdapter(),
@@ -387,7 +499,7 @@ def test_workflow_executor_executes_prompt_schema_paths(tmp_path: str) -> None:
         ToolContext(invocation_id="turn-7", workspace=str(tmp_path)),
     )
 
-    assert action_result.tool_results[0].output["content"] == "hello prompt"
+    assert _executed_tool_results(action_result)[0].output["content"] == "hello prompt"
     assert final_result.parsed_response.final_response == "Already answered."
 
 
@@ -402,8 +514,9 @@ def test_workflow_executor_normalizes_unknown_tool_failure(tmp_path: str) -> Non
         ToolContext(invocation_id="turn-8", workspace=str(tmp_path)),
     )
 
-    assert result.tool_results[0].error is not None
-    assert result.tool_results[0].error.code is ErrorCode.TOOL_NOT_FOUND
+    first = _executed_tool_results(result)[0]
+    assert first.error is not None
+    assert first.error.code is ErrorCode.TOOL_NOT_FOUND
 
 
 def test_workflow_executor_normalizes_policy_denied_failure(tmp_path: str) -> None:
@@ -428,8 +541,213 @@ def test_workflow_executor_normalizes_policy_denied_failure(tmp_path: str) -> No
         ToolContext(invocation_id="turn-9", workspace=str(tmp_path)),
     )
 
-    assert result.tool_results[0].error is not None
-    assert result.tool_results[0].error.code is ErrorCode.POLICY_DENIED
+    first = _executed_tool_results(result)[0]
+    assert first.error is not None
+    assert first.error.code is ErrorCode.POLICY_DENIED
+
+
+def test_workflow_executor_emits_approval_requested_and_pauses_at_first_pending(
+    tmp_path: str,
+) -> None:
+    registry = ToolRegistry()
+    register_filesystem_tools(registry)
+    executor = WorkflowExecutor(
+        registry,
+        policy=ToolPolicy(
+            allowed_side_effects={
+                SideEffectClass.NONE,
+                SideEffectClass.LOCAL_READ,
+                SideEffectClass.LOCAL_WRITE,
+            },
+            require_approval_for={SideEffectClass.LOCAL_READ},
+        ),
+    )
+
+    result = executor.execute_model_output(
+        StructuredOutputAdapter(),
+        {
+            "actions": [
+                {"tool_name": "list_directory", "arguments": {"path": "."}},
+                {
+                    "tool_name": "write_file",
+                    "arguments": {"path": "note.txt", "content": "after approval"},
+                },
+            ]
+        },
+        ToolContext(invocation_id="turn-approval-1", workspace=str(tmp_path)),
+    )
+
+    assert len(result.outcomes) == 1
+    assert result.outcomes[0].status is WorkflowInvocationStatus.APPROVAL_REQUESTED
+    assert result.outcomes[0].approval_request is not None
+    assert result.outcomes[0].approval_request.invocation_index == 1
+    assert len(executor.list_pending_approvals()) == 1
+
+
+def test_workflow_executor_approve_resumes_and_continues_execution(
+    tmp_path: str,
+) -> None:
+    registry = ToolRegistry()
+    register_filesystem_tools(registry)
+    executor = WorkflowExecutor(
+        registry,
+        policy=ToolPolicy(
+            allowed_side_effects={
+                SideEffectClass.NONE,
+                SideEffectClass.LOCAL_READ,
+                SideEffectClass.LOCAL_WRITE,
+            },
+            require_approval_for={SideEffectClass.LOCAL_READ},
+        ),
+    )
+
+    initial = executor.execute_model_output(
+        StructuredOutputAdapter(),
+        {
+            "actions": [
+                {"tool_name": "list_directory", "arguments": {"path": "."}},
+                {
+                    "tool_name": "write_file",
+                    "arguments": {"path": "resume.txt", "content": "approved"},
+                },
+            ]
+        },
+        ToolContext(invocation_id="turn-approval-2", workspace=str(tmp_path)),
+    )
+    approval_id = initial.outcomes[0].approval_request.approval_id  # type: ignore[union-attr]
+
+    resumed = executor.resolve_pending_approval(approval_id, approved=True)
+    statuses = [outcome.status for outcome in resumed.outcomes]
+
+    assert statuses == [
+        WorkflowInvocationStatus.EXECUTED,
+        WorkflowInvocationStatus.EXECUTED,
+    ]
+    executed = _executed_tool_results(resumed)
+    assert executed[0].tool_name == "list_directory"
+    assert executed[1].tool_name == "write_file"
+    assert executed[1].ok is True
+    assert executor.list_pending_approvals() == []
+
+
+def test_workflow_executor_deny_marks_outcome_and_continues(
+    tmp_path: str,
+) -> None:
+    registry = ToolRegistry()
+    register_filesystem_tools(registry)
+    executor = WorkflowExecutor(
+        registry,
+        policy=ToolPolicy(
+            allowed_side_effects={
+                SideEffectClass.NONE,
+                SideEffectClass.LOCAL_READ,
+                SideEffectClass.LOCAL_WRITE,
+            },
+            require_approval_for={SideEffectClass.LOCAL_READ},
+        ),
+    )
+
+    initial = executor.execute_model_output(
+        StructuredOutputAdapter(),
+        {
+            "actions": [
+                {"tool_name": "list_directory", "arguments": {"path": "."}},
+                {
+                    "tool_name": "write_file",
+                    "arguments": {"path": "denied.txt", "content": "still runs"},
+                },
+            ]
+        },
+        ToolContext(invocation_id="turn-approval-3", workspace=str(tmp_path)),
+    )
+    approval_id = initial.outcomes[0].approval_request.approval_id  # type: ignore[union-attr]
+
+    denied = executor.resolve_pending_approval(approval_id, approved=False)
+
+    assert denied.outcomes[0].status is WorkflowInvocationStatus.APPROVAL_DENIED
+    executed = _executed_tool_results(denied)
+    assert len(executed) == 1
+    assert executed[0].tool_name == "write_file"
+    assert executed[0].ok is True
+
+
+def test_workflow_executor_finalizes_expired_approvals(
+    tmp_path: str,
+) -> None:
+    registry = ToolRegistry()
+    register_filesystem_tools(registry)
+    executor = WorkflowExecutor(
+        registry,
+        policy=ToolPolicy(
+            allowed_side_effects={
+                SideEffectClass.NONE,
+                SideEffectClass.LOCAL_READ,
+                SideEffectClass.LOCAL_WRITE,
+            },
+            require_approval_for={SideEffectClass.LOCAL_READ},
+            approval_timeout_seconds=1,
+        ),
+    )
+
+    executor.execute_model_output(
+        StructuredOutputAdapter(),
+        {
+            "actions": [
+                {"tool_name": "list_directory", "arguments": {"path": "."}},
+                {
+                    "tool_name": "write_file",
+                    "arguments": {"path": "timeout.txt", "content": "after timeout"},
+                },
+            ]
+        },
+        ToolContext(invocation_id="turn-approval-4", workspace=str(tmp_path)),
+    )
+    finalized = executor.finalize_expired_approvals(
+        now=datetime.now(UTC) + timedelta(seconds=5)
+    )
+
+    assert len(finalized) == 1
+    result = finalized[0]
+    assert result.outcomes[0].status is WorkflowInvocationStatus.APPROVAL_TIMED_OUT
+    executed = _executed_tool_results(result)
+    assert len(executed) == 1
+    assert executed[0].tool_name == "write_file"
+    assert executor.list_pending_approvals() == []
+
+
+def test_workflow_executor_can_queue_multiple_pending_approvals_sequentially(
+    tmp_path: str,
+) -> None:
+    registry = ToolRegistry()
+    register_filesystem_tools(registry)
+    executor = WorkflowExecutor(
+        registry,
+        policy=ToolPolicy(
+            allowed_side_effects={SideEffectClass.NONE, SideEffectClass.LOCAL_READ},
+            require_approval_for={SideEffectClass.LOCAL_READ},
+        ),
+    )
+
+    seed = executor.execute_model_output(
+        StructuredOutputAdapter(),
+        {
+            "actions": [
+                {"tool_name": "list_directory", "arguments": {"path": "."}},
+                {"tool_name": "read_file", "arguments": {"path": "a.txt"}},
+            ]
+        },
+        ToolContext(invocation_id="turn-approval-5", workspace=str(tmp_path)),
+    )
+    first_id = seed.outcomes[0].approval_request.approval_id  # type: ignore[union-attr]
+    first_resume = executor.resolve_pending_approval(first_id, approved=True)
+
+    assert first_resume.outcomes[0].status is WorkflowInvocationStatus.EXECUTED
+    assert (
+        first_resume.outcomes[1].status is WorkflowInvocationStatus.APPROVAL_REQUESTED
+    )
+    pending = executor.list_pending_approvals()
+    assert len(pending) == 1
+    assert pending[0].invocation_index == 2
 
 
 def test_workflow_executor_normalizes_input_validation_failure(tmp_path: str) -> None:
@@ -450,8 +768,9 @@ def test_workflow_executor_normalizes_input_validation_failure(tmp_path: str) ->
         ToolContext(invocation_id="turn-10", workspace=str(tmp_path)),
     )
 
-    assert result.tool_results[0].error is not None
-    assert result.tool_results[0].error.code is ErrorCode.INPUT_VALIDATION_ERROR
+    first = _executed_tool_results(result)[0]
+    assert first.error is not None
+    assert first.error.code is ErrorCode.INPUT_VALIDATION_ERROR
 
 
 def test_workflow_executor_propagates_adapter_parse_failure(tmp_path: str) -> None:
@@ -534,5 +853,5 @@ def test_workflow_executor_executes_git_and_jira_paths(
         ),
     )
 
-    assert git_result.tool_results[0].output["status_text"] == "ok\n"
-    assert jira_result.tool_results[0].output["issues"][0]["key"] == "DEMO-1"
+    assert _executed_tool_results(git_result)[0].output["status_text"] == "ok\n"
+    assert _executed_tool_results(jira_result)[0].output["issues"][0]["key"] == "DEMO-1"

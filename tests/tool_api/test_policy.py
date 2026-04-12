@@ -264,6 +264,7 @@ def test_policy_defaults_include_sensitive_redacted_field_names() -> None:
         "refresh_token",
         "authorization",
     }
+    assert policy.approval_timeout_seconds == 300
 
 
 def test_policy_verdict_distinguishes_allow_approval_and_deny() -> None:

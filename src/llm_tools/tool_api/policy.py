@@ -33,6 +33,7 @@ class ToolPolicy(BaseModel):
     )
 
     require_approval_for: set[SideEffectClass] = Field(default_factory=set)
+    approval_timeout_seconds: int = Field(default=300, ge=1)
     allow_network: bool = True
     allow_filesystem: bool = True
     allow_subprocess: bool = True

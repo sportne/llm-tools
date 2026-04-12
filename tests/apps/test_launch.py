@@ -84,3 +84,19 @@ def test_module_entrypoint_raises_system_exit_with_main_return_code(
 
     assert exc.value.code == 0
     assert called == ["main"]
+
+
+def test_app_module_run_helpers_dispatch_to_textual_app_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app_module = importlib.import_module("llm_tools.apps.textual_workbench.app")
+    called: list[str] = []
+
+    monkeypatch.setattr(
+        "llm_tools.apps.textual_workbench.app.TextualWorkbenchApp.run",
+        lambda self: called.append("run"),
+    )
+
+    app_module.run_workbench_app()
+    assert app_module.main() == 0
+    assert called == ["run", "run"]

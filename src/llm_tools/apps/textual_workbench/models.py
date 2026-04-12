@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from llm_tools.llm_adapters import ParsedModelResponse
 from llm_tools.tool_api import ToolResult
-from llm_tools.workflow_api import WorkflowTurnResult
+from llm_tools.workflow_api import ApprovalRequest, WorkflowTurnResult
 
 
 class WorkbenchMode(str, Enum):  # noqa: UP042
@@ -50,6 +50,10 @@ class WorkbenchConfigState(BaseModel):
     allow_network: bool = True
     allow_filesystem: bool = True
     allow_subprocess: bool = True
+    require_approval_for_local_read: bool = False
+    require_approval_for_local_write: bool = False
+    require_approval_for_external_read: bool = False
+    require_approval_for_external_write: bool = False
 
     execute_after_parse: bool = True
 
@@ -62,12 +66,14 @@ class WorkbenchRunState(BaseModel):
     last_parsed_response: ParsedModelResponse | None = None
     last_workflow_result: WorkflowTurnResult | None = None
     last_direct_tool_result: ToolResult | None = None
+    pending_approvals: list[ApprovalRequest] = Field(default_factory=list)
     current_status_text: str = ""
 
 
 class ModelTurnExecutionResult(BaseModel):
     """Result of one provider-backed model turn in the workbench."""
 
+    session_rebuilt: bool = False
     exported_tools: Any
     parsed_response: ParsedModelResponse
     workflow_result: WorkflowTurnResult | None = None
@@ -76,4 +82,27 @@ class ModelTurnExecutionResult(BaseModel):
 class DirectExecutionResult(BaseModel):
     """Result of one direct tool execution in the workbench."""
 
-    tool_result: ToolResult
+    session_rebuilt: bool = False
+    workflow_result: WorkflowTurnResult
+    tool_result: ToolResult | None = None
+
+
+class ExportToolsResult(BaseModel):
+    """Result of one tool-export action in the workbench."""
+
+    session_rebuilt: bool = False
+    exported_tools: Any
+
+
+class ApprovalResolutionResult(BaseModel):
+    """Result of approving or denying one pending approval."""
+
+    session_rebuilt: bool = False
+    workflow_result: WorkflowTurnResult
+
+
+class ApprovalFinalizeResult(BaseModel):
+    """Result of finalizing expired approvals."""
+
+    session_rebuilt: bool = False
+    workflow_results: list[WorkflowTurnResult] = Field(default_factory=list)

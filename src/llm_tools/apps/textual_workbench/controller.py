@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from typing import Any
 
 from llm_tools.apps.textual_workbench.models import (
+    ApprovalFinalizeResult,
+    ApprovalResolutionResult,
     DirectExecutionResult,
+    ExportToolsResult,
     ModelTurnExecutionResult,
     ProviderPreset,
     WorkbenchConfigState,
@@ -16,6 +20,7 @@ from llm_tools.apps.textual_workbench.models import (
 from llm_tools.llm_adapters import (
     LLMAdapter,
     NativeToolCallingAdapter,
+    ParsedModelResponse,
     PromptSchemaAdapter,
     StructuredOutputAdapter,
 )
@@ -26,7 +31,7 @@ from llm_tools.tool_api import (
     ToolInvocationRequest,
     ToolPolicy,
     ToolRegistry,
-    ToolRuntime,
+    ToolResult,
 )
 from llm_tools.tools import (
     register_atlassian_tools,
@@ -34,7 +39,20 @@ from llm_tools.tools import (
     register_git_tools,
     register_text_tools,
 )
-from llm_tools.workflow_api import WorkflowExecutor
+from llm_tools.workflow_api import (
+    ApprovalRequest,
+    WorkflowExecutor,
+    WorkflowInvocationStatus,
+    WorkflowTurnResult,
+)
+
+
+@dataclass(slots=True)
+class _WorkbenchSession:
+    """In-memory executor session tied to one config signature."""
+
+    signature: str
+    executor: WorkflowExecutor
 
 
 class WorkbenchController:
@@ -46,6 +64,7 @@ class WorkbenchController:
         provider_factory: type[OpenAICompatibleProvider] = OpenAICompatibleProvider,
     ) -> None:
         self._provider_factory = provider_factory
+        self._active_session: _WorkbenchSession | None = None
 
     def default_config(self) -> WorkbenchConfigState:
         """Return the default ephemeral configuration for a new launch."""
@@ -131,6 +150,13 @@ class WorkbenchController:
             for tool in self.build_registry(config).list_registered_tools()
         ]
 
+    def list_pending_approvals(
+        self, config: WorkbenchConfigState
+    ) -> list[ApprovalRequest]:
+        """Return pending approvals from the active executor session."""
+        executor, _ = self._get_or_rebuild_session(config)
+        return executor.list_pending_approvals()
+
     def get_tool_details(
         self,
         config: WorkbenchConfigState,
@@ -152,13 +178,15 @@ class WorkbenchController:
             tool.input_model.model_json_schema(),
         )
 
-    def export_tools(self, config: WorkbenchConfigState) -> Any:
+    def export_tools(self, config: WorkbenchConfigState) -> ExportToolsResult:
         """Export tools for the currently selected interaction mode."""
-        registry = self.build_registry(config)
-        executor = WorkflowExecutor(registry, policy=self.build_policy(config))
-        return executor.export_tools(
-            self._build_adapter(config.mode),
-            context=self._make_context(config, invocation_id="workbench-export-tools"),
+        adapter = self._build_adapter(config.mode)
+        context = self._make_context(config, invocation_id="workbench-export-tools")
+        executor, session_rebuilt = self._get_or_rebuild_session(config)
+        exported = executor.export_tools(adapter, context=context)
+        return ExportToolsResult(
+            session_rebuilt=session_rebuilt,
+            exported_tools=exported,
         )
 
     def execute_direct_tool(
@@ -168,7 +196,7 @@ class WorkbenchController:
         tool_name: str,
         arguments_text: str,
     ) -> DirectExecutionResult:
-        """Execute one tool directly through ToolRuntime."""
+        """Execute one tool through workflow execution to support approvals."""
         normalized_tool_name = tool_name.strip()
         if normalized_tool_name == "":
             raise ValueError("A tool name is required for direct execution.")
@@ -177,13 +205,24 @@ class WorkbenchController:
             arguments_text,
             error_prefix="Direct tool arguments",
         )
-        registry = self.build_registry(config)
-        runtime = ToolRuntime(registry, policy=self.build_policy(config))
-        result = runtime.execute(
-            ToolInvocationRequest(tool_name=normalized_tool_name, arguments=arguments),
-            self._make_context(config, invocation_id="workbench-direct-tool"),
+        context = self._make_context(config, invocation_id="workbench-direct-tool")
+        executor, session_rebuilt = self._get_or_rebuild_session(config)
+        workflow_result = executor.execute_parsed_response(
+            ParsedModelResponse(
+                invocations=[
+                    ToolInvocationRequest(
+                        tool_name=normalized_tool_name,
+                        arguments=arguments,
+                    )
+                ]
+            ),
+            context,
         )
-        return DirectExecutionResult(tool_result=result)
+        return DirectExecutionResult(
+            session_rebuilt=session_rebuilt,
+            workflow_result=workflow_result,
+            tool_result=self._latest_tool_result(workflow_result),
+        )
 
     def run_model_turn(
         self,
@@ -196,16 +235,15 @@ class WorkbenchController:
         if normalized_prompt == "":
             raise ValueError("A prompt is required to run a model turn.")
 
-        registry = self.build_registry(config)
-        policy = self.build_policy(config)
-        executor = WorkflowExecutor(registry, policy=policy)
         adapter = self._build_adapter(config.mode)
-        model_turn_context = self._make_context(
+        policy_context = self._make_context(
             config, invocation_id="workbench-model-turn"
         )
+        executor, session_rebuilt = self._get_or_rebuild_session(config)
         exported_tools = executor.export_tools(
             adapter,
-            context=model_turn_context,
+            context=policy_context,
+            include_requires_approval=True,
         )
         provider = self._build_provider(config)
         messages = [{"role": "user", "content": normalized_prompt}]
@@ -231,14 +269,42 @@ class WorkbenchController:
 
         workflow_result = None
         if config.execute_after_parse:
-            workflow_result = executor.execute_parsed_response(
-                parsed, model_turn_context
-            )
+            workflow_result = executor.execute_parsed_response(parsed, policy_context)
 
         return ModelTurnExecutionResult(
+            session_rebuilt=session_rebuilt,
             exported_tools=exported_tools,
             parsed_response=parsed,
             workflow_result=workflow_result,
+        )
+
+    def resolve_pending_approval(
+        self,
+        config: WorkbenchConfigState,
+        *,
+        approval_id: str,
+        approved: bool,
+    ) -> ApprovalResolutionResult:
+        """Resolve one pending approval and continue execution."""
+        executor, session_rebuilt = self._get_or_rebuild_session(config)
+        workflow_result = executor.resolve_pending_approval(
+            approval_id=approval_id,
+            approved=approved,
+        )
+        return ApprovalResolutionResult(
+            session_rebuilt=session_rebuilt,
+            workflow_result=workflow_result,
+        )
+
+    def finalize_expired_approvals(
+        self,
+        config: WorkbenchConfigState,
+    ) -> ApprovalFinalizeResult:
+        """Finalize approvals past their configured expiration time."""
+        executor, session_rebuilt = self._get_or_rebuild_session(config)
+        return ApprovalFinalizeResult(
+            session_rebuilt=session_rebuilt,
+            workflow_results=executor.finalize_expired_approvals(),
         )
 
     def build_policy(self, config: WorkbenchConfigState) -> ToolPolicy:
@@ -254,8 +320,19 @@ class WorkbenchController:
         if config.allow_external_write:
             allowed_side_effects.add(SideEffectClass.EXTERNAL_WRITE)
 
+        require_approval_for: set[SideEffectClass] = set()
+        if config.require_approval_for_local_read:
+            require_approval_for.add(SideEffectClass.LOCAL_READ)
+        if config.require_approval_for_local_write:
+            require_approval_for.add(SideEffectClass.LOCAL_WRITE)
+        if config.require_approval_for_external_read:
+            require_approval_for.add(SideEffectClass.EXTERNAL_READ)
+        if config.require_approval_for_external_write:
+            require_approval_for.add(SideEffectClass.EXTERNAL_WRITE)
+
         return ToolPolicy(
             allowed_side_effects=allowed_side_effects,
+            require_approval_for=require_approval_for,
             allow_network=config.allow_network,
             allow_filesystem=config.allow_filesystem,
             allow_subprocess=config.allow_subprocess,
@@ -301,6 +378,39 @@ class WorkbenchController:
             base_url=base_url,
             api_key=config.api_key.strip() or None,
         )
+
+    def _get_or_rebuild_session(
+        self,
+        config: WorkbenchConfigState,
+    ) -> tuple[WorkflowExecutor, bool]:
+        signature = self._session_signature(config)
+        if (
+            self._active_session is not None
+            and self._active_session.signature == signature
+        ):
+            return self._active_session.executor, False
+
+        executor = WorkflowExecutor(
+            registry=self.build_registry(config),
+            policy=self.build_policy(config),
+        )
+        session_rebuilt = self._active_session is not None
+        self._active_session = _WorkbenchSession(signature=signature, executor=executor)
+        return executor, session_rebuilt
+
+    @staticmethod
+    def _session_signature(config: WorkbenchConfigState) -> str:
+        return json.dumps(config.model_dump(mode="json"), sort_keys=True)
+
+    @staticmethod
+    def _latest_tool_result(workflow_result: WorkflowTurnResult) -> ToolResult | None:
+        for outcome in reversed(workflow_result.outcomes):
+            if (
+                outcome.status is WorkflowInvocationStatus.EXECUTED
+                and outcome.tool_result is not None
+            ):
+                return outcome.tool_result
+        return None
 
     @staticmethod
     def _parse_json_object(

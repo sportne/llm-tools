@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 from pydantic import BaseModel
 
@@ -15,13 +18,29 @@ from llm_tools.tool_api import (
     PolicyVerdict,
     Tool,
     ToolContext,
+    ToolInvocationRequest,
     ToolPolicy,
     ToolRegistry,
-    ToolResult,
     ToolRuntime,
     ToolSpec,
 )
-from llm_tools.workflow_api.models import WorkflowTurnResult
+from llm_tools.workflow_api.models import (
+    ApprovalRequest,
+    WorkflowInvocationOutcome,
+    WorkflowInvocationStatus,
+    WorkflowTurnResult,
+)
+
+
+@dataclass(slots=True)
+class _PendingApprovalState:
+    """In-memory state for one pending approval request."""
+
+    approval_request: ApprovalRequest
+    parsed_response: ParsedModelResponse
+    base_context: ToolContext
+    pending_index: int
+    expires_at: datetime
 
 
 class WorkflowExecutor:
@@ -35,6 +54,7 @@ class WorkflowExecutor:
         self._registry = registry
         self._policy = policy or ToolPolicy()
         self._runtime = ToolRuntime(registry, policy=self._policy)
+        self._pending_approvals: dict[str, _PendingApprovalState] = {}
 
     def export_tools(
         self,
@@ -66,20 +86,13 @@ class WorkflowExecutor:
         if parsed_response.final_response is not None:
             return WorkflowTurnResult(parsed_response=parsed_response)
 
-        tool_results: list[ToolResult] = []
-        invocation_count = len(parsed_response.invocations)
-        for index, request in enumerate(parsed_response.invocations, start=1):
-            tool_context = self._make_tool_context(
-                base_context=context,
-                index=index,
-                invocation_count=invocation_count,
-            )
-            tool_results.append(self._runtime.execute(request, tool_context))
-
-        return WorkflowTurnResult(
+        outcomes = self._execute_sequence(
             parsed_response=parsed_response,
-            tool_results=tool_results,
+            base_context=context,
+            start_index=1,
+            approved_indices=set(),
         )
+        return WorkflowTurnResult(parsed_response=parsed_response, outcomes=outcomes)
 
     def execute_model_output(
         self,
@@ -90,6 +103,230 @@ class WorkflowExecutor:
         """Parse one model output and execute any resulting tool invocations."""
         parsed_response = adapter.parse_model_output(payload)
         return self.execute_parsed_response(parsed_response, context)
+
+    def list_pending_approvals(self) -> list[ApprovalRequest]:
+        """Return pending approvals in insertion order."""
+        return [state.approval_request for state in self._pending_approvals.values()]
+
+    def resolve_pending_approval(
+        self,
+        approval_id: str,
+        approved: bool,
+        *,
+        now: datetime | None = None,
+    ) -> WorkflowTurnResult:
+        """Resolve one pending approval and continue execution from that point."""
+        del now
+        try:
+            state = self._pending_approvals.pop(approval_id)
+        except KeyError as exc:
+            raise ValueError(f"Unknown approval id: {approval_id}") from exc
+
+        if approved:
+            outcomes = self._execute_sequence(
+                parsed_response=state.parsed_response,
+                base_context=state.base_context,
+                start_index=state.pending_index,
+                approved_indices={state.pending_index},
+            )
+            return WorkflowTurnResult(
+                parsed_response=state.parsed_response,
+                outcomes=outcomes,
+            )
+
+        denied_outcome = self._build_approval_outcome(
+            status=WorkflowInvocationStatus.APPROVAL_DENIED,
+            approval_request=state.approval_request,
+        )
+        remaining = self._execute_sequence(
+            parsed_response=state.parsed_response,
+            base_context=state.base_context,
+            start_index=state.pending_index + 1,
+            approved_indices=set(),
+        )
+        return WorkflowTurnResult(
+            parsed_response=state.parsed_response,
+            outcomes=[denied_outcome, *remaining],
+        )
+
+    def finalize_expired_approvals(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> list[WorkflowTurnResult]:
+        """Finalize approvals whose deadline has passed as timed-out denials."""
+        current_time = now or self._utc_now()
+        expired_ids = [
+            approval_id
+            for approval_id, state in self._pending_approvals.items()
+            if state.expires_at <= current_time
+        ]
+
+        results: list[WorkflowTurnResult] = []
+        for approval_id in expired_ids:
+            state = self._pending_approvals.pop(approval_id)
+            timeout_outcome = self._build_approval_outcome(
+                status=WorkflowInvocationStatus.APPROVAL_TIMED_OUT,
+                approval_request=state.approval_request,
+            )
+            remaining = self._execute_sequence(
+                parsed_response=state.parsed_response,
+                base_context=state.base_context,
+                start_index=state.pending_index + 1,
+                approved_indices=set(),
+            )
+            results.append(
+                WorkflowTurnResult(
+                    parsed_response=state.parsed_response,
+                    outcomes=[timeout_outcome, *remaining],
+                )
+            )
+
+        return results
+
+    def _execute_sequence(
+        self,
+        *,
+        parsed_response: ParsedModelResponse,
+        base_context: ToolContext,
+        start_index: int,
+        approved_indices: set[int],
+    ) -> list[WorkflowInvocationOutcome]:
+        outcomes: list[WorkflowInvocationOutcome] = []
+        invocation_count = len(parsed_response.invocations)
+
+        for index in range(start_index, invocation_count + 1):
+            request = parsed_response.invocations[index - 1]
+            tool_context = self._make_tool_context(
+                base_context=base_context,
+                index=index,
+                invocation_count=invocation_count,
+            )
+            outcome, pending_state = self._execute_one(
+                parsed_response=parsed_response,
+                base_context=base_context,
+                request=request,
+                index=index,
+                context=tool_context,
+                approval_override=index in approved_indices,
+            )
+            outcomes.append(outcome)
+            if pending_state is not None:
+                self._pending_approvals[pending_state.approval_request.approval_id] = (
+                    pending_state
+                )
+                break
+
+        return outcomes
+
+    def _execute_one(
+        self,
+        *,
+        parsed_response: ParsedModelResponse,
+        base_context: ToolContext,
+        request: ToolInvocationRequest,
+        index: int,
+        context: ToolContext,
+        approval_override: bool,
+    ) -> tuple[WorkflowInvocationOutcome, _PendingApprovalState | None]:
+        try:
+            tool = self._registry.get(request.tool_name)
+            policy_decision = self._policy.evaluate(tool, context)
+        except Exception:
+            result = self._runtime.execute(request, context)
+            return self._build_executed_outcome(
+                index=index, request=request, result=result
+            ), None
+
+        if policy_decision.requires_approval and not approval_override:
+            approval_request, expires_at = self._make_approval_request(
+                request=request,
+                index=index,
+                tool=tool,
+                policy_reason=policy_decision.reason,
+                policy_metadata=policy_decision.metadata,
+            )
+            pending_state = _PendingApprovalState(
+                approval_request=approval_request,
+                parsed_response=parsed_response.model_copy(deep=True),
+                base_context=base_context.model_copy(deep=True),
+                pending_index=index,
+                expires_at=expires_at,
+            )
+            return (
+                self._build_approval_outcome(
+                    status=WorkflowInvocationStatus.APPROVAL_REQUESTED,
+                    approval_request=approval_request,
+                ),
+                pending_state,
+            )
+
+        runtime = self._runtime
+        if approval_override and policy_decision.requires_approval:
+            runtime = self._runtime_with_approval_override(tool)
+        result = runtime.execute(request, context)
+        return self._build_executed_outcome(
+            index=index, request=request, result=result
+        ), None
+
+    def _runtime_with_approval_override(self, tool: Tool[Any, Any]) -> ToolRuntime:
+        policy = self._policy.model_copy(deep=True)
+        policy.require_approval_for = set(policy.require_approval_for)
+        policy.require_approval_for.discard(tool.spec.side_effects)
+        return ToolRuntime(self._registry, policy=policy)
+
+    def _make_approval_request(
+        self,
+        *,
+        request: ToolInvocationRequest,
+        index: int,
+        tool: Tool[Any, Any],
+        policy_reason: str,
+        policy_metadata: dict[str, Any],
+    ) -> tuple[ApprovalRequest, datetime]:
+        requested_at = self._utc_now()
+        expires_at = requested_at + timedelta(
+            seconds=self._policy.approval_timeout_seconds
+        )
+        approval_request = ApprovalRequest(
+            approval_id=f"approval-{uuid4().hex}",
+            invocation_index=index,
+            request=request,
+            tool_name=tool.spec.name,
+            tool_version=tool.spec.version,
+            policy_reason=policy_reason,
+            policy_metadata=dict(policy_metadata),
+            requested_at=self._to_timestamp(requested_at),
+            expires_at=self._to_timestamp(expires_at),
+        )
+        return approval_request, expires_at
+
+    @staticmethod
+    def _build_executed_outcome(
+        *,
+        index: int,
+        request: ToolInvocationRequest,
+        result: Any,
+    ) -> WorkflowInvocationOutcome:
+        return WorkflowInvocationOutcome(
+            invocation_index=index,
+            request=request,
+            status=WorkflowInvocationStatus.EXECUTED,
+            tool_result=result,
+        )
+
+    @staticmethod
+    def _build_approval_outcome(
+        *,
+        status: WorkflowInvocationStatus,
+        approval_request: ApprovalRequest,
+    ) -> WorkflowInvocationOutcome:
+        return WorkflowInvocationOutcome(
+            invocation_index=approval_request.invocation_index,
+            request=approval_request.request,
+            status=status,
+            approval_request=approval_request,
+        )
 
     def _make_tool_context(
         self,
@@ -126,3 +363,11 @@ class WorkflowExecutor:
             ):
                 filtered.append(tool)
         return filtered
+
+    @staticmethod
+    def _utc_now() -> datetime:
+        return datetime.now(UTC)
+
+    @staticmethod
+    def _to_timestamp(value: datetime) -> str:
+        return value.isoformat().replace("+00:00", "Z")
