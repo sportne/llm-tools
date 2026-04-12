@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+from types import SimpleNamespace
+
 import pytest
 from pydantic import ValidationError
 
+from llm_tools.llm_adapters import ParsedModelResponse
 from llm_tools.tool_api import ToolResult
+from llm_tools.tool_api.redaction import RedactionConfig, RedactionRule, RedactionTarget
 from llm_tools.workflow_api import (
     ChatCitation,
     ChatFinalResponse,
@@ -21,7 +26,14 @@ from llm_tools.workflow_api.chat_session import (
     _build_interrupted_result,
     _estimate_messages_tokens,
     _finalize_session_turn_result,
+    _format_tool_result_for_model,
+    _parse_timestamp,
     _prepare_session_context,
+    _redact_tool_payload,
+    _sanitize_execution_record,
+    _sanitize_invocation_payload,
+    _sanitize_parsed_response_for_inspector,
+    _sanitize_tool_result_for_chat,
     _sanitize_tool_result_message,
     _serialize_chat_message,
     _summarize_session_token_usage,
@@ -158,3 +170,126 @@ def test_chat_session_internal_helpers_cover_branches() -> None:
     )
     assert summarized.session_tokens is not None
     assert summarized.active_context_tokens is not None
+
+
+def test_chat_session_sanitizer_helpers_cover_edge_cases() -> None:
+    no_trim = _prepare_session_context(
+        user_message="new question",
+        session_state=ChatSessionState(),
+        system_prompt="sys",
+        session_config=ChatSessionConfig(max_context_tokens=100),
+    )
+    assert no_trim[3] == 0
+    assert no_trim[4] is None
+
+    rendered = _format_tool_result_for_model({"value": "x" * 80}, max_chars=20)
+    assert rendered.endswith("...(truncated)")
+
+    execution_record = {
+        "request": {"arguments": {"secret": "plain"}},
+        "redacted_input": {"secret": "[REDACTED]"},
+        "validated_input": {"secret": "plain"},
+        "validated_output": {"ok": True},
+    }
+    sanitized_record = _sanitize_execution_record(execution_record)
+    assert sanitized_record == {
+        "request": {"arguments": {"secret": "[REDACTED]"}},
+        "redacted_input": {"secret": "[REDACTED]"},
+    }
+    assert _sanitize_execution_record("bad") is None
+    assert _sanitize_execution_record({"request": "bad", "redacted_input": {}}) == {
+        "request": "bad",
+        "redacted_input": {},
+    }
+
+    raw_result = ToolResult(
+        ok=True,
+        tool_name="read_file",
+        tool_version="0.1.0",
+        output={"content": "ok"},
+        metadata={"execution_record": execution_record},
+    )
+    sanitized_result = _sanitize_tool_result_for_chat(raw_result)
+    assert sanitized_result.metadata["execution_record"] == sanitized_record
+
+    untouched_result = ToolResult(
+        ok=True,
+        tool_name="read_file",
+        tool_version="0.1.0",
+        output={"content": "ok"},
+        metadata={"execution_record": "bad"},
+    )
+    assert (
+        _sanitize_tool_result_for_chat(untouched_result).metadata["execution_record"]
+        == "bad"
+    )
+
+    redaction_config = RedactionConfig(
+        rules=[
+            RedactionRule(
+                field_names={"private_value"},
+                targets={RedactionTarget.INPUT},
+                replacement="[MASKED]",
+            )
+        ]
+    )
+    assert (
+        _sanitize_parsed_response_for_inspector(
+            "raw",
+            redaction_config=redaction_config,
+        )
+        == "raw"
+    )
+
+    not_a_list = SimpleNamespace(
+        model_dump=lambda mode="json": {"invocations": "bad", "final_response": None}
+    )
+    assert _sanitize_parsed_response_for_inspector(
+        not_a_list,
+        redaction_config=redaction_config,
+    ) == {"invocations": "bad", "final_response": None}
+
+    parsed = ParsedModelResponse(
+        invocations=[
+            {
+                "tool_name": "read_file",
+                "arguments": {"path": "a.txt", "private_value": "plain"},
+            }
+        ]
+    )
+    sanitized_parsed = _sanitize_parsed_response_for_inspector(
+        parsed,
+        redaction_config=redaction_config,
+    )
+    assert (
+        sanitized_parsed["invocations"][0]["arguments"]["private_value"] == "[MASKED]"
+    )
+
+    assert (
+        _sanitize_invocation_payload(
+            "raw",
+            redaction_config=redaction_config,
+        )
+        == "raw"
+    )
+    assert _sanitize_invocation_payload(
+        {"tool_name": 1, "arguments": {}},
+        redaction_config=redaction_config,
+    ) == {"tool_name": 1, "arguments": {}}
+    assert _sanitize_invocation_payload(
+        {"tool_name": "read_file", "arguments": "bad"},
+        redaction_config=redaction_config,
+    ) == {"tool_name": "read_file", "arguments": "bad"}
+
+    assert (
+        _redact_tool_payload(
+            "read_file",
+            "plain-text payload",
+            target=RedactionTarget.INPUT,
+            redaction_config=redaction_config,
+        )
+        == {}
+    )
+
+    timestamp = _parse_timestamp("2026-01-01T00:00:00Z")
+    assert timestamp.tzinfo is UTC

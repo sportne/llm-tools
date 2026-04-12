@@ -165,6 +165,14 @@ class WorkflowExecutor:
         """Return pending approvals in insertion order."""
         return [state.approval_request for state in self._pending_approvals.values()]
 
+    def cancel_pending_approval(self, approval_id: str) -> ApprovalRequest:
+        """Discard one pending approval without resuming execution."""
+        try:
+            state = self._pending_approvals.pop(approval_id)
+        except KeyError as exc:
+            raise ValueError(f"Unknown approval id: {approval_id}") from exc
+        return state.approval_request
+
     def resolve_pending_approval(
         self,
         approval_id: str,

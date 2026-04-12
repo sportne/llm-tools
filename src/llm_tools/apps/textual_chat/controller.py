@@ -17,6 +17,7 @@ from llm_tools.apps.textual_chat.presentation import (
     TranscriptEntry,
     format_final_response,
     format_final_response_metadata,
+    pretty_json,
 )
 from llm_tools.apps.textual_chat.prompts import build_chat_system_prompt
 from llm_tools.apps.textual_chat.screens import (
@@ -26,9 +27,18 @@ from llm_tools.apps.textual_chat.screens import (
     TranscriptCopyModal,
 )
 from llm_tools.llm_providers import OpenAICompatibleProvider, ProviderModeStrategy
-from llm_tools.tool_api import SideEffectClass, ToolContext, ToolPolicy, ToolRegistry
+from llm_tools.tool_api import (
+    SideEffectClass,
+    ToolContext,
+    ToolPolicy,
+    ToolRegistry,
+    ToolSpec,
+)
 from llm_tools.tools import register_filesystem_tools, register_text_tools
 from llm_tools.workflow_api import (
+    ChatWorkflowApprovalEvent,
+    ChatWorkflowApprovalResolvedEvent,
+    ChatWorkflowInspectorEvent,
     ChatWorkflowResultEvent,
     ChatWorkflowStatusEvent,
     ChatWorkflowTurnResult,
@@ -192,7 +202,18 @@ class ChatScreenController:
         rendered = self._status_base_text
         if rendered and self._status_animation_step:
             rendered = f"{rendered}{'.' * self._status_animation_step}"
-        self._screen.query_one("#status-bar", Static).update(rendered)
+        self._screen.query_one("#status-text", Static).update(rendered)
+        self._refresh_approval_actions()
+
+    def _refresh_approval_actions(self) -> None:
+        has_pending_approval = self._screen._pending_approval is not None
+        decision_in_flight = self._screen._approval_decision_in_flight
+        approve_button = self._screen.query_one("#approve-button", Button)
+        deny_button = self._screen.query_one("#deny-button", Button)
+        approve_button.display = has_pending_approval
+        deny_button.display = has_pending_approval
+        approve_button.disabled = not has_pending_approval or decision_in_flight
+        deny_button.disabled = not has_pending_approval or decision_in_flight
 
     def refresh_footer(self) -> None:
         session_tokens = (
@@ -209,11 +230,15 @@ class ChatScreenController:
         if self._screen._footer_confidence is not None:
             footer += f" | confidence: {self._screen._footer_confidence:.2f}"
         if self._screen._busy:
-            footer += " | Enter send | Shift+Enter newline | Stop active turn | F6 copy transcript"
+            footer += " | Enter send | Shift+Enter newline | Stop active turn | F6 copy transcript | F7 inspector"
         else:
-            footer += " | Enter send | Shift+Enter newline | F6 copy transcript | /help | quit"
+            footer += (
+                " | Enter send | Shift+Enter newline | F6 copy transcript | "
+                "F7 inspector | /help | quit"
+            )
         self._screen.query_one("#footer-bar", Static).update(footer)
         self._screen.query_one("#stop-button", Button).disabled = not self._screen._busy
+        self._refresh_approval_actions()
 
     def update_footer_metrics(
         self,
@@ -226,6 +251,64 @@ class ChatScreenController:
         self._screen._footer_active_context_tokens = active_context_tokens
         self._screen._footer_confidence = confidence
         self.refresh_footer()
+
+    def refresh_inspector(self) -> None:
+        inspector_pane = self._screen.query_one("#inspector-pane", VerticalScroll)
+        inspector_pane.display = self._screen._inspector_open
+        self._screen.query_one("#tool-state-box", Static).update(
+            self._render_tool_state()
+        )
+        self._screen.query_one("#pending-approval-box", Static).update(
+            self._render_pending_approval()
+        )
+        self._screen.query_one("#provider-messages-box", Static).update(
+            self._render_inspector_entries(self._screen._inspector_provider_messages)
+        )
+        self._screen.query_one("#parsed-response-box", Static).update(
+            self._render_inspector_entries(self._screen._inspector_parsed_responses)
+        )
+        self._screen.query_one("#tool-execution-box", Static).update(
+            self._render_inspector_entries(self._screen._inspector_tool_executions)
+        )
+
+    def _render_tool_state(self) -> str:
+        enabled_tools = sorted(self._screen._enabled_tools)
+        disabled_tools = sorted(
+            set(self._screen._available_tool_specs).difference(
+                self._screen._enabled_tools
+            )
+        )
+        approvals_enabled = sorted(
+            side_effect.value for side_effect in self._screen._require_approval_for
+        )
+        payload = {
+            "enabled_tools": enabled_tools,
+            "disabled_tools": disabled_tools,
+            "require_approval_for": approvals_enabled,
+        }
+        return pretty_json(payload)
+
+    def _render_pending_approval(self) -> str:
+        if self._screen._pending_approval is None:
+            return "No pending approval."
+        return pretty_json(self._screen._pending_approval.model_dump(mode="json"))
+
+    def _render_inspector_entries(self, entries: list[dict[str, object]]) -> str:
+        if not entries:
+            return ""
+        return "\n\n".join(
+            f"{entry['label']}\n{pretty_json(entry['payload'])}" for entry in entries
+        )
+
+    def append_inspector_entry(
+        self,
+        entries: list[dict[str, object]],
+        *,
+        label: str,
+        payload: object,
+    ) -> None:
+        entries.append({"label": label, "payload": payload})
+        self.refresh_inspector()
 
     def clear_composer(self) -> None:
         self._screen.query_one("#composer", ComposerTextArea).load_text("")
@@ -316,13 +399,66 @@ class ChatScreenController:
         self._screen._busy = False
         self._screen._active_runner = None
         self._screen._active_assistant_entry = None
+        self._screen._pending_approval = None
+        self._screen._approval_decision_in_flight = False
         self._screen._pending_interrupt_draft = None
         self.refresh_footer()
+        self.refresh_inspector()
         self._screen.query_one("#composer", ComposerTextArea).focus()
 
     def handle_turn_status(self, event: object) -> None:
         typed_event = ChatWorkflowStatusEvent.model_validate(event)
         self.set_status(typed_event.status)
+
+    def handle_turn_approval_requested(self, event: object) -> None:
+        typed_event = ChatWorkflowApprovalEvent.model_validate(event)
+        self._screen._pending_approval = typed_event.approval
+        self._screen._approval_decision_in_flight = False
+        self.set_status(f"approval required for {typed_event.approval.tool_name}")
+        self.append_transcript(
+            "system",
+            (
+                f"Approval requested for {typed_event.approval.tool_name}: "
+                f"{typed_event.approval.policy_reason}"
+            ),
+        )
+        self._refresh_approval_actions()
+        self.refresh_inspector()
+
+    def handle_turn_approval_resolved(self, event: object) -> None:
+        typed_event = ChatWorkflowApprovalResolvedEvent.model_validate(event)
+        self._screen._pending_approval = None
+        self._screen._approval_decision_in_flight = False
+        resolution_text = {
+            "approved": "Approved pending approval request.",
+            "denied": "Denied pending approval request.",
+            "timed_out": "Pending approval request timed out.",
+            "cancelled": "Pending approval request was cancelled.",
+        }[typed_event.resolution]
+        self.append_transcript("system", resolution_text)
+        if typed_event.resolution == "approved":
+            self.set_status("resuming turn")
+        elif typed_event.resolution == "denied":
+            self.set_status("continuing without approval")
+        elif typed_event.resolution == "timed_out":
+            self.set_status("approval timed out")
+        else:
+            self.set_status("")
+        self._refresh_approval_actions()
+        self.refresh_inspector()
+
+    def handle_turn_inspector_event(self, event: object) -> None:
+        typed_event = ChatWorkflowInspectorEvent.model_validate(event)
+        label = (
+            f"Turn {self._screen._active_turn_number} Round {typed_event.round_index} "
+            f"{typed_event.kind.replace('_', ' ')}"
+        )
+        target = {
+            "provider_messages": self._screen._inspector_provider_messages,
+            "parsed_response": self._screen._inspector_parsed_responses,
+            "tool_execution": self._screen._inspector_tool_executions,
+        }[typed_event.kind]
+        self.append_inspector_entry(target, label=label, payload=typed_event.payload)
 
     def show_final_response(self, result: ChatWorkflowTurnResult) -> None:
         final_response = result.final_response
@@ -341,6 +477,8 @@ class ChatScreenController:
         self._screen._session_state = (
             result.session_state or self._screen._session_state
         )
+        self._screen._pending_approval = None
+        self._screen._approval_decision_in_flight = False
         if result.context_warning:
             self.append_transcript("system", result.context_warning)
         if result.status == "needs_continuation" and result.continuation_reason:
@@ -386,17 +524,137 @@ class ChatScreenController:
         pending_draft = self._screen._pending_interrupt_draft
         self._screen._pending_interrupt_draft = None
         self.refresh_footer()
+        self.refresh_inspector()
         self._screen.query_one("#composer", ComposerTextArea).focus()
         if pending_draft is not None:
             self.submit_draft(pending_draft)
+
+    def toggle_inspector(self) -> None:
+        self._screen._inspector_open = not self._screen._inspector_open
+        self.refresh_inspector()
+
+    def resolve_active_approval(self, approved: bool) -> None:
+        runner = self._screen._active_runner
+        if runner is None or self._screen._pending_approval is None:
+            return
+        if not runner.resolve_pending_approval(approved):
+            return
+        self._screen._approval_decision_in_flight = True
+        self.set_status("approving" if approved else "denying")
+        self.refresh_inspector()
+
+    def _tools_command_text(self) -> str:
+        enabled_tools = sorted(self._screen._enabled_tools)
+        disabled_tools = sorted(
+            set(self._screen._available_tool_specs).difference(
+                self._screen._enabled_tools
+            )
+        )
+        approval_suffix = (
+            " (approval required)"
+            if SideEffectClass.LOCAL_READ in self._screen._require_approval_for
+            else ""
+        )
+        enabled_lines = [
+            (
+                f"- {tool_name}: "
+                f"{self._screen._available_tool_specs[tool_name].side_effects.value}"
+                f"{approval_suffix}"
+            )
+            for tool_name in enabled_tools
+        ]
+        disabled_lines = [f"- {tool_name}" for tool_name in disabled_tools]
+        parts = [
+            "Enabled tools:\n"
+            + ("\n".join(enabled_lines) if enabled_lines else "- none"),
+            "Disabled tools:\n"
+            + ("\n".join(disabled_lines) if disabled_lines else "- none"),
+        ]
+        return "\n\n".join(parts)
+
+    def _handle_tools_command(self, user_message: str) -> bool:
+        parts = user_message.strip().split()
+        if len(parts) == 1:
+            self.append_transcript("system", self._tools_command_text())
+            return True
+        if len(parts) == 2 and parts[1].lower() == "reset":
+            self._screen._enabled_tools = set(self._screen._default_enabled_tools)
+            self.append_transcript("system", "Restored the default session tool set.")
+            self.refresh_inspector()
+            return True
+        if len(parts) == 3 and parts[1].lower() in {"enable", "disable"}:
+            tool_name = parts[2].strip()
+            if tool_name not in self._screen._available_tool_specs:
+                self.append_transcript("error", f"Unknown tool: {tool_name}")
+                return True
+            if parts[1].lower() == "enable":
+                self._screen._enabled_tools.add(tool_name)
+                self.append_transcript("system", f"Enabled tool: {tool_name}")
+            else:
+                self._screen._enabled_tools.discard(tool_name)
+                self.append_transcript("system", f"Disabled tool: {tool_name}")
+            self.refresh_inspector()
+            return True
+        self.append_transcript(
+            "system",
+            (
+                "Usage: /tools | /tools enable <tool_name> | "
+                "/tools disable <tool_name> | /tools reset"
+            ),
+        )
+        return True
+
+    def _handle_approvals_command(self, user_message: str) -> bool:
+        parts = user_message.strip().split()
+        if len(parts) == 1:
+            enabled = SideEffectClass.LOCAL_READ in self._screen._require_approval_for
+            self.append_transcript(
+                "system",
+                (
+                    "Approvals are ON for local_read tools."
+                    if enabled
+                    else "Approvals are OFF for local_read tools."
+                ),
+            )
+            return True
+        if len(parts) == 2 and parts[1].lower() in {"on", "off"}:
+            if parts[1].lower() == "on":
+                self._screen._require_approval_for.add(SideEffectClass.LOCAL_READ)
+                self.append_transcript(
+                    "system", "Enabled approvals for local_read tools."
+                )
+            else:
+                self._screen._require_approval_for.discard(SideEffectClass.LOCAL_READ)
+                self.append_transcript(
+                    "system", "Disabled approvals for local_read tools."
+                )
+            self.refresh_inspector()
+            return True
+        self.append_transcript(
+            "system", "Usage: /approvals | /approvals on | /approvals off"
+        )
+        return True
 
     def handle_inline_command(self, user_message: str) -> bool:
         normalized = user_message.strip().lower()
         if normalized == "/help":
             self.append_transcript(
                 "system",
-                "Ask grounded questions about the selected root. Use /model to inspect or switch models. Use /copy to open a selectable transcript view. Use quit or exit to leave.",
+                (
+                    "Ask grounded questions about the selected root. Use /model to "
+                    "inspect or switch models, /tools to manage tools, /approvals "
+                    "to toggle approvals, /inspect to toggle the inspector, and "
+                    "/copy to open a selectable transcript view. Use quit or exit "
+                    "to leave."
+                ),
             )
+            return True
+        if normalized.startswith("/tools"):
+            return self._handle_tools_command(user_message)
+        if normalized.startswith("/approvals"):
+            return self._handle_approvals_command(user_message)
+        if normalized == "/inspect":
+            self.toggle_inspector()
             return True
         if normalized.startswith("/model"):
             parts = user_message.strip().split(maxsplit=1)
@@ -431,26 +689,21 @@ class ChatScreenController:
     def submit_draft(self, raw_draft: str) -> None:
         if not raw_draft.strip():
             return
+        if self.handle_inline_command(raw_draft):
+            self.clear_composer()
+            return
         if self._screen._busy:
-            if raw_draft.strip().lower().startswith("/model"):
-                self.append_transcript(
-                    "system",
-                    "Stop the active turn before changing models.",
-                )
-                return
             self._screen.app.push_screen(
                 InterruptConfirmModal(),
                 callback=self.handle_interrupt_confirmation,
             )
-            return
-        if self.handle_inline_command(raw_draft):
-            self.clear_composer()
             return
         if not self.ensure_provider_ready():
             return
         self.clear_composer()
         self.append_transcript("user", raw_draft)
         self._screen._active_assistant_entry = None
+        self._screen._active_turn_number += 1
         self._screen._busy = True
         self.refresh_footer()
         self._screen._run_turn_worker(raw_draft)
@@ -491,18 +744,48 @@ def create_provider(
     )
 
 
-def build_chat_executor() -> tuple[ToolRegistry, WorkflowExecutor]:
-    """Return the read-only chat registry and executor."""
+def build_chat_registry() -> ToolRegistry:
+    """Return the full generic tool registry available to the chat app."""
     registry = ToolRegistry()
     register_filesystem_tools(registry)
     register_text_tools(registry)
-    policy = ToolPolicy(
+    return registry
+
+
+def build_chat_policy(screen: ChatScreen) -> ToolPolicy:
+    """Build the session-scoped chat policy from current UI state."""
+    return ToolPolicy(
+        allowed_tools=set(screen._enabled_tools),
         allowed_side_effects={SideEffectClass.NONE, SideEffectClass.LOCAL_READ},
+        require_approval_for=set(screen._require_approval_for),
         allow_network=False,
         allow_filesystem=True,
         allow_subprocess=False,
+        redaction=screen._config.policy.redaction.model_copy(deep=True),
     )
+
+
+def build_chat_executor(
+    screen: ChatScreen | None = None,
+) -> tuple[ToolRegistry, WorkflowExecutor]:
+    """Return the chat registry and policy-aware executor for one turn."""
+    registry = build_chat_registry()
+    if screen is None:
+        policy = ToolPolicy(
+            allowed_side_effects={SideEffectClass.NONE, SideEffectClass.LOCAL_READ},
+            allow_network=False,
+            allow_filesystem=True,
+            allow_subprocess=False,
+        )
+    else:
+        policy = build_chat_policy(screen)
     return registry, WorkflowExecutor(registry=registry, policy=policy)
+
+
+def build_available_tool_specs() -> dict[str, ToolSpec]:
+    """Return all chat-visible tool specs keyed by tool name."""
+    registry = build_chat_registry()
+    return {tool.spec.name: tool.spec for tool in registry.list_registered_tools()}
 
 
 def build_chat_context(screen: ChatScreen) -> ToolContext:
@@ -532,4 +815,5 @@ def build_chat_system_prompt_for_screen(
     return build_chat_system_prompt(
         tool_registry=registry,
         tool_limits=screen._config.tool_limits,
+        enabled_tool_names=screen._enabled_tools,
     )

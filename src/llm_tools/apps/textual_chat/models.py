@@ -6,6 +6,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field, field_validator
 
+from llm_tools.tool_api import SideEffectClass
+from llm_tools.tool_api.redaction import RedactionConfig
 from llm_tools.tools.filesystem import SourceFilters, ToolLimits
 from llm_tools.workflow_api import ChatSessionConfig
 
@@ -93,6 +95,25 @@ class ChatUIConfig(BaseModel):
 
     show_token_usage: bool = True
     show_footer_help: bool = True
+    inspector_open_by_default: bool = False
+
+
+class ChatPolicyConfig(BaseModel):
+    """Startup policy defaults for the session-scoped chat controls."""
+
+    enabled_tools: list[str] | None = None
+    require_approval_for: set[SideEffectClass] = Field(default_factory=set)
+    redaction: RedactionConfig = Field(default_factory=RedactionConfig)
+
+    @field_validator("enabled_tools")
+    @classmethod
+    def validate_enabled_tools(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        cleaned = [entry.strip() for entry in value]
+        if any(not entry for entry in cleaned):
+            raise ValueError("enabled_tools must not contain empty values")
+        return cleaned
 
 
 class TextualChatConfig(BaseModel):
@@ -102,4 +123,5 @@ class TextualChatConfig(BaseModel):
     source_filters: SourceFilters = Field(default_factory=SourceFilters)
     session: ChatSessionConfig = Field(default_factory=ChatSessionConfig)
     tool_limits: ToolLimits = Field(default_factory=ToolLimits)
+    policy: ChatPolicyConfig = Field(default_factory=ChatPolicyConfig)
     ui: ChatUIConfig = Field(default_factory=ChatUIConfig)

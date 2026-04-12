@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import json
+
 from rich.console import ConsoleRenderable, Group
 from rich.markdown import Markdown as RichMarkdown
 from rich.text import Text
 from textual.widgets import Static
 
 from llm_tools.workflow_api import ChatCitation, ChatFinalResponse
+
+
+def pretty_json(value: object) -> str:
+    """Return a stable, human-readable JSON representation."""
+    if value is None:
+        return ""
+    return json.dumps(value, indent=2, sort_keys=True, default=str)
 
 
 def format_citation(citation: ChatCitation) -> str:

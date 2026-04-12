@@ -4,27 +4,38 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from threading import Lock
+from datetime import UTC, datetime
+from threading import Condition
 from uuid import uuid4
 
 from llm_tools.llm_adapters import ActionEnvelopeAdapter
 from llm_tools.llm_providers import OpenAICompatibleProvider
 from llm_tools.tool_api import ToolContext, ToolResult
+from llm_tools.tool_api.redaction import RedactionConfig, RedactionTarget, Redactor
 from llm_tools.tools.filesystem._content import dump_json
 from llm_tools.tools.filesystem.models import ToolLimits
 from llm_tools.workflow_api.chat_models import (
+    ChatApprovalResolution,
     ChatFinalResponse,
     ChatMessage,
     ChatSessionConfig,
     ChatSessionState,
     ChatSessionTurnRecord,
     ChatTokenUsage,
+    ChatWorkflowApprovalEvent,
+    ChatWorkflowApprovalResolvedEvent,
+    ChatWorkflowApprovalState,
+    ChatWorkflowInspectorEvent,
     ChatWorkflowResultEvent,
     ChatWorkflowStatusEvent,
     ChatWorkflowTurnResult,
 )
 from llm_tools.workflow_api.executor import WorkflowExecutor
-from llm_tools.workflow_api.models import WorkflowInvocationStatus
+from llm_tools.workflow_api.models import (
+    ApprovalRequest,
+    WorkflowInvocationStatus,
+    WorkflowTurnResult,
+)
 
 
 class ChatSessionTurnRunner:
@@ -41,6 +52,7 @@ class ChatSessionTurnRunner:
         base_context: ToolContext,
         session_config: ChatSessionConfig,
         tool_limits: ToolLimits,
+        redaction_config: RedactionConfig,
         temperature: float,
     ) -> None:
         (
@@ -61,15 +73,31 @@ class ChatSessionTurnRunner:
         self._base_context = base_context
         self._session_config = session_config
         self._tool_limits = tool_limits
+        self._redaction_config = redaction_config
         self._temperature = temperature
         self._adapter = ActionEnvelopeAdapter()
-        self._lock = Lock()
+        self._approval_condition = Condition()
         self._cancel_requested = False
+        self._pending_approval: ChatWorkflowApprovalState | None = None
+        self._pending_approval_decision: bool | None = None
 
     def cancel(self) -> None:
         """Request cooperative cancellation at the next safe boundary."""
-        with self._lock:
+        with self._approval_condition:
             self._cancel_requested = True
+            self._approval_condition.notify_all()
+
+    def resolve_pending_approval(self, approved: bool) -> bool:
+        """Resolve the currently pending approval request, when present."""
+        with self._approval_condition:
+            if (
+                self._pending_approval is None
+                or self._pending_approval_decision is not None
+            ):
+                return False
+            self._pending_approval_decision = approved
+            self._approval_condition.notify_all()
+            return True
 
     def _finalized_event(
         self,
@@ -88,7 +116,13 @@ class ChatSessionTurnRunner:
 
     def __iter__(
         self,
-    ) -> Iterator[ChatWorkflowStatusEvent | ChatWorkflowResultEvent]:
+    ) -> Iterator[
+        ChatWorkflowStatusEvent
+        | ChatWorkflowApprovalEvent
+        | ChatWorkflowApprovalResolvedEvent
+        | ChatWorkflowInspectorEvent
+        | ChatWorkflowResultEvent
+    ]:
         messages = [
             self._system_message,
             *self._prior_messages,
@@ -102,13 +136,10 @@ class ChatSessionTurnRunner:
 
         while True:
             if self._cancel_requested:
-                yield self._finalized_event(
-                    result=_build_interrupted_result(
-                        new_messages=new_messages,
-                        tool_results=tool_results,
-                        token_usage=None,
-                        reason="Interrupted by user.",
-                    )
+                yield self._interrupted_event(
+                    new_messages=new_messages,
+                    tool_results=tool_results,
+                    reason="Interrupted by user.",
                 )
                 return
 
@@ -120,23 +151,38 @@ class ChatSessionTurnRunner:
             prepared = self._executor.prepare_model_interaction(
                 self._adapter,
                 context=round_context,
+                include_requires_approval=True,
                 final_response_model=ChatFinalResponse,
+            )
+            round_index = round_count + 1
+            serialized_messages = [
+                _serialize_chat_message(message) for message in messages
+            ]
+            yield ChatWorkflowInspectorEvent(
+                round_index=round_index,
+                kind="provider_messages",
+                payload=serialized_messages,
             )
             parsed = self._provider.run(
                 adapter=self._adapter,
-                messages=[_serialize_chat_message(message) for message in messages],
+                messages=serialized_messages,
                 response_model=prepared.response_model,
                 request_params={"temperature": self._temperature},
             )
+            yield ChatWorkflowInspectorEvent(
+                round_index=round_index,
+                kind="parsed_response",
+                payload=_sanitize_parsed_response_for_inspector(
+                    parsed,
+                    redaction_config=self._redaction_config,
+                ),
+            )
 
             if self._cancel_requested:
-                yield self._finalized_event(
-                    result=_build_interrupted_result(
-                        new_messages=new_messages,
-                        tool_results=tool_results,
-                        token_usage=None,
-                        reason="Interrupted by user.",
-                    )
+                yield self._interrupted_event(
+                    new_messages=new_messages,
+                    tool_results=tool_results,
+                    reason="Interrupted by user.",
                 )
                 return
 
@@ -205,36 +251,23 @@ class ChatSessionTurnRunner:
             workflow_result = self._executor.execute_parsed_response(
                 parsed, round_context
             )
-            for outcome in workflow_result.outcomes:
-                if self._cancel_requested:
-                    yield self._finalized_event(
-                        result=_build_interrupted_result(
-                            new_messages=new_messages,
-                            tool_results=tool_results,
-                            token_usage=None,
-                            reason="Interrupted by user.",
-                        )
-                    )
-                    return
-                if (
-                    outcome.status is not WorkflowInvocationStatus.EXECUTED
-                    or outcome.tool_result is None
-                ):
-                    continue
-                yield ChatWorkflowStatusEvent(
-                    status=_tool_status_label(outcome.request.tool_name)
-                )
-                tool_results.append(outcome.tool_result)
-                executed_tool_call_count += 1
-                tool_message = ChatMessage(
-                    role="tool",
-                    content=_format_tool_result_for_model(
-                        _sanitize_tool_result_message(outcome.tool_result),
-                        max_chars=self._tool_limits.max_tool_result_chars,
-                    ),
-                )
-                messages.append(tool_message)
-                new_messages.append(tool_message)
+            interrupted = False
+            for event in self._consume_workflow_result(
+                workflow_result=workflow_result,
+                round_index=round_index,
+                messages=messages,
+                new_messages=new_messages,
+                tool_results=tool_results,
+                executed_tool_call_count_ref=[executed_tool_call_count],
+            ):
+                if isinstance(event, ChatWorkflowResultEvent):
+                    interrupted = True
+                yield event
+            executed_tool_call_count = self._executed_tool_call_count(
+                tool_results=tool_results
+            )
+            if interrupted:
+                return
 
             round_count += 1
             if round_count >= self._session_config.max_tool_round_trips:
@@ -253,6 +286,169 @@ class ChatSessionTurnRunner:
 
             yield ChatWorkflowStatusEvent(status="thinking")
 
+    def _consume_workflow_result(
+        self,
+        *,
+        workflow_result: WorkflowTurnResult,
+        round_index: int,
+        messages: list[ChatMessage],
+        new_messages: list[ChatMessage],
+        tool_results: list[ToolResult],
+        executed_tool_call_count_ref: list[int],
+    ) -> Iterator[
+        ChatWorkflowStatusEvent
+        | ChatWorkflowApprovalEvent
+        | ChatWorkflowApprovalResolvedEvent
+        | ChatWorkflowInspectorEvent
+        | ChatWorkflowResultEvent
+    ]:
+        for outcome in workflow_result.outcomes:
+            if self._cancel_requested:
+                yield self._interrupted_event(
+                    new_messages=new_messages,
+                    tool_results=tool_results,
+                    reason="Interrupted by user.",
+                )
+                return
+
+            if (
+                outcome.status is WorkflowInvocationStatus.EXECUTED
+                and outcome.tool_result is not None
+            ):
+                sanitized_tool_result = _sanitize_tool_result_for_chat(
+                    outcome.tool_result
+                )
+                yield ChatWorkflowStatusEvent(
+                    status=_tool_status_label(outcome.request.tool_name)
+                )
+                tool_results.append(sanitized_tool_result)
+                executed_tool_call_count_ref[0] += 1
+                execution_record = _sanitize_execution_record(
+                    sanitized_tool_result.metadata.get("execution_record")
+                )
+                if execution_record is not None:
+                    yield ChatWorkflowInspectorEvent(
+                        round_index=round_index,
+                        kind="tool_execution",
+                        payload=execution_record,
+                    )
+                tool_message = ChatMessage(
+                    role="tool",
+                    content=_format_tool_result_for_model(
+                        _sanitize_tool_result_message(sanitized_tool_result),
+                        max_chars=self._tool_limits.max_tool_result_chars,
+                    ),
+                )
+                messages.append(tool_message)
+                new_messages.append(tool_message)
+                continue
+
+            if (
+                outcome.status is WorkflowInvocationStatus.APPROVAL_REQUESTED
+                and outcome.approval_request is not None
+            ):
+                approval_state = _build_approval_state(
+                    outcome.approval_request,
+                    redaction_config=self._redaction_config,
+                )
+                self._set_pending_approval(approval_state)
+                yield ChatWorkflowApprovalEvent(approval=approval_state)
+                resolution = self._wait_for_approval_resolution(
+                    outcome.approval_request
+                )
+                yield ChatWorkflowApprovalResolvedEvent(
+                    approval=approval_state,
+                    resolution=resolution,
+                )
+                self._clear_pending_approval()
+
+                if resolution == "cancelled":
+                    if outcome.approval_request.approval_id:
+                        self._executor.cancel_pending_approval(
+                            outcome.approval_request.approval_id
+                        )
+                    yield self._interrupted_event(
+                        new_messages=new_messages,
+                        tool_results=tool_results,
+                        reason="Interrupted while waiting for approval.",
+                    )
+                    return
+
+                if resolution == "timed_out":
+                    finalized = self._executor.finalize_expired_approvals(
+                        now=datetime.now(UTC)
+                    )
+                    if finalized:
+                        yield from self._consume_workflow_result(
+                            workflow_result=finalized[0],
+                            round_index=round_index,
+                            messages=messages,
+                            new_messages=new_messages,
+                            tool_results=tool_results,
+                            executed_tool_call_count_ref=executed_tool_call_count_ref,
+                        )
+                    return
+
+                resumed = self._executor.resolve_pending_approval(
+                    outcome.approval_request.approval_id,
+                    approved=resolution == "approved",
+                )
+                yield from self._consume_workflow_result(
+                    workflow_result=resumed,
+                    round_index=round_index,
+                    messages=messages,
+                    new_messages=new_messages,
+                    tool_results=tool_results,
+                    executed_tool_call_count_ref=executed_tool_call_count_ref,
+                )
+                return
+
+    def _set_pending_approval(self, approval: ChatWorkflowApprovalState) -> None:
+        with self._approval_condition:
+            self._pending_approval = approval
+            self._pending_approval_decision = None
+
+    def _clear_pending_approval(self) -> None:
+        with self._approval_condition:
+            self._pending_approval = None
+            self._pending_approval_decision = None
+
+    def _wait_for_approval_resolution(
+        self,
+        approval_request: ApprovalRequest,
+    ) -> ChatApprovalResolution:
+        expires_at = _parse_timestamp(approval_request.expires_at)
+        with self._approval_condition:
+            while True:
+                if self._cancel_requested:
+                    return "cancelled"
+                if self._pending_approval_decision is not None:
+                    return "approved" if self._pending_approval_decision else "denied"
+                remaining_seconds = (expires_at - datetime.now(UTC)).total_seconds()
+                if remaining_seconds <= 0:
+                    return "timed_out"
+                self._approval_condition.wait(timeout=remaining_seconds)
+
+    def _interrupted_event(
+        self,
+        *,
+        new_messages: list[ChatMessage],
+        tool_results: list[ToolResult],
+        reason: str,
+    ) -> ChatWorkflowResultEvent:
+        return self._finalized_event(
+            result=_build_interrupted_result(
+                new_messages=new_messages,
+                tool_results=tool_results,
+                token_usage=None,
+                reason=reason,
+            )
+        )
+
+    @staticmethod
+    def _executed_tool_call_count(*, tool_results: list[ToolResult]) -> int:
+        return len(tool_results)
+
 
 def run_interactive_chat_session_turn(
     *,
@@ -264,6 +460,7 @@ def run_interactive_chat_session_turn(
     base_context: ToolContext,
     session_config: ChatSessionConfig,
     tool_limits: ToolLimits,
+    redaction_config: RedactionConfig,
     temperature: float,
 ) -> ChatSessionTurnRunner:
     """Return an interruptible multi-turn chat runner for one user message."""
@@ -276,6 +473,7 @@ def run_interactive_chat_session_turn(
         base_context=base_context,
         session_config=session_config,
         tool_limits=tool_limits,
+        redaction_config=redaction_config,
         temperature=temperature,
     )
 
@@ -491,3 +689,101 @@ def _format_tool_result_for_model(result: dict[str, object], *, max_chars: int) 
     if len(rendered) <= max_chars:
         return rendered
     return f"{rendered[:max_chars]}...(truncated)"
+
+
+def _sanitize_tool_result_for_chat(tool_result: ToolResult) -> ToolResult:
+    metadata = dict(tool_result.metadata)
+    execution_record = _sanitize_execution_record(metadata.get("execution_record"))
+    if execution_record is not None:
+        metadata["execution_record"] = execution_record
+    return tool_result.model_copy(update={"metadata": metadata})
+
+
+def _sanitize_execution_record(record: object) -> dict[str, object] | None:
+    if not isinstance(record, dict):
+        return None
+    sanitized = dict(record)
+    sanitized.pop("validated_input", None)
+    sanitized.pop("validated_output", None)
+    request = sanitized.get("request")
+    redacted_input = sanitized.get("redacted_input")
+    if isinstance(request, dict) and isinstance(redacted_input, dict):
+        updated_request = dict(request)
+        updated_request["arguments"] = redacted_input
+        sanitized["request"] = updated_request
+    return sanitized
+
+
+def _sanitize_parsed_response_for_inspector(
+    parsed_response: object,
+    *,
+    redaction_config: RedactionConfig,
+) -> object:
+    if not hasattr(parsed_response, "model_dump"):
+        return parsed_response
+    payload = parsed_response.model_dump(mode="json")
+    actions = payload.get("invocations", [])
+    if isinstance(actions, list):
+        payload["invocations"] = [
+            _sanitize_invocation_payload(action, redaction_config=redaction_config)
+            for action in actions
+        ]
+    return payload
+
+
+def _sanitize_invocation_payload(
+    payload: object,
+    *,
+    redaction_config: RedactionConfig,
+) -> object:
+    if not isinstance(payload, dict):
+        return payload
+    tool_name = payload.get("tool_name")
+    arguments = payload.get("arguments")
+    if not isinstance(tool_name, str) or not isinstance(arguments, dict):
+        return payload
+    sanitized = dict(payload)
+    sanitized["arguments"] = _redact_tool_payload(
+        tool_name,
+        arguments,
+        target=RedactionTarget.INPUT,
+        redaction_config=redaction_config,
+    )
+    return sanitized
+
+
+def _build_approval_state(
+    approval_request: ApprovalRequest,
+    *,
+    redaction_config: RedactionConfig,
+) -> ChatWorkflowApprovalState:
+    return ChatWorkflowApprovalState(
+        approval_request=approval_request,
+        tool_name=approval_request.tool_name,
+        redacted_arguments=_redact_tool_payload(
+            approval_request.tool_name,
+            approval_request.request.arguments,
+            target=RedactionTarget.INPUT,
+            redaction_config=redaction_config,
+        ),
+        policy_reason=approval_request.policy_reason,
+        policy_metadata=dict(approval_request.policy_metadata),
+    )
+
+
+def _redact_tool_payload(
+    tool_name: str,
+    payload: object,
+    *,
+    target: RedactionTarget,
+    redaction_config: RedactionConfig,
+) -> dict[str, object]:
+    redactor = Redactor(redaction_config, tool_name=tool_name)
+    redacted = redactor.redact_structured(payload, target=target)
+    if not isinstance(redacted, dict):
+        return {}
+    return redacted
+
+
+def _parse_timestamp(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)

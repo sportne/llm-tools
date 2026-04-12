@@ -10,14 +10,17 @@ import pytest
 
 pytest.importorskip("textual")
 
-from textual.widgets import Input, Static
+from textual.containers import VerticalScroll
+from textual.widgets import Button, Input, Static
 
 from llm_tools.apps.textual_chat import __main__ as chat_main_module
 from llm_tools.apps.textual_chat.app import ChatApp, run_chat_app
 from llm_tools.apps.textual_chat.config import load_textual_chat_config
 from llm_tools.apps.textual_chat.controller import (
+    build_available_tool_specs,
     build_chat_context,
     build_chat_executor,
+    build_chat_policy,
     build_chat_system_prompt_for_screen,
     create_provider,
 )
@@ -32,12 +35,18 @@ from llm_tools.apps.textual_chat.screens import (
     InterruptConfirmModal,
     TranscriptCopyModal,
 )
+from llm_tools.tool_api import SideEffectClass
 from llm_tools.workflow_api import (
     ChatSessionState,
     ChatTokenUsage,
+    ChatWorkflowApprovalEvent,
+    ChatWorkflowApprovalResolvedEvent,
+    ChatWorkflowApprovalState,
+    ChatWorkflowInspectorEvent,
     ChatWorkflowResultEvent,
     ChatWorkflowTurnResult,
 )
+from llm_tools.workflow_api.models import ApprovalRequest
 
 
 class _ProviderOk:
@@ -56,9 +65,14 @@ class _ProviderBoom:
 class _Cancelable:
     def __init__(self) -> None:
         self.cancelled = False
+        self.resolutions: list[bool] = []
 
     def cancel(self) -> None:
         self.cancelled = True
+
+    def resolve_pending_approval(self, approved: bool) -> bool:
+        self.resolutions.append(approved)
+        return True
 
 
 def test_textual_chat_config_errors_and_model_metadata(tmp_path: Path) -> None:
@@ -241,10 +255,47 @@ def test_textual_chat_screen_widgets_and_controller_branches(tmp_path: Path) -> 
             screen._controller._switch_active_model("bad-model")
 
             screen._controller.handle_inline_command("/help")
+            screen._controller.handle_inline_command("/inspect")
+            assert screen.query_one("#inspector-pane", VerticalScroll).display is True
+            screen._controller.handle_inline_command("/tools")
+            screen._controller.handle_inline_command("/tools disable read_file")
+            assert "read_file" not in screen._enabled_tools
+            screen._controller.handle_inline_command("/tools enable read_file")
+            assert "read_file" in screen._enabled_tools
+            screen._controller.handle_inline_command("/tools reset")
+            screen._controller.handle_inline_command("/tools maybe")
+            screen._controller.handle_inline_command("/tools enable missing_tool")
+            assert (
+                "Unknown tool: missing_tool"
+                in screen._controller.transcript_copy_text()
+            )
+            screen._controller.handle_inline_command("/approvals")
+            screen._controller.handle_inline_command("/approvals on")
+            assert screen._require_approval_for
+            screen._controller.handle_inline_command("/approvals off")
+            assert not screen._require_approval_for
+            screen._controller.handle_inline_command("/approvals maybe")
             screen._controller.handle_inline_command("/copy")
             assert app.screen_stack[-1].id == "transcript-copy-modal"
             app.pop_screen()
             assert screen._controller.handle_inline_command("unknown") is False
+            assert (
+                screen._controller._render_pending_approval() == "No pending approval."
+            )
+            assert screen._controller._render_inspector_entries([]) == ""
+            screen._controller.append_inspector_entry(
+                screen._inspector_provider_messages,
+                label="Manual",
+                payload={"ok": True},
+            )
+            screen.query_one("#transcript", VerticalScroll).mount(Static(""))
+            assert "Manual" in str(
+                screen.query_one("#provider-messages-box", Static).renderable
+            )
+            screen._controller.toggle_inspector()
+            assert screen.query_one("#inspector-pane", VerticalScroll).display is False
+            screen._controller.toggle_inspector()
+            assert screen.query_one("#inspector-pane", VerticalScroll).display is True
 
             exited = {"value": False}
             original_exit = app.exit
@@ -323,15 +374,97 @@ def test_textual_chat_screen_widgets_and_controller_branches(tmp_path: Path) -> 
             screen._controller.handle_turn_status(
                 {"event_type": "status", "status": "thinking"}
             )
+            approval = ChatWorkflowApprovalState(
+                approval_request=ApprovalRequest(
+                    approval_id="approval-1",
+                    invocation_index=1,
+                    request={"tool_name": "read_file", "arguments": {"path": "a.txt"}},
+                    tool_name="read_file",
+                    tool_version="0.1.0",
+                    policy_reason="approval required",
+                    policy_metadata={},
+                    requested_at="2026-01-01T00:00:00Z",
+                    expires_at="2026-01-01T00:05:00Z",
+                ),
+                tool_name="read_file",
+                redacted_arguments={"path": "a.txt"},
+                policy_reason="approval required",
+                policy_metadata={},
+            )
+            screen._controller.handle_turn_approval_requested(
+                ChatWorkflowApprovalEvent(approval=approval).model_dump(mode="json")
+            )
+            assert screen.query_one("#approve-button", Button).display is True
+            screen._active_runner = None
+            screen._controller.resolve_active_approval(approved=True)
+
+            class _Unresolvable:
+                def resolve_pending_approval(self, approved: bool) -> bool:
+                    del approved
+                    return False
+
+            screen._active_runner = _Unresolvable()
+            screen._controller.resolve_active_approval(approved=False)
+            screen._active_runner = _Cancelable()
+            screen._controller.resolve_active_approval(approved=True)
+            screen._controller.handle_turn_approval_resolved(
+                ChatWorkflowApprovalResolvedEvent(
+                    approval=approval,
+                    resolution="approved",
+                ).model_dump(mode="json")
+            )
+            screen._controller.handle_turn_approval_resolved(
+                ChatWorkflowApprovalResolvedEvent(
+                    approval=approval,
+                    resolution="denied",
+                ).model_dump(mode="json")
+            )
+            screen._controller.handle_turn_approval_resolved(
+                ChatWorkflowApprovalResolvedEvent(
+                    approval=approval,
+                    resolution="timed_out",
+                ).model_dump(mode="json")
+            )
+            screen._controller.handle_turn_approval_resolved(
+                ChatWorkflowApprovalResolvedEvent(
+                    approval=approval,
+                    resolution="cancelled",
+                ).model_dump(mode="json")
+            )
+            screen._controller.handle_turn_inspector_event(
+                ChatWorkflowInspectorEvent(
+                    round_index=1,
+                    kind="parsed_response",
+                    payload={"invocations": []},
+                ).model_dump(mode="json")
+            )
+            assert (
+                "parsed response"
+                in str(
+                    screen.query_one("#parsed-response-box", Static).renderable
+                ).lower()
+            )
 
             registry, executor = build_chat_executor()
             assert registry.list_registered_tools()
             assert executor is not None
+            registry_for_screen, executor_for_screen = build_chat_executor(screen)
+            assert registry_for_screen.list_registered_tools()
+            assert executor_for_screen._policy.allowed_tools == set(
+                screen._enabled_tools
+            )
+            policy = build_chat_policy(screen)
+            assert policy.allowed_tools == set(screen._enabled_tools)
+            assert policy.allow_filesystem is True
+            assert build_available_tool_specs()
             context = build_chat_context(screen)
             assert context.workspace == str(tmp_path)
             assert "tool_limits" in context.metadata
             prompt = build_chat_system_prompt_for_screen(screen, registry)
             assert "Available tools:" in prompt
+            screen._require_approval_for.add(SideEffectClass.LOCAL_READ)
+            assert "approval required" in screen._controller._tools_command_text()
+            assert screen._controller.transcript_copy_text()
 
             app.exit()
             await pilot.pause()

@@ -10,7 +10,7 @@ import pytest
 pytest.importorskip("textual")
 
 from textual.containers import VerticalScroll
-from textual.widgets import Static
+from textual.widgets import Button, Static
 
 from llm_tools.apps.textual_chat import _resolve_chat_config, build_parser
 from llm_tools.apps.textual_chat.app import ChatApp, ChatScreen
@@ -113,6 +113,15 @@ def test_textual_chat_app_launches_with_shell_layout_and_startup_message(
             assert "quit or exit" in texts[0]
             assert "F6 copy transcript" in str(
                 app.screen.query_one("#footer-bar", Static).renderable
+            )
+            assert (
+                app.screen.query_one("#inspector-pane", VerticalScroll).display is False
+            )
+            assert app.screen.query_one("#approve-button", Button).display is False
+            app.screen.action_toggle_inspector()
+            await pilot.pause()
+            assert (
+                app.screen.query_one("#inspector-pane", VerticalScroll).display is True
             )
             app.exit()
             await pilot.pause()

@@ -30,7 +30,14 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 def load_textual_chat_config(path: Path) -> TextualChatConfig:
     """Load and validate the standalone chat configuration file."""
     raw = _load_yaml(path)
-    for section_name in ("llm", "source_filters", "session", "tool_limits", "ui"):
+    for section_name in (
+        "llm",
+        "source_filters",
+        "session",
+        "tool_limits",
+        "policy",
+        "ui",
+    ):
         section_value = raw.get(section_name)
         if section_value is not None and not isinstance(section_value, dict):
             raise ValueError(f"chat config '{section_name}' must be a mapping")

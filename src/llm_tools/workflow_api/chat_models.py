@@ -7,10 +7,22 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from llm_tools.tool_api import ToolResult
+from llm_tools.workflow_api.models import ApprovalRequest
 
 ChatWorkflowTurnStatus = Literal["completed", "needs_continuation", "interrupted"]
 ChatMessageRole = Literal["system", "user", "assistant", "tool"]
 ChatAssistantCompletionState = Literal["complete", "interrupted"]
+ChatApprovalResolution = Literal[
+    "approved",
+    "denied",
+    "timed_out",
+    "cancelled",
+]
+ChatWorkflowInspectorKind = Literal[
+    "provider_messages",
+    "parsed_response",
+    "tool_execution",
+]
 
 
 class ChatSessionConfig(BaseModel):
@@ -251,6 +263,40 @@ class ChatWorkflowStatusEvent(BaseModel):
 
     event_type: Literal["status"] = "status"
     status: str
+
+
+class ChatWorkflowApprovalState(BaseModel):
+    """Redacted approval state surfaced to the interactive chat UI."""
+
+    approval_request: ApprovalRequest
+    tool_name: str
+    redacted_arguments: dict[str, object] = Field(default_factory=dict)
+    policy_reason: str
+    policy_metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class ChatWorkflowApprovalEvent(BaseModel):
+    """Non-terminal event announcing that a turn is waiting for approval."""
+
+    event_type: Literal["approval_requested"] = "approval_requested"
+    approval: ChatWorkflowApprovalState
+
+
+class ChatWorkflowApprovalResolvedEvent(BaseModel):
+    """Non-terminal event announcing approval resolution for the active turn."""
+
+    event_type: Literal["approval_resolved"] = "approval_resolved"
+    approval: ChatWorkflowApprovalState
+    resolution: ChatApprovalResolution
+
+
+class ChatWorkflowInspectorEvent(BaseModel):
+    """Append-only inspector event emitted while a turn is running."""
+
+    event_type: Literal["inspector"] = "inspector"
+    round_index: int = Field(ge=1)
+    kind: ChatWorkflowInspectorKind
+    payload: object
 
 
 class ChatWorkflowResultEvent(BaseModel):

@@ -14,6 +14,7 @@ from textual.widgets import Button, Static
 
 from llm_tools.apps.textual_chat.controller import (
     ChatScreenController,
+    build_available_tool_specs,
     build_chat_context,
     build_chat_executor,
     build_chat_system_prompt_for_screen,
@@ -22,6 +23,10 @@ from llm_tools.apps.textual_chat.controller import (
 from llm_tools.apps.textual_chat.models import (
     ChatCredentialPromptMetadata,
     TextualChatConfig,
+)
+from llm_tools.apps.textual_chat.presentation import (
+    AssistantMarkdownEntry,
+    TranscriptEntry,
 )
 from llm_tools.apps.textual_chat.screens import (
     ComposerTextArea,
@@ -33,6 +38,10 @@ from llm_tools.llm_providers import OpenAICompatibleProvider
 from llm_tools.workflow_api import (
     ChatSessionState,
     ChatSessionTurnRunner,
+    ChatWorkflowApprovalEvent,
+    ChatWorkflowApprovalResolvedEvent,
+    ChatWorkflowApprovalState,
+    ChatWorkflowInspectorEvent,
     ChatWorkflowStatusEvent,
     run_interactive_chat_session_turn,
 )
@@ -49,11 +58,6 @@ __all__ = [
     "run_chat_app",
 ]
 
-from llm_tools.apps.textual_chat.presentation import (  # noqa: E402
-    AssistantMarkdownEntry,
-    TranscriptEntry,
-)
-
 
 class ChatScreen(Screen[None]):
     """Main chat screen with transcript, composer, status, and footer rows."""
@@ -61,7 +65,10 @@ class ChatScreen(Screen[None]):
     BINDINGS = [
         Binding(
             "f6", "open_transcript_copy", "Copy transcript", show=False, priority=True
-        )
+        ),
+        Binding(
+            "f7", "toggle_inspector", "Toggle inspector", show=False, priority=True
+        ),
     ]
 
     DEFAULT_CSS = """
@@ -71,6 +78,12 @@ class ChatScreen(Screen[None]):
     }
 
     #chat-layout {
+        layout: horizontal;
+    }
+
+    #chat-main {
+        width: 1fr;
+        min-width: 0;
         layout: vertical;
     }
 
@@ -108,13 +121,25 @@ class ChatScreen(Screen[None]):
         border-left: tall #b76363;
     }
 
-    #status-bar {
-        height: 1;
-        min-height: 1;
+    #status-row {
+        height: auto;
+        min-height: 3;
         margin: 0 1;
+        background: #1a2330;
+        align: left middle;
+    }
+
+    #status-text {
+        width: 1fr;
+        min-height: 1;
         padding: 0 1;
         color: #d4e6ff;
-        background: #1a2330;
+    }
+
+    #approve-button,
+    #deny-button {
+        width: 10;
+        margin: 0 1 0 0;
     }
 
     #composer-row {
@@ -152,6 +177,29 @@ class ChatScreen(Screen[None]):
         padding: 0 1;
         color: #c7c7c7;
     }
+
+    #inspector-pane {
+        width: 44;
+        min-width: 30;
+        padding: 1 1 1 0;
+    }
+
+    .inspector-title {
+        padding-bottom: 1;
+        text-style: bold;
+    }
+
+    .inspector-section {
+        padding-top: 1;
+        text-style: bold;
+    }
+
+    .inspector-box {
+        min-height: 2;
+        padding: 0 1;
+        background: #161b22;
+        color: #d7e4f0;
+    }
     """
 
     def __init__(
@@ -174,6 +222,25 @@ class ChatScreen(Screen[None]):
         self._busy = False
         self._active_assistant_entry: TranscriptEntry | None = None
         self._active_runner: ChatSessionTurnRunner | None = None
+        self._available_tool_specs = build_available_tool_specs()
+        configured_tools = config.policy.enabled_tools
+        if configured_tools is None:
+            self._default_enabled_tools = set(self._available_tool_specs)
+        else:
+            self._default_enabled_tools = {
+                tool_name
+                for tool_name in configured_tools
+                if tool_name in self._available_tool_specs
+            }
+        self._enabled_tools = set(self._default_enabled_tools)
+        self._require_approval_for = set(config.policy.require_approval_for)
+        self._pending_approval: ChatWorkflowApprovalState | None = None
+        self._approval_decision_in_flight = False
+        self._inspector_open = config.ui.inspector_open_by_default
+        self._active_turn_number = 0
+        self._inspector_provider_messages: list[dict[str, object]] = []
+        self._inspector_parsed_responses: list[dict[str, object]] = []
+        self._inspector_tool_executions: list[dict[str, object]] = []
         self._pending_interrupt_draft: str | None = None
         self._footer_session_tokens: int | None = None
         self._footer_active_context_tokens: int | None = None
@@ -182,17 +249,41 @@ class ChatScreen(Screen[None]):
         self._controller = ChatScreenController(self)
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="chat-layout"):
-            yield VerticalScroll(id="transcript")
-            yield Static("", id="status-bar")
-            with Horizontal(id="composer-row"):
-                yield ComposerTextArea("", id="composer")
-                with Vertical(id="composer-actions"):
-                    yield Button("Send", id="send-button", variant="primary")
+        with Horizontal(id="chat-layout"):
+            with Vertical(id="chat-main"):
+                yield VerticalScroll(id="transcript")
+                with Horizontal(id="status-row"):
+                    yield Static("", id="status-text")
                     yield Button(
-                        "Stop", id="stop-button", variant="warning", disabled=True
+                        "Approve",
+                        id="approve-button",
+                        variant="success",
                     )
-            yield Static("", id="footer-bar")
+                    yield Button(
+                        "Deny",
+                        id="deny-button",
+                        variant="error",
+                    )
+                with Horizontal(id="composer-row"):
+                    yield ComposerTextArea("", id="composer")
+                    with Vertical(id="composer-actions"):
+                        yield Button("Send", id="send-button", variant="primary")
+                        yield Button(
+                            "Stop", id="stop-button", variant="warning", disabled=True
+                        )
+                yield Static("", id="footer-bar")
+            with VerticalScroll(id="inspector-pane"):
+                yield Static("Inspector", classes="inspector-title")
+                yield Static("Current Tool State", classes="inspector-section")
+                yield Static("", id="tool-state-box", classes="inspector-box")
+                yield Static("Pending Approval", classes="inspector-section")
+                yield Static("", id="pending-approval-box", classes="inspector-box")
+                yield Static("Model Messages", classes="inspector-section")
+                yield Static("", id="provider-messages-box", classes="inspector-box")
+                yield Static("Parsed Responses", classes="inspector-section")
+                yield Static("", id="parsed-response-box", classes="inspector-box")
+                yield Static("Tool Execution Records", classes="inspector-section")
+                yield Static("", id="tool-execution-box", classes="inspector-box")
 
     def on_mount(self) -> None:
         self._controller.append_transcript(
@@ -214,10 +305,14 @@ class ChatScreen(Screen[None]):
                 callback=self._controller.handle_credential_submit,
             )
         self._controller.refresh_footer()
+        self._controller.refresh_inspector()
         self.query_one("#composer", ComposerTextArea).focus()
 
     def action_open_transcript_copy(self) -> None:
         self._controller.open_transcript_copy()
+
+    def action_toggle_inspector(self) -> None:
+        self._controller.toggle_inspector()
 
     @on(ComposerTextArea.SubmitRequested, "#composer")
     def handle_composer_submit(self) -> None:
@@ -238,13 +333,21 @@ class ChatScreen(Screen[None]):
         self._pending_interrupt_draft = None
         self._controller.cancel_active_turn(status_text="stopping")
 
+    @on(Button.Pressed, "#approve-button")
+    def handle_approve_button(self) -> None:
+        self._controller.resolve_active_approval(approved=True)
+
+    @on(Button.Pressed, "#deny-button")
+    def handle_deny_button(self) -> None:
+        self._controller.resolve_active_approval(approved=False)
+
     @work(thread=True, exclusive=True)
     def _run_turn_worker(self, user_message: str) -> None:
         try:
             provider = self._provider
             if provider is None:
                 raise RuntimeError("Chat provider is not configured.")
-            registry, executor = build_chat_executor()
+            registry, executor = build_chat_executor(self)
             runner = run_interactive_chat_session_turn(
                 user_message=user_message,
                 session_state=self._session_state,
@@ -254,6 +357,7 @@ class ChatScreen(Screen[None]):
                 base_context=build_chat_context(self),
                 session_config=self._config.session,
                 tool_limits=self._config.tool_limits,
+                redaction_config=self._config.policy.redaction,
                 temperature=self._config.llm.temperature,
             )
             self._active_runner = runner
@@ -261,6 +365,24 @@ class ChatScreen(Screen[None]):
                 if isinstance(event, ChatWorkflowStatusEvent):
                     self.app.call_from_thread(
                         self._controller.handle_turn_status,
+                        event.model_dump(mode="json"),
+                    )
+                    continue
+                if isinstance(event, ChatWorkflowApprovalEvent):
+                    self.app.call_from_thread(
+                        self._controller.handle_turn_approval_requested,
+                        event.model_dump(mode="json"),
+                    )
+                    continue
+                if isinstance(event, ChatWorkflowApprovalResolvedEvent):
+                    self.app.call_from_thread(
+                        self._controller.handle_turn_approval_resolved,
+                        event.model_dump(mode="json"),
+                    )
+                    continue
+                if isinstance(event, ChatWorkflowInspectorEvent):
+                    self.app.call_from_thread(
+                        self._controller.handle_turn_inspector_event,
                         event.model_dump(mode="json"),
                     )
                     continue

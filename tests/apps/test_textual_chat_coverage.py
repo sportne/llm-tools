@@ -31,10 +31,15 @@ from llm_tools.apps.textual_chat.screens import ComposerTextArea, CredentialModa
 from llm_tools.workflow_api import (
     ChatCitation,
     ChatFinalResponse,
+    ChatWorkflowApprovalEvent,
+    ChatWorkflowApprovalResolvedEvent,
+    ChatWorkflowApprovalState,
+    ChatWorkflowInspectorEvent,
     ChatWorkflowResultEvent,
     ChatWorkflowStatusEvent,
     ChatWorkflowTurnResult,
 )
+from llm_tools.workflow_api.models import ApprovalRequest
 
 
 class _Provider:
@@ -329,7 +334,7 @@ def test_textual_chat_controller_and_worker_cover_remaining_branches(
             monkeypatch.setattr(
                 app_module,
                 "build_chat_executor",
-                lambda: (
+                lambda screen_arg: (
                     SimpleNamespace(name="registry"),
                     SimpleNamespace(name="executor"),
                 ),
@@ -377,6 +382,156 @@ def test_textual_chat_controller_and_worker_cover_remaining_branches(
             screen._provider = None
             ChatScreen._run_turn_worker.__wrapped__(screen, "hello")
             assert error_messages == ["Chat provider is not configured."]
+
+            app.exit()
+            await pilot.pause()
+
+    asyncio.run(_run())
+
+
+def test_textual_chat_app_event_dispatch_and_policy_branches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _run() -> None:
+        config = TextualChatConfig().model_copy(
+            update={
+                "policy": TextualChatConfig().policy.model_copy(
+                    update={"enabled_tools": ["read_file", "missing_tool"]}
+                )
+            }
+        )
+        app = ChatApp(root_path=tmp_path, config=config, provider=_Provider())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = app.screen
+            assert screen._default_enabled_tools == {"read_file"}
+
+            cancel_calls: list[str] = []
+            screen._controller.cancel_active_turn = lambda status_text: (
+                cancel_calls.append(  # type: ignore[method-assign]
+                    status_text
+                )
+            )
+            screen._busy = False
+            screen.handle_stop_button()
+            assert cancel_calls == []
+            screen._busy = True
+            screen.handle_stop_button()
+            assert cancel_calls == ["stopping"]
+
+            approval_calls: list[bool] = []
+            screen._controller.resolve_active_approval = lambda approved: (
+                approval_calls.append(  # type: ignore[method-assign]
+                    approved
+                )
+            )
+            screen.handle_approve_button()
+            screen.handle_deny_button()
+            assert approval_calls == [True, False]
+
+            approval = ChatWorkflowApprovalState(
+                approval_request=ApprovalRequest(
+                    approval_id="approval-1",
+                    invocation_index=1,
+                    request={"tool_name": "read_file", "arguments": {"path": "a.txt"}},
+                    tool_name="read_file",
+                    tool_version="0.1.0",
+                    policy_reason="approval required",
+                    policy_metadata={},
+                    requested_at="2026-01-01T00:00:00Z",
+                    expires_at="2026-01-01T00:05:00Z",
+                ),
+                tool_name="read_file",
+                redacted_arguments={"path": "a.txt"},
+                policy_reason="approval required",
+                policy_metadata={},
+            )
+            worker_events: list[str] = []
+            app.call_from_thread = lambda fn, *args: fn(*args)  # type: ignore[method-assign]
+            screen._controller.handle_turn_status = lambda event: worker_events.append(  # type: ignore[method-assign]
+                "status"
+            )
+            screen._controller.handle_turn_approval_requested = lambda event: (
+                worker_events.append(  # type: ignore[method-assign]
+                    "approval"
+                )
+            )
+            screen._controller.handle_turn_approval_resolved = lambda event: (
+                worker_events.append(  # type: ignore[method-assign]
+                    "resolved"
+                )
+            )
+            screen._controller.handle_turn_inspector_event = lambda event: (
+                worker_events.append(  # type: ignore[method-assign]
+                    "inspector"
+                )
+            )
+            screen._controller.handle_turn_result = lambda event: worker_events.append(  # type: ignore[method-assign]
+                "result"
+            )
+            monkeypatch.setattr(
+                app_module,
+                "build_chat_executor",
+                lambda screen_arg: (
+                    SimpleNamespace(name="registry"),
+                    SimpleNamespace(name="executor"),
+                ),
+            )
+            monkeypatch.setattr(
+                app_module,
+                "build_chat_context",
+                lambda screen_arg: {"workspace": str(tmp_path)},
+            )
+            monkeypatch.setattr(
+                app_module,
+                "build_chat_system_prompt_for_screen",
+                lambda screen_arg, registry: "prompt",
+            )
+
+            class _Runner:
+                def __iter__(self) -> object:
+                    return iter(
+                        [
+                            ChatWorkflowStatusEvent(status="thinking"),
+                            ChatWorkflowApprovalEvent(approval=approval),
+                            ChatWorkflowApprovalResolvedEvent(
+                                approval=approval,
+                                resolution="approved",
+                            ),
+                            ChatWorkflowInspectorEvent(
+                                round_index=1,
+                                kind="provider_messages",
+                                payload=[{"role": "user", "content": "hello"}],
+                            ),
+                            ChatWorkflowResultEvent(
+                                result=ChatWorkflowTurnResult(
+                                    status="completed",
+                                    new_messages=[],
+                                    final_response=ChatFinalResponse(answer="done"),
+                                )
+                            ),
+                        ]
+                    )
+
+                def cancel(self) -> None:
+                    return None
+
+            monkeypatch.setattr(
+                app_module,
+                "run_interactive_chat_session_turn",
+                lambda **kwargs: _Runner(),
+            )
+
+            screen._provider = _Provider()
+            ChatScreen._run_turn_worker.__wrapped__(screen, "hello")
+            assert worker_events == [
+                "status",
+                "approval",
+                "resolved",
+                "inspector",
+                "result",
+            ]
 
             app.exit()
             await pilot.pause()
