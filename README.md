@@ -16,11 +16,14 @@ The core v0.1 foundation is implemented:
 - canonical tool and runtime models
 - registry, runtime, policy, and observability
 - built-in filesystem, git, Atlassian, and text tools
+- built-in read-only repository chat tools
 - one canonical structured-action adapter (`ActionEnvelopeAdapter`)
 - an Instructor-backed OpenAI-compatible provider layer
-- a current `workflow_api` bridge for one parsed model turn
+- a current `workflow_api` bridge for one parsed model turn plus an interactive
+  repository-chat session runner
 - dual sync/async execution paths across runtime, provider, and workflow layers
-- an optional `apps` layer with a developer-facing Textual workbench
+- an optional `apps` layer with a Textual repository chat client and
+  developer-facing workbench
 
 ## Core Concepts
 
@@ -55,7 +58,7 @@ make setup-venv
 make install-dev
 ```
 
-To install the optional Textual workbench:
+To install the optional Textual apps:
 
 ```bash
 .venv/bin/python -m pip install -e .[apps]
@@ -92,6 +95,20 @@ or:
 
 ```bash
 llm-tools-workbench
+```
+
+## Chat App
+
+Launch the optional Textual repository chat app with either:
+
+```bash
+python -m llm_tools.apps.textual_chat <directory> --config <path>
+```
+
+or:
+
+```bash
+llm-tools-chat <directory> --config <path>
 ```
 
 ## Examples

@@ -131,6 +131,19 @@ class OpenAICompatibleProvider:
         )
         return adapter.parse_model_output(payload, response_model=response_model)
 
+    def list_available_models(self) -> list[str]:
+        """Return discoverable model ids from the active endpoint."""
+        page = self._sync_client.models.list()
+        data = getattr(page, "data", None)
+        items = data if isinstance(data, list) else list(page)
+        model_ids = {
+            model_id.strip()
+            for item in items
+            for model_id in [getattr(item, "id", None)]
+            if isinstance(model_id, str) and model_id.strip()
+        }
+        return sorted(model_ids)
+
     async def run_async(
         self,
         *,

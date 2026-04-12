@@ -283,6 +283,16 @@ Step 0 note:
 - [x] Add workbench usage documentation
 - [x] Update repository docs for the optional apps layer
 
+### 11.5 Textual repository chat app
+- [x] Add `llm_tools.apps.textual_chat`
+- [x] Add `llm-tools-chat` console entrypoint
+- [x] Add OpenAI-compatible interactive repo chat config loading
+- [x] Add read-only repository chat tool set and prompt builder
+- [x] Add multi-turn interactive chat workflow session runner
+- [x] Add Textual startup, transcript, interrupt, and copy-transcript flows
+- [x] Add chat tool, workflow, and Textual regression tests
+- [x] Add repository chat usage documentation
+
 ---
 
 ## 12. Approval workflow outcomes

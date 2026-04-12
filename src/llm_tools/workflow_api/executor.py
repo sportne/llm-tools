@@ -82,6 +82,7 @@ class WorkflowExecutor:
         *,
         context: ToolContext | None = None,
         include_requires_approval: bool = False,
+        final_response_model: object = str,
     ) -> PreparedModelInteraction:
         """Prepare a typed response model and schema for one model turn."""
         tools = self._registry.list_registered_tools()
@@ -95,7 +96,11 @@ class WorkflowExecutor:
         input_models: dict[str, type[BaseModel]] = {
             tool.spec.name: tool.input_model for tool in tools
         }
-        response_model = adapter.build_response_model(specs, input_models)
+        response_model = adapter.build_response_model(
+            specs,
+            input_models,
+            final_response_model=final_response_model,
+        )
         return PreparedModelInteraction(
             response_model=response_model,
             schema=adapter.export_schema(response_model),

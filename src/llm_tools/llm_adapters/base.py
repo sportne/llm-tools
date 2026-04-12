@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field, model_validator
 
 from llm_tools.tool_api import ToolInvocationRequest
@@ -11,7 +13,7 @@ class ParsedModelResponse(BaseModel):
     """Normalized outcome of one model turn."""
 
     invocations: list[ToolInvocationRequest] = Field(default_factory=list)
-    final_response: str | None = None
+    final_response: Any | None = None
 
     @model_validator(mode="after")
     def validate_mode(self) -> ParsedModelResponse:
@@ -20,7 +22,7 @@ class ParsedModelResponse(BaseModel):
         final_response = self.final_response
         has_final_response = final_response is not None
 
-        if final_response is not None and final_response.strip() == "":
+        if isinstance(final_response, str) and final_response.strip() == "":
             raise ValueError("final_response must not be empty.")
 
         if has_invocations == has_final_response:

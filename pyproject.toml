@@ -29,6 +29,7 @@ dependencies = [
 ]
 
 [project.scripts]
+llm-tools-chat = "llm_tools.apps.textual_chat:main"
 llm-tools-workbench = "llm_tools.apps.textual_workbench:main"
 
 [project.optional-dependencies]

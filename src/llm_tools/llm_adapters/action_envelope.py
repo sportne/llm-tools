@@ -33,15 +33,16 @@ class _EnvelopeModeMixin(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    final_response: str | None = None
-
     @model_validator(mode="after")
     def _validate_mode(self) -> _EnvelopeModeMixin:
         actions = getattr(self, "actions", [])
         has_actions = len(actions) > 0
         has_final_response = self.final_response is not None
 
-        if self.final_response is not None and self.final_response.strip() == "":
+        if (
+            isinstance(self.final_response, str)
+            and self.final_response.strip() == ""
+        ):
             raise ValueError("final_response must not be empty.")
         if has_actions == has_final_response:
             raise ValueError(
@@ -54,6 +55,17 @@ class _LooseEnvelope(_EnvelopeModeMixin):
     """Lax envelope used when no typed response model is provided."""
 
     actions: list[_LooseAction] = Field(default_factory=list)
+    final_response: Any | None = None
+
+
+class _NoActionsEnvelopeMixin(_EnvelopeModeMixin):
+    """Reject action payloads when no tools are exposed."""
+
+    @model_validator(mode="after")
+    def _validate_no_actions(self) -> _NoActionsEnvelopeMixin:
+        if getattr(self, "actions", []):
+            raise ValueError("No tools are available; actions must be empty.")
+        return self
 
 
 class ActionEnvelopeAdapter:
@@ -63,6 +75,8 @@ class ActionEnvelopeAdapter:
         self,
         specs: list[ToolSpec],
         input_models: dict[str, type[BaseModel]],
+        *,
+        final_response_model: object = str,
     ) -> type[BaseModel]:
         """Build a dynamic response model constrained to the visible tools."""
         action_models: list[type[BaseModel]] = []
@@ -71,20 +85,14 @@ class ActionEnvelopeAdapter:
             action_models.append(self._build_action_model(spec.name, input_model))
 
         if not action_models:
-
-            class _NoToolEnvelope(_EnvelopeModeMixin):
-                actions: list[dict[str, Any]] = Field(default_factory=list)
-
-                @model_validator(mode="after")
-                def _validate_no_actions(self) -> _NoToolEnvelope:
-                    if self.actions:
-                        raise ValueError(
-                            "No tools are available; actions must be empty."
-                        )
-                    return self
-
-            _NoToolEnvelope.__name__ = "ActionEnvelopeNoTools"
-            return _NoToolEnvelope
+            envelope_model = create_model(
+                "ActionEnvelopeNoTools",
+                __base__=_NoActionsEnvelopeMixin,
+                actions=(list[dict[str, Any]], Field(default_factory=list)),
+                final_response=(_optional_annotation(final_response_model), None),
+            )
+            envelope_model.__module__ = __name__
+            return envelope_model
 
         if len(action_models) == 1:
             action_union: type[BaseModel] | Any = action_models[0]
@@ -100,6 +108,7 @@ class ActionEnvelopeAdapter:
             "ActionEnvelope",
             __base__=_EnvelopeModeMixin,
             actions=(actions_annotation, Field(default_factory=list)),
+            final_response=(_optional_annotation(final_response_model), None),
         )
         envelope_model.__module__ = __name__
         return envelope_model
@@ -108,9 +117,17 @@ class ActionEnvelopeAdapter:
         self,
         specs: list[ToolSpec],
         input_models: dict[str, type[BaseModel]],
+        *,
+        final_response_model: object = str,
     ) -> dict[str, Any]:
         """Return the canonical envelope schema for inspection/debugging."""
-        return self.export_schema(self.build_response_model(specs, input_models))
+        return self.export_schema(
+            self.build_response_model(
+                specs,
+                input_models,
+                final_response_model=final_response_model,
+            )
+        )
 
     def export_schema(self, response_model: type[BaseModel]) -> dict[str, Any]:
         """Return JSON schema for the supplied action-envelope model."""
@@ -151,7 +168,7 @@ class ActionEnvelopeAdapter:
                 ToolInvocationRequest(tool_name=tool_name, arguments=arguments)
             )
 
-        final_response = getattr(envelope, "final_response", None)
+        final_response = self._normalize_payload(getattr(envelope, "final_response", None))
         return ParsedModelResponse(
             invocations=invocations,
             final_response=final_response,
@@ -198,3 +215,7 @@ def _sanitize_name(name: str) -> str:
     if normalized[0].isdigit():
         return f"Tool{normalized}"
     return normalized
+
+
+def _optional_annotation(annotation: object) -> object:
+    return annotation | None  # type: ignore[operator]
