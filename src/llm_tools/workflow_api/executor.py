@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel
 
 from llm_tools.llm_adapters import (
@@ -10,6 +12,8 @@ from llm_tools.llm_adapters import (
     ToolExposureAdapter,
 )
 from llm_tools.tool_api import (
+    PolicyVerdict,
+    Tool,
     ToolContext,
     ToolPolicy,
     ToolRegistry,
@@ -29,11 +33,24 @@ class WorkflowExecutor:
         policy: ToolPolicy | None = None,
     ) -> None:
         self._registry = registry
-        self._runtime = ToolRuntime(registry, policy=policy)
+        self._policy = policy or ToolPolicy()
+        self._runtime = ToolRuntime(registry, policy=self._policy)
 
-    def export_tools(self, adapter: ToolExposureAdapter) -> object:
+    def export_tools(
+        self,
+        adapter: ToolExposureAdapter,
+        *,
+        context: ToolContext | None = None,
+        include_requires_approval: bool = False,
+    ) -> object:
         """Export registered tools through the supplied adapter."""
         tools = self._registry.list_registered_tools()
+        if context is not None:
+            tools = self._filter_tools_for_exposure(
+                tools,
+                context=context,
+                include_requires_approval=include_requires_approval,
+            )
         specs: list[ToolSpec] = [tool.spec for tool in tools]
         input_models: dict[str, type[BaseModel]] = {
             tool.spec.name: tool.input_model for tool in tools
@@ -93,3 +110,19 @@ class WorkflowExecutor:
             artifacts=[],
             metadata=dict(base_context.metadata),
         )
+
+    def _filter_tools_for_exposure(
+        self,
+        tools: list[Tool[Any, Any]],
+        *,
+        context: ToolContext,
+        include_requires_approval: bool,
+    ) -> list[Tool[Any, Any]]:
+        filtered: list[Tool[Any, Any]] = []
+        for tool in tools:
+            verdict = self._policy.verdict(tool, context)
+            if verdict is PolicyVerdict.ALLOW or (
+                verdict is PolicyVerdict.REQUIRE_APPROVAL and include_requires_approval
+            ):
+                filtered.append(tool)
+        return filtered

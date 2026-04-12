@@ -83,7 +83,7 @@ def test_provider_preset_defaults_are_applied() -> None:
     assert openai_config.model == "gpt-4.1-mini"
     assert openai_config.base_url == ""
     ollama_config = controller.apply_provider_preset(config, ProviderPreset.OLLAMA)
-    assert ollama_config.model == "gemma4"
+    assert ollama_config.model == "gemma4:26b"
     assert ollama_config.base_url == "http://localhost:11434/v1"
     assert custom_config.model == ""
     assert custom_config.base_url == ""
@@ -119,6 +119,23 @@ def test_export_tools_matches_mode_shape() -> None:
     assert isinstance(native_export, list)
     assert isinstance(structured_export, dict)
     assert isinstance(prompt_export, str)
+    assert [tool["function"]["name"] for tool in native_export] == [
+        "read_file",
+        "list_directory",
+        "run_git_status",
+        "run_git_diff",
+        "run_git_log",
+        "file_text_search",
+        "directory_text_search",
+    ]
+    assert "write_file" not in [tool["function"]["name"] for tool in native_export]
+    assert (
+        "write_file"
+        not in structured_export["properties"]["actions"]["items"]["properties"][
+            "tool_name"
+        ]["enum"]
+    )
+    assert "Tool: write_file" not in prompt_export
 
 
 def test_execute_direct_tool_produces_tool_result(tmp_path: Path) -> None:
@@ -176,6 +193,9 @@ def test_run_model_turn_routes_to_the_selected_provider_mode(
     result = controller.run_model_turn(config, prompt="hello")
 
     assert _FakeProvider.last_mode == expected_mode
+    assert _FakeProvider.last_kwargs is not None
+    assert "tool_descriptions" in _FakeProvider.last_kwargs
+    assert "registry" not in _FakeProvider.last_kwargs
     assert result.parsed_response.final_response == expected_response
     assert isinstance(result.workflow_result, WorkflowTurnResult)
 

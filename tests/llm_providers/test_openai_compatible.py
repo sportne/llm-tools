@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import pytest
 from pydantic import BaseModel
 
 from llm_tools.llm_adapters import (
@@ -261,12 +262,59 @@ def test_provider_extracts_content_from_supported_message_shapes() -> None:
 
 
 def test_provider_presets_configure_openai_compatible_targets() -> None:
-    ollama = OpenAICompatibleProvider.for_ollama(model="gemma4", client=_FakeClient({}))
+    ollama = OpenAICompatibleProvider.for_ollama(
+        model="gemma4:26b", client=_FakeClient({})
+    )
     openai = OpenAICompatibleProvider.for_openai(
         model="gpt-4.1-mini", client=_FakeClient({})
     )
 
     assert ollama.base_url == "http://localhost:11434/v1"
-    assert ollama.model == "gemma4"
+    assert ollama.model == "gemma4:26b"
     assert openai.base_url is None
     assert openai.model == "gpt-4.1-mini"
+
+
+def test_provider_prefers_precomputed_tool_descriptions() -> None:
+    fake_client = _FakeClient(
+        {
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": '{"value":"x"}'},
+                }
+            ]
+        }
+    )
+    provider = OpenAICompatibleProvider(model="demo-model", client=fake_client)
+    precomputed_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "echo",
+                "description": "precomputed",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+
+    provider.run_native_tool_calling(
+        adapter=NativeToolCallingAdapter(),
+        messages=[{"role": "user", "content": "hello"}],
+        tool_descriptions=precomputed_tools,
+    )
+
+    call = fake_client.chat.completions.calls[0]
+    assert call["tools"] == precomputed_tools
+
+
+def test_provider_rejects_missing_tool_source_for_export() -> None:
+    provider = OpenAICompatibleProvider(model="demo-model", client=_FakeClient({}))
+
+    with pytest.raises(ValueError):
+        provider._resolve_tool_descriptions(
+            adapter=NativeToolCallingAdapter(),
+            registry=None,
+            tool_descriptions=None,
+        )

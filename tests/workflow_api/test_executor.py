@@ -131,6 +131,55 @@ def test_workflow_executor_exports_registered_tools(
         assert "directory_text_search" in exported
 
 
+def test_workflow_executor_export_filters_out_policy_denied_tools_with_context(
+    tmp_path: str,
+) -> None:
+    registry = ToolRegistry()
+    register_filesystem_tools(registry)
+    executor = _executor(registry, allow_write=False)
+
+    exported = executor.export_tools(
+        NativeToolCallingAdapter(),
+        context=ToolContext(invocation_id="export-1", workspace=str(tmp_path)),
+    )
+
+    assert isinstance(exported, list)
+    assert [tool["function"]["name"] for tool in exported] == [
+        "read_file",
+        "list_directory",
+    ]
+
+
+def test_workflow_executor_export_can_include_approval_required_tools(
+    tmp_path: str,
+) -> None:
+    registry = ToolRegistry()
+    register_filesystem_tools(registry)
+    policy = ToolPolicy(
+        allowed_side_effects={SideEffectClass.NONE, SideEffectClass.LOCAL_READ},
+        require_approval_for={SideEffectClass.LOCAL_READ},
+    )
+    executor = WorkflowExecutor(registry, policy=policy)
+
+    hidden_export = executor.export_tools(
+        NativeToolCallingAdapter(),
+        context=ToolContext(invocation_id="export-2", workspace=str(tmp_path)),
+    )
+    shown_export = executor.export_tools(
+        NativeToolCallingAdapter(),
+        context=ToolContext(invocation_id="export-3", workspace=str(tmp_path)),
+        include_requires_approval=True,
+    )
+
+    assert isinstance(hidden_export, list)
+    assert isinstance(shown_export, list)
+    assert hidden_export == []
+    assert [tool["function"]["name"] for tool in shown_export] == [
+        "read_file",
+        "list_directory",
+    ]
+
+
 def test_workflow_executor_returns_final_response_without_tool_execution(
     tmp_path: str,
 ) -> None:

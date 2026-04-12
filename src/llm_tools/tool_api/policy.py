@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from llm_tools.tool_api.models import (
     PolicyDecision,
+    PolicyVerdict,
     SideEffectClass,
     ToolContext,
     ToolSpec,
@@ -78,6 +79,15 @@ class ToolPolicy(BaseModel):
             reason="allowed",
             metadata={"tool_name": tool_name},
         )
+
+    def verdict(self, tool: Tool[Any, Any], context: ToolContext) -> PolicyVerdict:
+        """Return a high-level policy verdict for exposure and execution flows."""
+        decision = self.evaluate(tool, context)
+        if decision.allowed:
+            return PolicyVerdict.ALLOW
+        if decision.requires_approval:
+            return PolicyVerdict.REQUIRE_APPROVAL
+        return PolicyVerdict.DENY
 
     def _evaluate_tag_rules(
         self,

@@ -56,7 +56,7 @@ class OpenAICompatibleProvider:
     def for_ollama(
         cls,
         *,
-        model: str = "gemma4",
+        model: str = "gemma4:26b",
         base_url: str = "http://localhost:11434/v1",
         api_key: str = "ollama",
         default_request_params: dict[str, Any] | None = None,
@@ -76,11 +76,16 @@ class OpenAICompatibleProvider:
         *,
         adapter: NativeToolCallingAdapter,
         messages: Sequence[dict[str, Any]],
-        registry: ToolRegistry,
+        registry: ToolRegistry | None = None,
+        tool_descriptions: object | None = None,
         request_params: dict[str, Any] | None = None,
     ) -> ParsedModelResponse:
         """Call the model in native tool-calling mode and parse the result."""
-        tools = self._export_tools(adapter=adapter, registry=registry)
+        tools = self._resolve_tool_descriptions(
+            adapter=adapter,
+            registry=registry,
+            tool_descriptions=tool_descriptions,
+        )
         completions: Any = self._client.chat.completions
         response = completions.create(
             model=self.model,
@@ -95,11 +100,16 @@ class OpenAICompatibleProvider:
         *,
         adapter: StructuredOutputAdapter,
         messages: Sequence[dict[str, Any]],
-        registry: ToolRegistry,
+        registry: ToolRegistry | None = None,
+        tool_descriptions: object | None = None,
         request_params: dict[str, Any] | None = None,
     ) -> ParsedModelResponse:
         """Call the model in structured-output mode and parse the result."""
-        schema = self._export_tools(adapter=adapter, registry=registry)
+        schema = self._resolve_tool_descriptions(
+            adapter=adapter,
+            registry=registry,
+            tool_descriptions=tool_descriptions,
+        )
         completions: Any = self._client.chat.completions
         response = completions.create(
             model=self.model,
@@ -120,11 +130,16 @@ class OpenAICompatibleProvider:
         *,
         adapter: PromptSchemaAdapter,
         messages: Sequence[dict[str, Any]],
-        registry: ToolRegistry,
+        registry: ToolRegistry | None = None,
+        tool_descriptions: object | None = None,
         request_params: dict[str, Any] | None = None,
     ) -> ParsedModelResponse:
         """Call the model in prompt-schema mode and parse the result."""
-        prompt = self._export_tools(adapter=adapter, registry=registry)
+        prompt = self._resolve_tool_descriptions(
+            adapter=adapter,
+            registry=registry,
+            tool_descriptions=tool_descriptions,
+        )
         completions: Any = self._client.chat.completions
         response = completions.create(
             model=self.model,
@@ -132,6 +147,19 @@ class OpenAICompatibleProvider:
             **self._merged_request_params(request_params),
         )
         return adapter.parse_model_output(self._extract_content(response))
+
+    def _resolve_tool_descriptions(
+        self,
+        *,
+        adapter: LLMAdapter,
+        registry: ToolRegistry | None,
+        tool_descriptions: object | None,
+    ) -> object:
+        if tool_descriptions is not None:
+            return tool_descriptions
+        if registry is None:
+            raise ValueError("Either tool_descriptions or registry must be provided.")
+        return self._export_tools(adapter=adapter, registry=registry)
 
     def _export_tools(
         self,

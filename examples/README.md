@@ -29,7 +29,7 @@ These examples do not make network calls:
 - `openai_live.py`
   Uses the OpenAI-compatible provider layer against Ollama's local
   OpenAI-compatible endpoint.
-  It defaults to `http://localhost:11434/v1` and model `gemma4`.
+  It defaults to `http://localhost:11434/v1` and model `gemma4:26b`.
 
 This example is intentionally not run in CI. It should fail with a clear
 message if Ollama is not reachable.

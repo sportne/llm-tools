@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from llm_tools.tool_api import SideEffectClass, Tool, ToolContext, ToolPolicy, ToolSpec
+from llm_tools.tool_api import (
+    PolicyVerdict,
+    SideEffectClass,
+    Tool,
+    ToolContext,
+    ToolPolicy,
+    ToolSpec,
+)
 
 
 class PolicyInput(BaseModel):
@@ -257,3 +264,18 @@ def test_policy_defaults_include_sensitive_redacted_field_names() -> None:
         "refresh_token",
         "authorization",
     }
+
+
+def test_policy_verdict_distinguishes_allow_approval_and_deny() -> None:
+    policy = ToolPolicy()
+    approval_policy = ToolPolicy(
+        allowed_side_effects={SideEffectClass.NONE, SideEffectClass.LOCAL_READ},
+        require_approval_for={SideEffectClass.LOCAL_READ},
+    )
+
+    assert policy.verdict(NoOpTool(), _context()) is PolicyVerdict.ALLOW
+    assert policy.verdict(LocalWriteTool(), _context()) is PolicyVerdict.DENY
+    assert (
+        approval_policy.verdict(LocalReadTool(), _context())
+        is PolicyVerdict.REQUIRE_APPROVAL
+    )

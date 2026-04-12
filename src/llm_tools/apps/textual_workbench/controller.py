@@ -86,7 +86,7 @@ class WorkbenchController:
                 update={
                     "provider_preset": preset,
                     "base_url": "http://localhost:11434/v1",
-                    "model": "gemma4",
+                    "model": "gemma4:26b",
                     "api_key": "ollama",
                 }
             )
@@ -156,7 +156,10 @@ class WorkbenchController:
         """Export tools for the currently selected interaction mode."""
         registry = self.build_registry(config)
         executor = WorkflowExecutor(registry, policy=self.build_policy(config))
-        return executor.export_tools(self._build_adapter(config.mode))
+        return executor.export_tools(
+            self._build_adapter(config.mode),
+            context=self._make_context(config, invocation_id="workbench-export-tools"),
+        )
 
     def execute_direct_tool(
         self,
@@ -197,7 +200,13 @@ class WorkbenchController:
         policy = self.build_policy(config)
         executor = WorkflowExecutor(registry, policy=policy)
         adapter = self._build_adapter(config.mode)
-        exported_tools = executor.export_tools(adapter)
+        model_turn_context = self._make_context(
+            config, invocation_id="workbench-model-turn"
+        )
+        exported_tools = executor.export_tools(
+            adapter,
+            context=model_turn_context,
+        )
         provider = self._build_provider(config)
         messages = [{"role": "user", "content": normalized_prompt}]
 
@@ -205,26 +214,25 @@ class WorkbenchController:
             parsed = provider.run_native_tool_calling(
                 adapter=adapter,  # type: ignore[arg-type]
                 messages=messages,
-                registry=registry,
+                tool_descriptions=exported_tools,
             )
         elif config.mode is WorkbenchMode.STRUCTURED_OUTPUT:
             parsed = provider.run_structured_output(
                 adapter=adapter,  # type: ignore[arg-type]
                 messages=messages,
-                registry=registry,
+                tool_descriptions=exported_tools,
             )
         else:
             parsed = provider.run_prompt_schema(
                 adapter=adapter,  # type: ignore[arg-type]
                 messages=messages,
-                registry=registry,
+                tool_descriptions=exported_tools,
             )
 
         workflow_result = None
         if config.execute_after_parse:
             workflow_result = executor.execute_parsed_response(
-                parsed,
-                self._make_context(config, invocation_id="workbench-model-turn"),
+                parsed, model_turn_context
             )
 
         return ModelTurnExecutionResult(

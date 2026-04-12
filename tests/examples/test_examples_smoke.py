@@ -46,7 +46,7 @@ def test_live_ollama_example_fails_cleanly_when_server_is_unreachable() -> None:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(REPO_ROOT / "src")
     env["OLLAMA_BASE_URL"] = "http://127.0.0.1:9/v1"
-    env["OLLAMA_MODEL"] = "gemma4"
+    env["OLLAMA_MODEL"] = "gemma4:26b"
 
     result = subprocess.run(
         [sys.executable, str(EXAMPLES_DIR / "openai_live.py")],

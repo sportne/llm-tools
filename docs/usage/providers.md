@@ -50,7 +50,7 @@ from llm_tools.llm_providers import OpenAICompatibleProvider
 from llm_tools.workflow_api import WorkflowExecutor
 
 adapter = NativeToolCallingAdapter()
-provider = OpenAICompatibleProvider.for_ollama(model="gemma4")
+provider = OpenAICompatibleProvider.for_ollama(model="gemma4:26b")
 executor = WorkflowExecutor(registry)
 
 parsed = provider.run_native_tool_calling(

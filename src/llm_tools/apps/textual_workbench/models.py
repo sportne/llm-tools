@@ -35,7 +35,7 @@ class WorkbenchConfigState(BaseModel):
     workspace: str = Field(default_factory=getcwd)
     provider_preset: ProviderPreset = ProviderPreset.OLLAMA
     base_url: str = "http://localhost:11434/v1"
-    model: str = "gemma4"
+    model: str = "gemma4:26b"
     api_key: str = "ollama"
     mode: WorkbenchMode = WorkbenchMode.NATIVE_TOOL_CALLING
 

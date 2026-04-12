@@ -39,10 +39,12 @@ class TextualWorkbenchApp(App[None]):
 
     #workbench-layout {
         height: 1fr;
+        min-height: 0;
     }
 
     .pane {
         width: 1fr;
+        min-height: 0;
         padding: 1;
         layout: vertical;
     }
@@ -73,10 +75,11 @@ class TextualWorkbenchApp(App[None]):
     }
 
     .inspector-box {
-        min-height: 4;
+        height: auto;
         padding: 0 1;
         background: #161b22;
         color: #d7e4f0;
+        min-height: 2;
     }
 
     #transcript-scroll {
@@ -90,11 +93,16 @@ class TextualWorkbenchApp(App[None]):
     }
 
     #prompt-input {
-        height: 8;
+        height: 6;
     }
 
     #tool-args-input {
-        height: 8;
+        height: 6;
+    }
+
+    #left-pane,
+    #right-pane {
+        overflow-y: auto;
     }
 
     #footer-bar {
@@ -120,7 +128,7 @@ class TextualWorkbenchApp(App[None]):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="workbench-layout"):
-            with Vertical(classes="pane", id="left-pane"):
+            with VerticalScroll(classes="pane", id="left-pane"):
                 yield Static("Workbench Config", classes="pane-title")
                 yield Static("Workspace", classes="section-title")
                 yield Input(self._config_state.workspace, id="workspace-input")
@@ -193,7 +201,7 @@ class TextualWorkbenchApp(App[None]):
                 yield Static("Events", classes="section-title")
                 with VerticalScroll(id="transcript-scroll"):
                     yield Static("", id="transcript-body")
-            with Vertical(classes="pane", id="right-pane"):
+            with VerticalScroll(classes="pane", id="right-pane"):
                 yield Static("Inspector", classes="pane-title")
                 yield Static("Registered tools", classes="section-title")
                 yield Static("", id="registered-tools-box", classes="inspector-box")

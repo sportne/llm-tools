@@ -15,7 +15,7 @@ from llm_tools.workflow_api import WorkflowExecutor
 
 def main() -> int:
     base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-    model = os.getenv("OLLAMA_MODEL", "gemma4")
+    model = os.getenv("OLLAMA_MODEL", "gemma4:26b")
 
     provider = OpenAICompatibleProvider.for_ollama(
         model=model,
