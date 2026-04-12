@@ -268,7 +268,35 @@ Step 0 note:
 
 ---
 
-## 11. Deferred / post-v0.1
+## 11. Apps and UX
+
+### 11.1 Apps package foundation
+- [x] Add `llm_tools.apps`
+- [x] Add `llm_tools.apps.textual_workbench`
+- [x] Add module and console entrypoints
+- [x] Keep Textual behind an optional dependency
+
+### 11.2 Textual workbench shell
+- [x] Add a developer-facing one-turn Textual workbench
+- [x] Add configuration, execution, and inspector panes
+- [x] Add safe built-in tool defaults
+- [x] Add provider preset and mode controls
+
+### 11.3 Workbench execution flows
+- [x] Add tool export flow
+- [x] Add direct tool execution flow
+- [x] Add provider-backed model-turn flow
+- [x] Add result and execution-record inspection
+
+### 11.4 Workbench tests and docs
+- [x] Add launcher and controller tests
+- [x] Add Textual startup and interaction tests
+- [x] Add workbench usage documentation
+- [x] Update repository docs for the optional apps layer
+
+---
+
+## 12. Deferred / post-v0.1
 
 - [-] Async execution support
 - [-] Manifest-based tool discovery

@@ -14,6 +14,7 @@ def test_top_level_package_exports_version() -> None:
 
 def test_scaffolded_subpackages_are_importable() -> None:
     for module_name in (
+        "llm_tools.apps",
         "llm_tools.tool_api",
         "llm_tools.llm_adapters",
         "llm_tools.llm_providers",
@@ -27,6 +28,7 @@ def test_scaffolded_subpackages_are_importable() -> None:
 def test_expected_subpackages_exist_under_llm_tools() -> None:
     discovered = {module.name for module in pkgutil.iter_modules(llm_tools.__path__)}
     assert {
+        "apps",
         "llm_adapters",
         "llm_providers",
         "tool_api",

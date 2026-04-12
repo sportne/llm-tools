@@ -27,7 +27,13 @@ dependencies = [
   "pydantic>=2,<3",
 ]
 
+[project.scripts]
+llm-tools-workbench = "llm_tools.apps.textual_workbench:main"
+
 [project.optional-dependencies]
+apps = [
+  "textual>=0.89.1,<1",
+]
 dev = [
   "build>=1.2,<2",
   "mypy>=1.10,<2",
@@ -35,6 +41,7 @@ dev = [
   "pytest-cov>=5,<7",
   "ruff>=0.6,<1",
   "setuptools>=82,<83",
+  "textual>=0.89.1,<1",
   "wheel>=0.46,<0.47",
 ]
 
@@ -77,6 +84,10 @@ strict = true
 warn_unused_configs = true
 pretty = true
 show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = ["textual", "textual.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"

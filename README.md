@@ -17,6 +17,7 @@ The core v0.1 foundation is implemented:
 - native-tool-calling, structured-output, and prompt-schema adapters
 - an OpenAI-compatible provider layer built on the OpenAI Python SDK
 - a thin `workflow_api` bridge for one parsed model turn
+- an optional `apps` layer with a developer-facing Textual workbench
 
 ## Core Concepts
 
@@ -28,6 +29,7 @@ The core v0.1 foundation is implemented:
 - providers handle model requests through OpenAI-compatible endpoints
 - `WorkflowExecutor` bridges one parsed model turn into sequential tool
   execution when needed
+- the optional workbench app helps inspect those layers interactively
 
 ## Package Layout
 
@@ -35,6 +37,7 @@ The library uses a `src` layout rooted at `src/llm_tools/`.
 
 ```text
 src/llm_tools/
+  apps/
   tool_api/
   llm_adapters/
   llm_providers/
@@ -47,6 +50,12 @@ src/llm_tools/
 ```bash
 make setup-venv
 make install-dev
+```
+
+To install the optional Textual workbench:
+
+```bash
+.venv/bin/python -m pip install -e .[apps]
 ```
 
 ## Development
@@ -67,6 +76,20 @@ make package
 - [Implementation Docs](docs/implementation/README.md)
 - [Extension Docs](docs/extensions/README.md)
 - [Agent Conventions](AGENTS.md)
+
+## Workbench
+
+Launch the optional Textual workbench with either:
+
+```bash
+python -m llm_tools.apps.textual_workbench
+```
+
+or:
+
+```bash
+llm-tools-workbench
+```
 
 ## Examples
 
