@@ -5,9 +5,10 @@
 This repository builds `llm-tools`, a low-level Python library for typed tool
 definition, validation, registration, execution, and exposure.
 
-The project is intentionally not an agent framework. Avoid introducing planning,
-memory, workflow orchestration, or prompt-management concepts into the base tool
-abstraction.
+The project now aims to grow into an agent framework over time. Keep the
+foundational tool/runtime abstractions clean and reusable, but do not treat
+agent capabilities such as planning, memory, workflow orchestration, or
+prompt-management as categorically out of scope for the repository.
 
 ## Package Structure
 

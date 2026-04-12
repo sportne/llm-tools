@@ -94,5 +94,5 @@ executor = WorkflowExecutor(registry)
 - returns a final response with no tool execution
 - or executes one-or-more parsed tool invocations sequentially
 
-It still stays one-turn scoped. It does not replan, loop, or make a second
-model call.
+It is still one-turn scoped in the current implementation. It does not yet
+replan, loop, or make a second model call.

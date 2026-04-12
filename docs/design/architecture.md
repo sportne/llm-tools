@@ -4,7 +4,11 @@
 
 This document defines the architecture for `llm-tools`, a low-level Python library for defining, registering, executing, and exposing typed tools for LLM and non-LLM applications.
 
-The project is intentionally **not** an agent framework. It does not treat planning, memory, prompt orchestration, or workflows as foundational concerns. Instead, it provides a strict, typed substrate for tools that higher-level systems may build on top of later.
+The project began as a strict, typed substrate for tools and is now evolving
+toward a broader agent framework. The currently implemented core is still the
+tool/runtime stack, but planning, memory, prompt orchestration, and workflows
+should now be treated as valid architectural expansion areas rather than
+categorically excluded concerns.
 
 The first implemented subsystem is `tool_api`. Additional layers such as
 `llm_adapters`, `llm_providers`, built-in `tools`, and later `workflow_api` are
@@ -85,10 +89,10 @@ Examples:
 
 #### `workflow_api`
 
-A composition layer for explicit multi-step tool execution. It is intentionally
-not part of the base tool abstraction. In v0.1 it provides a thin one-turn
-bridge that takes a parsed adapter result and executes the returned invocations
-sequentially without any replanning or follow-up model calls.
+A composition layer for higher-level execution above the base tool abstraction.
+In v0.1 it provides a thin one-turn bridge that takes a parsed adapter result
+and executes the returned invocations sequentially without any replanning or
+follow-up model calls.
 
 ---
 
@@ -1164,8 +1168,8 @@ The library now exposes dual sync/async execution surfaces:
 
 * tools can implement `invoke`, `ainvoke`, or both
 * runtime exposes `execute` and `execute_async`
-* workflow exposes sync and async one-turn execution APIs
-* provider clients expose sync and async one-turn entrypoints
+* workflow currently exposes sync and async one-turn execution APIs
+* provider clients currently expose sync and async one-turn entrypoints
 
 Sync compatibility is preserved while allowing non-blocking async integration.
 
@@ -1189,6 +1193,7 @@ This architecture is built around a small number of strict, typed abstractions:
 * the runtime owns validation, policy, normalization, and observability
 * LLM integrations are adapters layered above the canonical model
 * concrete tools are separate from the API layer
-* workflows are a later composition layer
+* workflows currently provide the first higher-level composition layer
 
-The result should be a clean, explicit, testable foundation for tool-driven systems without prematurely becoming an agent framework.
+The result should be a clean, explicit, testable foundation for tool-driven
+systems and future agent capabilities.

@@ -3,9 +3,11 @@
 `llm-tools` is a low-level Python library for defining, validating, registering,
 executing, and exposing typed tools for LLM and non-LLM applications.
 
-The project is intentionally not an agent framework. It focuses on a strict,
-class-based tool substrate and a thin one-turn integration layer that
-higher-level systems can build on later.
+The project started as a strict tool substrate and is now evolving toward a
+full agent framework. Today, the strongest implemented layers are still the
+typed tool/runtime foundations plus a thin one-turn integration bridge, but the
+longer-term direction now includes richer agent capabilities on top of that
+core.
 
 ## Status
 
@@ -16,7 +18,7 @@ The core v0.1 foundation is implemented:
 - built-in filesystem, git, Atlassian, and text tools
 - one canonical structured-action adapter (`ActionEnvelopeAdapter`)
 - an Instructor-backed OpenAI-compatible provider layer
-- a thin `workflow_api` bridge for one parsed model turn
+- a current `workflow_api` bridge for one parsed model turn
 - dual sync/async execution paths across runtime, provider, and workflow layers
 - an optional `apps` layer with a developer-facing Textual workbench
 
@@ -28,8 +30,8 @@ The core v0.1 foundation is implemented:
 - `ToolRuntime` executes one invocation with validation and normalization
 - adapters expose tools and parse model output into canonical turn results
 - providers handle model requests through OpenAI-compatible endpoints
-- `WorkflowExecutor` bridges one parsed model turn into sequential tool
-  execution when needed
+- `WorkflowExecutor` currently bridges one parsed model turn into sequential
+  tool execution
 - the optional workbench app helps inspect those layers interactively
 
 ## Package Layout

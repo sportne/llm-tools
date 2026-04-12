@@ -59,5 +59,5 @@ parsed = provider.run(
 turn_result = executor.execute_parsed_response(parsed, context)
 ```
 
-The workflow layer remains a one-turn bridge. It does not add replanning,
-multi-turn loops, or follow-up model calls.
+The workflow layer currently remains a one-turn bridge. It does not yet add
+replanning, multi-turn loops, or follow-up model calls.

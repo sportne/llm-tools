@@ -4,7 +4,11 @@
 
 This project provides a low-level Python library for defining, validating, registering, executing, and exposing LLM-adjacent tools.
 
-The system is designed as a foundational substrate—not an agent framework. It does not assume planning, memory, or prompt orchestration as core concepts.
+The system began as a foundational tool substrate and is now evolving toward a
+broader agent framework. The current implementation remains strongest in the
+typed tool/runtime layers, but the design should no longer treat planning,
+memory, orchestration, or prompt-management as inherently out of scope for the
+project.
 
 Instead, it provides a strongly-typed, Pydantic-based tool system that can be used by:
 
@@ -31,7 +35,8 @@ The core principle is:
 - Normalize tool invocation across multiple LLM interaction modes
 - Enable safe and observable execution
 - Keep the system usable without any LLM dependency
-- Allow higher-level systems (workflows, agents, skills) to be built on top
+- Allow higher-level systems and first-party agent capabilities to be built on
+  top
 
 ---
 
@@ -44,11 +49,11 @@ The core principle is:
 
 ---
 
-## 3. Non-goals (v0.1)
+## 3. Current scope limits (v0.1)
 
-The following are explicitly out of scope:
+The following are not yet implemented in the current release:
 
-- Autonomous agent loops
+- Autonomous multi-turn agent loops
 - Planning systems or hierarchical execution graphs
 - Long-term memory systems
 - Retrieval systems or vector databases
@@ -57,7 +62,9 @@ The following are explicitly out of scope:
 - Distributed execution infrastructure
 - UI-driven skill management systems
 
-These may be added later as higher-level layers, but must not influence the core design.
+These are future-facing areas rather than permanent non-goals. The main design
+constraint is that new agent features should extend the existing typed core
+cleanly instead of bypassing it.
 
 ---
 
@@ -180,8 +187,9 @@ The adapter defines a structured envelope that contains either:
 - or a final assistant response with no tool use
 
 `workflow_api` may consume that model-turn outcome and execute any returned
-tool invocations sequentially, but this remains a thin one-turn bridge rather
-than a planning or agent loop.
+tool invocations sequentially. In the current implementation it remains a thin
+one-turn bridge, but it is expected to grow toward richer agent execution
+capabilities over time.
 
 ### 4.9.4 LLM Providers
 
