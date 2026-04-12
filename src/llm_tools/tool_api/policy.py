@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from llm_tools.tool_api.models import (
     PolicyDecision,
@@ -12,6 +12,12 @@ from llm_tools.tool_api.models import (
     SideEffectClass,
     ToolContext,
     ToolSpec,
+)
+from llm_tools.tool_api.redaction import (
+    DEFAULT_SENSITIVE_FIELD_NAMES,
+    RedactionConfig,
+    RedactionRule,
+    RedactionTarget,
 )
 from llm_tools.tool_api.tool import Tool
 
@@ -37,17 +43,39 @@ class ToolPolicy(BaseModel):
     allow_network: bool = True
     allow_filesystem: bool = True
     allow_subprocess: bool = True
+    redaction: RedactionConfig = Field(default_factory=RedactionConfig)
     redacted_field_names: set[str] = Field(
-        default_factory=lambda: {
-            "password",
-            "secret",
-            "token",
-            "api_key",
-            "access_token",
-            "refresh_token",
-            "authorization",
-        }
+        default_factory=lambda: set(DEFAULT_SENSITIVE_FIELD_NAMES)
     )
+
+    @model_validator(mode="after")
+    def _merge_legacy_redaction_fields(self) -> ToolPolicy:
+        """Map legacy redacted field names into the rich redaction config."""
+        if not self.redacted_field_names:
+            return self
+
+        existing_signature = {
+            (
+                frozenset(rule.field_names),
+                frozenset(rule.paths),
+                frozenset(rule.targets),
+                rule.replacement,
+            )
+            for rule in self.redaction.rules
+        }
+        legacy_rule = RedactionRule(
+            field_names=set(self.redacted_field_names),
+            targets={RedactionTarget.ALL},
+        )
+        legacy_signature = (
+            frozenset(legacy_rule.field_names),
+            frozenset(legacy_rule.paths),
+            frozenset(legacy_rule.targets),
+            legacy_rule.replacement,
+        )
+        if legacy_signature not in existing_signature:
+            self.redaction.rules.append(legacy_rule)
+        return self
 
     def evaluate(self, tool: Tool[Any, Any], context: ToolContext) -> PolicyDecision:
         """Evaluate whether a tool is allowed under the current policy."""

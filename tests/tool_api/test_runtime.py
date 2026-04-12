@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Any, cast
 
+import pytest
 from pydantic import BaseModel
 
 from llm_tools.tool_api import (
@@ -12,12 +14,14 @@ from llm_tools.tool_api import (
     SideEffectClass,
     Tool,
     ToolContext,
+    ToolError,
     ToolInvocationRequest,
     ToolPolicy,
     ToolRegistry,
     ToolRuntime,
     ToolSpec,
 )
+from llm_tools.tool_api.runtime import _ExecutionState
 
 
 class RuntimeInput(BaseModel):
@@ -573,3 +577,152 @@ def test_runtime_execute_async_normalizes_invalid_input_execution_and_output() -
     assert invalid_output.ok is False
     assert invalid_output.error is not None
     assert invalid_output.error.code is ErrorCode.OUTPUT_VALIDATION_ERROR
+
+
+def test_runtime_normalizes_unexpected_tool_resolution_errors() -> None:
+    runtime = ToolRuntime(_registry(EchoTool()))
+
+    def explode(_: ToolInvocationRequest) -> Tool[Any, Any]:
+        raise RuntimeError("registry exploded")
+
+    runtime._resolve_tool = explode  # type: ignore[method-assign]
+
+    sync_result = runtime.execute(
+        ToolInvocationRequest(tool_name="echo", arguments={"value": "hi"}),
+        _context(),
+    )
+    async_result = asyncio.run(
+        runtime.execute_async(
+            ToolInvocationRequest(tool_name="echo", arguments={"value": "hi"}),
+            _context(),
+        )
+    )
+
+    assert sync_result.ok is False
+    assert sync_result.error is not None
+    assert sync_result.error.code is ErrorCode.RUNTIME_ERROR
+    assert sync_result.error.details["exception_message"] == "registry exploded"
+    assert async_result.ok is False
+    assert async_result.error is not None
+    assert async_result.error.code is ErrorCode.RUNTIME_ERROR
+    assert async_result.error.details["exception_message"] == "registry exploded"
+
+
+def test_runtime_normalizes_unexpected_input_validation_errors() -> None:
+    runtime = ToolRuntime(_registry(EchoTool()))
+
+    def explode(_: Tool[Any, Any], __: dict[str, Any]) -> BaseModel:
+        raise RuntimeError("validate input exploded")
+
+    runtime._validate_input = explode  # type: ignore[method-assign]
+
+    sync_result = runtime.execute(
+        ToolInvocationRequest(tool_name="echo", arguments={"value": "hi"}),
+        _context(),
+    )
+    async_result = asyncio.run(
+        runtime.execute_async(
+            ToolInvocationRequest(tool_name="echo", arguments={"value": "hi"}),
+            _context(),
+        )
+    )
+
+    assert sync_result.ok is False
+    assert sync_result.error is not None
+    assert sync_result.error.code is ErrorCode.RUNTIME_ERROR
+    assert sync_result.error.details["exception_message"] == "validate input exploded"
+    assert async_result.ok is False
+    assert async_result.error is not None
+    assert async_result.error.code is ErrorCode.RUNTIME_ERROR
+    assert async_result.error.details["exception_message"] == "validate input exploded"
+
+
+def test_runtime_normalizes_unexpected_output_validation_errors() -> None:
+    runtime = ToolRuntime(_registry(EchoTool()))
+
+    def explode(_: Tool[Any, Any], __: Any) -> BaseModel:
+        raise RuntimeError("validate output exploded")
+
+    runtime._validate_output = explode  # type: ignore[method-assign]
+
+    sync_result = runtime.execute(
+        ToolInvocationRequest(tool_name="echo", arguments={"value": "hi"}),
+        _context(),
+    )
+    async_result = asyncio.run(
+        runtime.execute_async(
+            ToolInvocationRequest(tool_name="echo", arguments={"value": "hi"}),
+            _context(),
+        )
+    )
+
+    assert sync_result.ok is False
+    assert sync_result.error is not None
+    assert sync_result.error.code is ErrorCode.RUNTIME_ERROR
+    assert sync_result.error.details["exception_message"] == "validate output exploded"
+    assert async_result.ok is False
+    assert async_result.error is not None
+    assert async_result.error.code is ErrorCode.RUNTIME_ERROR
+    assert async_result.error.details["exception_message"] == "validate output exploded"
+
+
+def test_runtime_execute_async_normalizes_unexpected_policy_failures() -> None:
+    runtime = ToolRuntime(_registry(EchoTool()), policy=BrokenPolicy())
+
+    result = asyncio.run(
+        runtime.execute_async(
+            ToolInvocationRequest(tool_name="echo", arguments={"value": "hi"}),
+            _context(),
+        )
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is ErrorCode.RUNTIME_ERROR
+    assert result.error.details["exception_type"] == "RuntimeError"
+    assert result.error.details["exception_message"] == "policy exploded"
+
+
+def test_runtime_invocation_helpers_raise_with_no_execution_methods(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = ToolRuntime(_registry(EchoTool()))
+    tool = EchoTool()
+    validated_input = RuntimeInput(value="hello")
+
+    monkeypatch.setattr(
+        EchoTool,
+        "_has_sync_implementation",
+        classmethod(lambda cls: False),
+    )
+    monkeypatch.setattr(
+        EchoTool,
+        "_has_async_implementation",
+        classmethod(lambda cls: False),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="no synchronous or asynchronous implementation",
+    ):
+        runtime._invoke_tool(tool, _context(), validated_input)
+    with pytest.raises(
+        RuntimeError,
+        match="no synchronous or asynchronous implementation",
+    ):
+        asyncio.run(runtime._invoke_tool_async(tool, _context(), validated_input))
+
+
+def test_runtime_redact_error_details_returns_unchanged_without_details() -> None:
+    runtime = ToolRuntime(_registry(EchoTool()))
+    state = _ExecutionState(
+        invocation_id="inv-1",
+        request=ToolInvocationRequest(tool_name="echo", arguments={}),
+        started_at=datetime.now(UTC),
+        tool_name="echo",
+    )
+    error = ToolError(code=ErrorCode.RUNTIME_ERROR, message="failed", details={})
+
+    redacted_error = runtime._redact_error_details(state, error)
+
+    assert redacted_error is error

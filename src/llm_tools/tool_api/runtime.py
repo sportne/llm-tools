@@ -20,6 +20,7 @@ from llm_tools.tool_api.models import (
     ToolResult,
 )
 from llm_tools.tool_api.policy import ToolPolicy
+from llm_tools.tool_api.redaction import RedactionSummary, RedactionTarget, Redactor
 from llm_tools.tool_api.registry import ToolRegistry
 from llm_tools.tool_api.tool import Tool
 
@@ -35,9 +36,12 @@ class _ExecutionState:
     tool_version: str = "unknown"
     validated_input: dict[str, Any] | None = None
     redacted_input: dict[str, Any] | None = None
+    validated_output: dict[str, Any] | None = None
+    redacted_output: dict[str, Any] | None = None
     policy_decision: PolicyDecision | None = None
     logs: list[str] | None = None
     artifacts: list[str] | None = None
+    redaction_summary: RedactionSummary | None = None
     ok: bool | None = None
     error_code: ErrorCode | None = None
 
@@ -65,6 +69,8 @@ class ToolRuntime:
             started_at=self._utc_now(),
             tool_name=request.tool_name,
         )
+        redactor = self._new_redactor(state.tool_name)
+        state.redaction_summary = redactor.summary
 
         try:
             tool = self._resolve_tool(request)
@@ -87,6 +93,8 @@ class ToolRuntime:
 
         state.tool_name = tool.spec.name
         state.tool_version = tool.spec.version
+        redactor = self._new_redactor(state.tool_name)
+        state.redaction_summary = redactor.summary
 
         try:
             policy_decision = self._evaluate_policy(tool, context)
@@ -134,8 +142,13 @@ class ToolRuntime:
                 self._make_runtime_error(state, exc),
             )
 
-        state.validated_input = validated_input.model_dump(mode="json")
-        state.redacted_input = self._redact_input(state.validated_input)
+        raw_validated_input = validated_input.model_dump(mode="json")
+        state.redacted_input = redactor.redact_structured(
+            raw_validated_input,
+            target=RedactionTarget.INPUT,
+        )
+        if self._policy.redaction.retain_unredacted_inputs:
+            state.validated_input = raw_validated_input
 
         try:
             raw_output = self._invoke_tool(tool, context, validated_input)
@@ -176,11 +189,15 @@ class ToolRuntime:
                 self._make_runtime_error(state, exc),
             )
 
-        return self._finalize_success(
-            state,
-            context,
-            output=validated_output.model_dump(mode="json"),
+        raw_validated_output = validated_output.model_dump(mode="json")
+        state.redacted_output = redactor.redact_structured(
+            raw_validated_output,
+            target=RedactionTarget.OUTPUT,
         )
+        if self._policy.redaction.retain_unredacted_outputs:
+            state.validated_output = raw_validated_output
+
+        return self._finalize_success(state, context)
 
     async def execute_async(
         self,
@@ -194,6 +211,8 @@ class ToolRuntime:
             started_at=self._utc_now(),
             tool_name=request.tool_name,
         )
+        redactor = self._new_redactor(state.tool_name)
+        state.redaction_summary = redactor.summary
 
         try:
             tool = self._resolve_tool(request)
@@ -216,6 +235,8 @@ class ToolRuntime:
 
         state.tool_name = tool.spec.name
         state.tool_version = tool.spec.version
+        redactor = self._new_redactor(state.tool_name)
+        state.redaction_summary = redactor.summary
 
         try:
             policy_decision = self._evaluate_policy(tool, context)
@@ -263,8 +284,13 @@ class ToolRuntime:
                 self._make_runtime_error(state, exc),
             )
 
-        state.validated_input = validated_input.model_dump(mode="json")
-        state.redacted_input = self._redact_input(state.validated_input)
+        raw_validated_input = validated_input.model_dump(mode="json")
+        state.redacted_input = redactor.redact_structured(
+            raw_validated_input,
+            target=RedactionTarget.INPUT,
+        )
+        if self._policy.redaction.retain_unredacted_inputs:
+            state.validated_input = raw_validated_input
 
         try:
             raw_output = await self._invoke_tool_async(tool, context, validated_input)
@@ -305,11 +331,15 @@ class ToolRuntime:
                 self._make_runtime_error(state, exc),
             )
 
-        return self._finalize_success(
-            state,
-            context,
-            output=validated_output.model_dump(mode="json"),
+        raw_validated_output = validated_output.model_dump(mode="json")
+        state.redacted_output = redactor.redact_structured(
+            raw_validated_output,
+            target=RedactionTarget.OUTPUT,
         )
+        if self._policy.redaction.retain_unredacted_outputs:
+            state.validated_output = raw_validated_output
+
+        return self._finalize_success(state, context)
 
     def _resolve_tool(self, request: ToolInvocationRequest) -> Tool[Any, Any]:
         return self._registry.get(request.tool_name)
@@ -365,13 +395,10 @@ class ToolRuntime:
         self,
         state: _ExecutionState,
         context: ToolContext,
-        *,
-        output: dict[str, Any],
     ) -> ToolResult:
         state.ok = True
-        state.logs = list(context.logs)
-        state.artifacts = list(context.artifacts)
-        result = self._normalize_result(state, output=output, error=None)
+        self._apply_observability_redaction(state, context)
+        result = self._normalize_result(state, error=None)
         record = self._record_execution(state)
         result.metadata["execution_record"] = record.model_dump(mode="json")
         return result
@@ -383,10 +410,10 @@ class ToolRuntime:
         error: ToolError,
     ) -> ToolResult:
         state.ok = False
-        state.error_code = error.code
-        state.logs = list(context.logs)
-        state.artifacts = list(context.artifacts)
-        result = self._normalize_result(state, output=None, error=error)
+        redacted_error = self._redact_error_details(state, error)
+        state.error_code = redacted_error.code
+        self._apply_observability_redaction(state, context)
+        result = self._normalize_result(state, error=redacted_error)
         record = self._record_execution(state)
         result.metadata["execution_record"] = record.model_dump(mode="json")
         return result
@@ -395,14 +422,13 @@ class ToolRuntime:
         self,
         state: _ExecutionState,
         *,
-        output: dict[str, Any] | None,
         error: ToolError | None,
     ) -> ToolResult:
         return ToolResult(
             ok=error is None,
             tool_name=state.tool_name,
             tool_version=state.tool_version,
-            output=output,
+            output=state.redacted_output,
             error=error,
             logs=list(state.logs or []),
             artifacts=list(state.artifacts or []),
@@ -421,11 +447,16 @@ class ToolRuntime:
             request=state.request,
             validated_input=state.validated_input,
             redacted_input=state.redacted_input,
+            validated_output=state.validated_output,
+            redacted_output=state.redacted_output,
             ok=state.ok,
             error_code=state.error_code,
             policy_decision=state.policy_decision,
             logs=logs,
             artifacts=artifacts,
+            metadata={
+                "redaction": self._redaction_metadata(state),
+            },
         )
 
     def _snapshot_observability(
@@ -435,36 +466,64 @@ class ToolRuntime:
         state.artifacts = list(state.artifacts or [])
         return state.logs, state.artifacts
 
-    def _redact_input(self, value: dict[str, Any]) -> dict[str, Any]:
-        redacted = self._redact_value(value)
-        if not isinstance(redacted, dict):
-            return {}
-        return redacted
+    def _apply_observability_redaction(
+        self,
+        state: _ExecutionState,
+        context: ToolContext,
+    ) -> None:
+        redactor = self._new_redactor(state.tool_name)
+        if state.redaction_summary is not None:
+            redactor.summary.matched_targets.update(
+                state.redaction_summary.matched_targets
+            )
+            redactor.summary.matched_paths.update(state.redaction_summary.matched_paths)
+            redactor.summary.applied_rule_count += (
+                state.redaction_summary.applied_rule_count
+            )
 
-    def _redact_value(self, value: Any) -> Any:
-        if isinstance(value, dict):
-            return {
-                key: (
-                    "[REDACTED]"
-                    if self._is_redacted_field_name(key)
-                    else self._redact_value(item)
-                )
-                for key, item in value.items()
-            }
-        if isinstance(value, list):
-            return [self._redact_value(item) for item in value]
-        return value
+        state.logs = redactor.redact_string_entries(
+            list(context.logs),
+            target=RedactionTarget.LOGS,
+        )
+        state.artifacts = redactor.redact_string_entries(
+            list(context.artifacts),
+            target=RedactionTarget.ARTIFACTS,
+        )
+        state.redaction_summary = redactor.summary
 
-    def _is_redacted_field_name(self, field_name: str) -> bool:
-        normalized = self._normalize_field_name(field_name)
-        return any(
-            normalized == self._normalize_field_name(candidate)
-            for candidate in self._policy.redacted_field_names
+    def _redact_error_details(
+        self,
+        state: _ExecutionState,
+        error: ToolError,
+    ) -> ToolError:
+        if not error.details:
+            return error
+
+        redactor = self._new_redactor(state.tool_name)
+        if state.redaction_summary is not None:
+            redactor.summary.matched_targets.update(
+                state.redaction_summary.matched_targets
+            )
+            redactor.summary.matched_paths.update(state.redaction_summary.matched_paths)
+            redactor.summary.applied_rule_count += (
+                state.redaction_summary.applied_rule_count
+            )
+        redacted_details = redactor.redact_structured(
+            error.details,
+            target=RedactionTarget.ERROR_DETAILS,
+        )
+        state.redaction_summary = redactor.summary
+        return error.model_copy(update={"details": redacted_details})
+
+    def _redaction_metadata(self, state: _ExecutionState) -> dict[str, object]:
+        summary = state.redaction_summary or RedactionSummary()
+        return summary.as_metadata(
+            retain_unredacted_inputs=self._policy.redaction.retain_unredacted_inputs,
+            retain_unredacted_outputs=self._policy.redaction.retain_unredacted_outputs,
         )
 
-    @staticmethod
-    def _normalize_field_name(field_name: str) -> str:
-        return field_name.casefold().replace("-", "_")
+    def _new_redactor(self, tool_name: str) -> Redactor:
+        return Redactor(self._policy.redaction, tool_name=tool_name)
 
     @staticmethod
     def _make_error(

@@ -227,6 +227,8 @@ def test_execution_record_serializes_nested_models_and_error_codes() -> None:
         },
         "validated_input": {"url": "https://example.com"},
         "redacted_input": None,
+        "validated_output": None,
+        "redacted_output": None,
         "ok": False,
         "error_code": "timeout",
         "policy_decision": {

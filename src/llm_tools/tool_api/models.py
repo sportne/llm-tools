@@ -134,6 +134,8 @@ class ExecutionRecord(BaseModel):
     request: ToolInvocationRequest
     validated_input: dict[str, Any] | None = None
     redacted_input: dict[str, Any] | None = None
+    validated_output: dict[str, Any] | None = None
+    redacted_output: dict[str, Any] | None = None
 
     ok: bool | None = None
     error_code: ErrorCode | None = None
