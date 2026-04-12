@@ -3,24 +3,24 @@
 from __future__ import annotations
 
 from llm_tools.tool_api import ToolContext
-from llm_tools.tools.text import DirectoryTextSearchTool, FileTextSearchTool
+from llm_tools.tools.text import SearchTextTool
 
 
-def test_file_text_search_tool_finds_case_insensitive_matches(tmp_path: str) -> None:
+def test_search_text_tool_finds_matches_in_a_single_file(tmp_path: str) -> None:
     workspace = tmp_path
     file_path = workspace / "notes.txt"
-    file_path.write_text("Hello\nworld\nHELLO again\n", encoding="utf-8")
+    file_path.write_text("Hello\nworld\nHello again\n", encoding="utf-8")
 
-    result = FileTextSearchTool().invoke(
+    result = SearchTextTool().invoke(
         ToolContext(invocation_id="inv-1", workspace=str(workspace)),
-        FileTextSearchTool.input_model(path="notes.txt", query="hello"),
+        SearchTextTool.input_model(path="notes.txt", query="Hello"),
     )
 
     assert [match.line_number for match in result.matches] == [1, 3]
-    assert result.matches[0].matched_texts == ["Hello"]
+    assert result.matches[0].line_text == "Hello"
 
 
-def test_directory_text_search_tool_filters_by_glob_and_regex(tmp_path: str) -> None:
+def test_search_text_tool_searches_directory_contents(tmp_path: str) -> None:
     workspace = tmp_path
     (workspace / "keep.py").write_text("value = 42\nanswer = 42\n", encoding="utf-8")
     (workspace / "skip.txt").write_text("42\n", encoding="utf-8")
@@ -28,15 +28,14 @@ def test_directory_text_search_tool_filters_by_glob_and_regex(tmp_path: str) -> 
     nested.mkdir()
     (nested / "match.py").write_text("value = 99\n", encoding="utf-8")
 
-    result = DirectoryTextSearchTool().invoke(
-        ToolContext(invocation_id="inv-2", workspace=str(workspace)),
-        DirectoryTextSearchTool.input_model(
-            path=".",
-            query=r"value\s*=\s*\d+",
-            regex=True,
-            file_glob="*.py",
+    result = SearchTextTool().invoke(
+        ToolContext(
+            invocation_id="inv-2",
+            workspace=str(workspace),
+            metadata={"source_filters": {"include": ["*.py", "**/*.py"]}},
         ),
+        SearchTextTool.input_model(path=".", query="value = "),
     )
 
-    assert [item.path for item in result.results] == ["keep.py", "pkg/match.py"]
-    assert result.results[0].matches[0].line_number == 1
+    assert [item.path for item in result.matches] == ["keep.py", "pkg/match.py"]
+    assert result.matches[0].line_number == 1

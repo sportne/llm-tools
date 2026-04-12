@@ -6,11 +6,11 @@ import pytest
 from pydantic import ValidationError
 
 from llm_tools.tool_api import ToolResult
-from llm_tools.tools.chat import ChatSessionConfig
 from llm_tools.workflow_api import (
     ChatCitation,
     ChatFinalResponse,
     ChatMessage,
+    ChatSessionConfig,
     ChatSessionState,
     ChatTokenUsage,
     ChatWorkflowTurnResult,

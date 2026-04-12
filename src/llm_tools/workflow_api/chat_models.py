@@ -13,6 +13,27 @@ ChatMessageRole = Literal["system", "user", "assistant", "tool"]
 ChatAssistantCompletionState = Literal["complete", "interrupted"]
 
 
+class ChatSessionConfig(BaseModel):
+    """Per-session context and tool-call safety limits."""
+
+    max_context_tokens: int = 24000
+    max_tool_round_trips: int = 8
+    max_tool_calls_per_round: int = 4
+    max_total_tool_calls_per_turn: int = 12
+
+    @field_validator(
+        "max_context_tokens",
+        "max_tool_round_trips",
+        "max_tool_calls_per_round",
+        "max_total_tool_calls_per_turn",
+    )
+    @classmethod
+    def validate_positive_ints(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("chat session limits must be positive integers")
+        return value
+
+
 class ChatCitation(BaseModel):
     """Grounding citation displayed with a final chat answer."""
 

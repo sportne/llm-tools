@@ -147,7 +147,7 @@ async def _run_startup_assertions(tmp_path: Path) -> None:
         tools_text = str(app.query_one("#registered-tools-box", Static).renderable)
         assert "read_file" in tools_text
         assert "run_git_status" in tools_text
-        assert "directory_text_search" in tools_text
+        assert "search_text" in tools_text
         assert "search_jira" not in tools_text
         assert (
             app.query_one("#toggle-filesystem-tools", Button).label.plain

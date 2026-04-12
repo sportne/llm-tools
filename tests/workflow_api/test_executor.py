@@ -232,8 +232,9 @@ def test_workflow_executor_prepares_registered_tools_for_model_interaction() -> 
         "read_file",
         "write_file",
         "list_directory",
-        "file_text_search",
-        "directory_text_search",
+        "find_files",
+        "get_file_info",
+        "search_text",
     ]
     assert isinstance(prepared.schema, dict)
     assert "ActionEnvelope" in prepared.schema["title"]
@@ -254,6 +255,8 @@ def test_workflow_executor_export_filters_out_policy_denied_tools_with_context(
     assert prepared.tool_names == [
         "read_file",
         "list_directory",
+        "find_files",
+        "get_file_info",
     ]
 
 
@@ -282,6 +285,8 @@ def test_workflow_executor_export_can_include_approval_required_tools(
     assert shown_export.tool_names == [
         "read_file",
         "list_directory",
+        "find_files",
+        "get_file_info",
     ]
 
 

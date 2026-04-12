@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 
-from llm_tools.tool_api import ToolRegistry
-from llm_tools.tools.chat import ChatToolLimits
+from llm_tools.tool_api import SideEffectClass, ToolRegistry
+from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import ChatFinalResponse
 
 CHAT_SYSTEM_PROMPT_PREAMBLE = """
@@ -43,7 +43,7 @@ def _strip_schema_titles(value: object) -> object:
 def build_chat_system_prompt(
     *,
     tool_registry: ToolRegistry,
-    tool_limits: ChatToolLimits,
+    tool_limits: ToolLimits,
 ) -> str:
     """Return the interactive repository-chat system prompt."""
     tool_catalog = json.dumps(
@@ -59,6 +59,8 @@ def build_chat_system_prompt(
                 },
             }
             for tool in tool_registry.list_registered_tools()
+            if tool.spec.side_effects
+            in {SideEffectClass.NONE, SideEffectClass.LOCAL_READ}
         ],
         indent=2,
         sort_keys=True,
@@ -67,7 +69,7 @@ def build_chat_system_prompt(
         (
             "- To search the entire repo by file contents: search_text(path='.', query='provider')",
             "- To locate candidate files first: find_files(path='src', pattern='**/*.py')",
-            "- To inspect a directory tree before reading: list_directory_recursive(path='src')",
+            "- To inspect a directory tree before reading: list_directory(path='src', recursive=true)",
             "- To inspect a possibly large file first: get_file_info(path='src/app.py')",
             "- To compare several candidate files first: get_file_info(paths=['src/app.py', 'src/config.py'])",
             "- To read only part of a file: read_file(path='src/app.py', start_char=0, end_char=4000)",
@@ -107,7 +109,8 @@ def build_chat_system_prompt(
         f"{usage_examples}\n\n"
         "Operational rules:\n"
         "- path must never be blank. Use path='.' to operate on the entire configured root.\n"
-        "- list_directory and list_directory_recursive expect directory paths.\n"
+        "- list_directory expects a directory path.\n"
+        "- Use recursive=true and optional max_depth for tree-style listings.\n"
         "- search_text accepts either a directory path or a single file path.\n"
         "- get_file_info accepts either one file path or a list of file paths.\n"
         "- read_file expects one file path.\n"

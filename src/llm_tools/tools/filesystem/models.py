@@ -1,4 +1,4 @@
-"""Typed models for repository-chat tool configuration and outputs."""
+"""Shared models for repository-style filesystem tools."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ FileInfoStatus = Literal["ok", "unsupported", "error"]
 FileReadStatus = Literal["ok", "too_large", "unsupported", "error"]
 
 
-class ChatSourceFilters(BaseModel):
+class SourceFilters(BaseModel):
     """Directory discovery filters applied inside the configured root."""
 
     include: list[str] = Field(default_factory=list)
@@ -28,29 +28,8 @@ class ChatSourceFilters(BaseModel):
         return cleaned
 
 
-class ChatSessionConfig(BaseModel):
-    """Per-session context and tool-call safety limits."""
-
-    max_context_tokens: int = 24000
-    max_tool_round_trips: int = 8
-    max_tool_calls_per_round: int = 4
-    max_total_tool_calls_per_turn: int = 12
-
-    @field_validator(
-        "max_context_tokens",
-        "max_tool_round_trips",
-        "max_tool_calls_per_round",
-        "max_total_tool_calls_per_turn",
-    )
-    @classmethod
-    def validate_positive_ints(cls, value: int) -> int:
-        if value <= 0:
-            raise ValueError("chat session limits must be positive integers")
-        return value
-
-
-class ChatToolLimits(BaseModel):
-    """Deterministic upper bounds for repository chat tools."""
+class ToolLimits(BaseModel):
+    """Deterministic upper bounds for repository inspection tools."""
 
     max_entries_per_call: int = 200
     max_recursive_depth: int = 12
@@ -71,19 +50,19 @@ class ChatToolLimits(BaseModel):
     @classmethod
     def validate_positive_ints(cls, value: int) -> int:
         if value <= 0:
-            raise ValueError("chat tool limits must be positive integers")
+            raise ValueError("tool limits must be positive integers")
         return value
 
     @field_validator("max_read_file_chars")
     @classmethod
     def validate_optional_positive_int(cls, value: int | None) -> int | None:
         if value is not None and value <= 0:
-            raise ValueError("chat tool limits must be positive integers")
+            raise ValueError("tool limits must be positive integers")
         return value
 
 
 class DirectoryEntry(BaseModel):
-    """One filesystem entry exposed by a chat listing tool."""
+    """One filesystem entry exposed by a repository listing tool."""
 
     path: str
     name: str
@@ -105,7 +84,7 @@ class DirectoryListingResult(BaseModel):
 
 
 class FileMatch(BaseModel):
-    """One matched file returned by the find-files tool."""
+    """One matched file returned by the file-finding tool."""
 
     path: str
     name: str
@@ -120,25 +99,6 @@ class FileSearchResult(BaseModel):
     resolved_path: str
     pattern: str
     matches: list[FileMatch] = Field(default_factory=list)
-    truncated: bool = False
-
-
-class TextSearchMatch(BaseModel):
-    """One matching line returned by the text-search tool."""
-
-    path: str
-    line_number: int
-    line_text: str
-    is_hidden: bool
-
-
-class TextSearchResult(BaseModel):
-    """Structured result for deterministic text search."""
-
-    requested_path: str
-    resolved_path: str
-    query: str
-    matches: list[TextSearchMatch] = Field(default_factory=list)
     truncated: bool = False
 
 

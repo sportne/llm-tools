@@ -6,7 +6,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field, field_validator
 
-from llm_tools.tools.chat import ChatSessionConfig, ChatSourceFilters, ChatToolLimits
+from llm_tools.tools.filesystem import SourceFilters, ToolLimits
+from llm_tools.workflow_api import ChatSessionConfig
 
 
 class ProviderPreset(str, Enum):  # noqa: UP042
@@ -98,7 +99,7 @@ class TextualChatConfig(BaseModel):
     """Standalone configuration for the Textual repository chat app."""
 
     llm: ChatLLMConfig = Field(default_factory=ChatLLMConfig)
-    source_filters: ChatSourceFilters = Field(default_factory=ChatSourceFilters)
+    source_filters: SourceFilters = Field(default_factory=SourceFilters)
     session: ChatSessionConfig = Field(default_factory=ChatSessionConfig)
-    tool_limits: ChatToolLimits = Field(default_factory=ChatToolLimits)
+    tool_limits: ToolLimits = Field(default_factory=ToolLimits)
     ui: ChatUIConfig = Field(default_factory=ChatUIConfig)

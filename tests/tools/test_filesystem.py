@@ -26,14 +26,13 @@ def test_read_file_tool_reads_text_files(tmp_path: str) -> None:
     )
 
     assert result.content == "hello world"
-    assert result.content_format == "text"
-    assert result.line_start == 1
-    assert result.line_end == 1
-    assert result.total_lines == 1
+    assert result.read_kind == "text"
+    assert result.start_char == 0
+    assert result.end_char == 11
+    assert result.content_char_count == 11
+    assert result.character_count == 11
     assert result.truncated is False
-    assert result.cached_markdown_path is None
-    assert result.used_cached_conversion is False
-    assert result.resolved_path == str(file_path.resolve())
+    assert result.resolved_path == "hello.txt"
     assert context.artifacts == [str(file_path.resolve())]
 
 
@@ -70,15 +69,11 @@ def test_read_file_tool_automatically_converts_non_text_files(
         ReadFileTool.input_model(path="report.docx"),
     )
 
-    assert first.content_format == "markdown"
+    assert first.read_kind == "markitdown"
     assert first.content == f"converted:{file_path.resolve()}"
-    assert first.cached_markdown_path is not None
-    assert first.used_cached_conversion is False
     assert second.content == first.content
-    assert second.cached_markdown_path == first.cached_markdown_path
-    assert second.used_cached_conversion is True
     assert convert_calls == [str(file_path.resolve())]
-    assert context.artifacts == [str(file_path.resolve()), first.cached_markdown_path]
+    assert context.artifacts == [str(file_path.resolve())]
 
 
 def test_read_file_tool_rebuilds_cached_markdown_when_source_changes(
@@ -119,58 +114,52 @@ def test_read_file_tool_rebuilds_cached_markdown_when_source_changes(
     )
 
     assert first.content != second.content
-    assert second.used_cached_conversion is False
     assert convert_calls == [str(file_path.resolve()), str(file_path.resolve())]
 
 
-def test_read_file_tool_returns_bounded_line_ranges(tmp_path: str) -> None:
+def test_read_file_tool_returns_bounded_character_ranges(tmp_path: str) -> None:
     workspace = tmp_path
     file_path = workspace / "hello.txt"
     file_path.write_text("one\ntwo\nthree\nfour\nfive\n", encoding="utf-8")
 
     result = ReadFileTool().invoke(
         ToolContext(invocation_id="inv-6", workspace=str(workspace)),
-        ReadFileTool.input_model(path="hello.txt", line_start=2, line_end=4),
+        ReadFileTool.input_model(path="hello.txt", start_char=4, end_char=13),
     )
 
-    assert result.content == "two\nthree\nfour"
-    assert result.line_start == 2
-    assert result.line_end == 4
-    assert result.total_lines == 5
-    assert result.truncated is False
+    assert result.content == "two\nthree"
+    assert result.start_char == 4
+    assert result.end_char == 13
+    assert result.character_count == len(file_path.read_text(encoding="utf-8"))
+    assert result.truncated is True
 
 
 def test_read_file_tool_truncates_large_default_ranges(tmp_path: str) -> None:
     workspace = tmp_path
-    file_path = workspace / "many-lines.txt"
-    file_path.write_text(
-        "\n".join(f"line {index}" for index in range(1, 251)),
-        encoding="utf-8",
-    )
+    file_path = workspace / "many-chars.txt"
+    file_path.write_text("x" * 5000, encoding="utf-8")
 
     result = ReadFileTool().invoke(
         ToolContext(invocation_id="inv-7", workspace=str(workspace)),
-        ReadFileTool.input_model(path="many-lines.txt"),
+        ReadFileTool.input_model(path="many-chars.txt"),
     )
 
-    returned_lines = result.content.splitlines()
-    assert len(returned_lines) == 200
-    assert returned_lines[0] == "line 1"
-    assert returned_lines[-1] == "line 200"
-    assert result.line_end == 200
-    assert result.total_lines == 250
+    assert result.content == "x" * 4000
+    assert result.start_char == 0
+    assert result.end_char == 4000
+    assert result.character_count == 5000
     assert result.truncated is True
 
 
-def test_read_file_tool_rejects_invalid_line_ranges(tmp_path: str) -> None:
+def test_read_file_tool_rejects_invalid_character_ranges(tmp_path: str) -> None:
     workspace = tmp_path
     file_path = workspace / "hello.txt"
     file_path.write_text("hello", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="line_end"):
+    with pytest.raises(ValueError, match="end_char"):
         ReadFileTool().invoke(
             ToolContext(invocation_id="inv-8", workspace=str(workspace)),
-            ReadFileTool.input_model(path="hello.txt", line_start=3, line_end=2),
+            ReadFileTool.input_model(path="hello.txt", start_char=3, end_char=2),
         )
 
 
@@ -233,3 +222,5 @@ def test_list_directory_tool_lists_entries_in_stable_order(tmp_path: str) -> Non
         "nested/note.txt",
     ]
     assert all(not entry.path.startswith(".") for entry in result.entries)
+    assert result.recursive is True
+    assert result.max_depth_applied == 12

@@ -10,11 +10,12 @@ from uuid import uuid4
 from llm_tools.llm_adapters import ActionEnvelopeAdapter
 from llm_tools.llm_providers import OpenAICompatibleProvider
 from llm_tools.tool_api import ToolContext, ToolResult
-from llm_tools.tools.chat import ChatSessionConfig, ChatToolLimits
-from llm_tools.tools.chat.tools import format_tool_result_for_model
+from llm_tools.tools.filesystem._content import dump_json
+from llm_tools.tools.filesystem.models import ToolLimits
 from llm_tools.workflow_api.chat_models import (
     ChatFinalResponse,
     ChatMessage,
+    ChatSessionConfig,
     ChatSessionState,
     ChatSessionTurnRecord,
     ChatTokenUsage,
@@ -39,7 +40,7 @@ class ChatSessionTurnRunner:
         system_prompt: str,
         base_context: ToolContext,
         session_config: ChatSessionConfig,
-        tool_limits: ChatToolLimits,
+        tool_limits: ToolLimits,
         temperature: float,
     ) -> None:
         (
@@ -227,7 +228,7 @@ class ChatSessionTurnRunner:
                 executed_tool_call_count += 1
                 tool_message = ChatMessage(
                     role="tool",
-                    content=format_tool_result_for_model(
+                    content=_format_tool_result_for_model(
                         _sanitize_tool_result_message(outcome.tool_result),
                         max_chars=self._tool_limits.max_tool_result_chars,
                     ),
@@ -262,7 +263,7 @@ def run_interactive_chat_session_turn(
     system_prompt: str,
     base_context: ToolContext,
     session_config: ChatSessionConfig,
-    tool_limits: ChatToolLimits,
+    tool_limits: ToolLimits,
     temperature: float,
 ) -> ChatSessionTurnRunner:
     """Return an interruptible multi-turn chat runner for one user message."""
@@ -332,7 +333,7 @@ def _build_interrupted_result(
 
 
 def _tool_status_label(tool_name: str) -> str:
-    if tool_name in {"list_directory", "list_directory_recursive", "find_files"}:
+    if tool_name in {"list_directory", "find_files"}:
         return "listing files"
     if tool_name == "search_text":
         return "searching text"
@@ -483,3 +484,10 @@ def _sanitize_tool_result_message(tool_result: ToolResult) -> dict[str, object]:
             else {"message": "Unknown tool error"}
         ),
     }
+
+
+def _format_tool_result_for_model(result: dict[str, object], *, max_chars: int) -> str:
+    rendered = dump_json(result)
+    if len(rendered) <= max_chars:
+        return rendered
+    return f"{rendered[:max_chars]}...(truncated)"

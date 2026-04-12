@@ -18,7 +18,13 @@ from llm_tools.tools import (
     [
         (
             register_filesystem_tools,
-            {"read_file", "write_file", "list_directory"},
+            {
+                "read_file",
+                "write_file",
+                "list_directory",
+                "find_files",
+                "get_file_info",
+            },
         ),
         (
             register_git_tools,
@@ -30,7 +36,7 @@ from llm_tools.tools import (
         ),
         (
             register_text_tools,
-            {"file_text_search", "directory_text_search"},
+            {"search_text"},
         ),
     ],
 )

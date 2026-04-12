@@ -10,29 +10,23 @@ from llm_tools.tool_api import (
     ToolRegistry,
     ToolRuntime,
 )
-from llm_tools.tools.chat import register_chat_tools
+from llm_tools.tools import register_filesystem_tools, register_text_tools
 
 
 def _runtime(tmp_path: Path) -> tuple[ToolRuntime, ToolContext]:
     registry = ToolRegistry()
-    register_chat_tools(registry)
+    register_filesystem_tools(registry)
+    register_text_tools(registry)
     runtime = ToolRuntime(registry)
     context = ToolContext(
         invocation_id="chat-test",
         workspace=str(tmp_path),
         metadata={
             "source_filters": {"include_hidden": False},
-            "session_config": {
-                "max_context_tokens": 10,
-                "max_tool_round_trips": 8,
-                "max_tool_calls_per_round": 4,
-                "max_total_tool_calls_per_turn": 12,
-            },
             "tool_limits": {
                 "max_entries_per_call": 50,
                 "max_recursive_depth": 5,
                 "max_search_matches": 3,
-                "max_read_lines": 20,
                 "max_file_size_characters": 1000,
                 "max_read_file_chars": 10,
                 "max_tool_result_chars": 200,
@@ -53,7 +47,7 @@ def test_chat_tools_list_find_and_search(tmp_path: Path) -> None:
 
     listing = runtime.execute(
         ToolInvocationRequest(
-            tool_name="list_directory_recursive", arguments={"path": "."}
+            tool_name="list_directory", arguments={"path": ".", "recursive": True}
         ),
         context.model_copy(),
     )

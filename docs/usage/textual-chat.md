@@ -88,7 +88,6 @@ ui:
 The app exposes a fixed read-only repository tool set:
 
 - `list_directory`
-- `list_directory_recursive`
 - `find_files`
 - `search_text`
 - `get_file_info`

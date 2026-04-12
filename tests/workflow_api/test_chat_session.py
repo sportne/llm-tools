@@ -6,9 +6,11 @@ from pathlib import Path
 
 from llm_tools.llm_adapters import ParsedModelResponse
 from llm_tools.tool_api import SideEffectClass, ToolContext, ToolPolicy, ToolRegistry
-from llm_tools.tools.chat import ChatSessionConfig, ChatToolLimits, register_chat_tools
+from llm_tools.tools import register_filesystem_tools, register_text_tools
+from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import (
     ChatFinalResponse,
+    ChatSessionConfig,
     ChatSessionState,
     ChatWorkflowResultEvent,
     ChatWorkflowStatusEvent,
@@ -28,7 +30,8 @@ class _FakeProvider:
 
 def _executor() -> WorkflowExecutor:
     registry = ToolRegistry()
-    register_chat_tools(registry)
+    register_filesystem_tools(registry)
+    register_text_tools(registry)
     return WorkflowExecutor(
         registry=registry,
         policy=ToolPolicy(
@@ -43,8 +46,7 @@ def _context(tmp_path: Path) -> ToolContext:
         workspace=str(tmp_path),
         metadata={
             "source_filters": {"include_hidden": False},
-            "session_config": ChatSessionConfig().model_dump(mode="json"),
-            "tool_limits": ChatToolLimits(max_tool_result_chars=500).model_dump(
+            "tool_limits": ToolLimits(max_tool_result_chars=500).model_dump(
                 mode="json"
             ),
         },
@@ -81,7 +83,7 @@ def test_chat_session_runner_executes_tool_then_returns_final_response(
         system_prompt="You are helpful.",
         base_context=_context(tmp_path),
         session_config=ChatSessionConfig(),
-        tool_limits=ChatToolLimits(max_tool_result_chars=500),
+        tool_limits=ToolLimits(max_tool_result_chars=500),
         temperature=0.1,
     )
 
@@ -120,7 +122,7 @@ def test_chat_session_runner_returns_continuation_for_tool_budget(
         system_prompt="You are helpful.",
         base_context=_context(tmp_path),
         session_config=config,
-        tool_limits=ChatToolLimits(),
+        tool_limits=ToolLimits(),
         temperature=0.1,
     )
 
@@ -139,7 +141,7 @@ def test_chat_session_runner_interrupts_before_provider_call(tmp_path: Path) -> 
         system_prompt="You are helpful.",
         base_context=_context(tmp_path),
         session_config=ChatSessionConfig(),
-        tool_limits=ChatToolLimits(),
+        tool_limits=ToolLimits(),
         temperature=0.1,
     )
     runner.cancel()

@@ -389,8 +389,8 @@ def test_textual_chat_prompt_builder_and_strip_titles() -> None:
         build_chat_system_prompt,
     )
     from llm_tools.tool_api import ToolRegistry
-    from llm_tools.tools import register_chat_tools
-    from llm_tools.tools.chat import ChatToolLimits
+    from llm_tools.tools import register_filesystem_tools, register_text_tools
+    from llm_tools.tools.filesystem import ToolLimits
 
     payload = {
         "title": "Root",
@@ -405,10 +405,11 @@ def test_textual_chat_prompt_builder_and_strip_titles() -> None:
     assert "title" not in stripped["properties"]["items"][0]
 
     registry = ToolRegistry()
-    register_chat_tools(registry)
+    register_filesystem_tools(registry)
+    register_text_tools(registry)
     prompt = build_chat_system_prompt(
         tool_registry=registry,
-        tool_limits=ChatToolLimits(),
+        tool_limits=ToolLimits(),
     )
     assert "Available tools:" in prompt
     assert "Final response fields:" in prompt

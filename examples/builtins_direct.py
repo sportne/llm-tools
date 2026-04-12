@@ -45,7 +45,7 @@ def main() -> None:
         )
         search_result = runtime.execute(
             ToolInvocationRequest(
-                tool_name="directory_text_search",
+                tool_name="search_text",
                 arguments={"path": ".", "query": "milk"},
             ),
             ToolContext(invocation_id="builtins-search", workspace=workspace),

@@ -1,4 +1,4 @@
-"""Shared path and filter helpers for repository chat tools."""
+"""Shared path and filter helpers for repository-style filesystem tools."""
 
 from __future__ import annotations
 
@@ -6,12 +6,11 @@ import fnmatch
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from llm_tools.tools.chat.models import (
-    ChatSourceFilters,
+from llm_tools.tools.filesystem.models import (
     DirectoryEntry,
     DirectoryEntryType,
     FileMatch,
-    TextSearchMatch,
+    SourceFilters,
 )
 
 
@@ -36,7 +35,7 @@ def normalize_requested_path(path: str) -> str:
     """Return a stable non-empty POSIX-style requested path."""
     cleaned = path.strip()
     if not cleaned:
-        raise ValueError("Requested chat tool path must not be empty.")
+        raise ValueError("Requested tool path must not be empty.")
     if cleaned == ".":
         return "."
     return PurePosixPath(cleaned).as_posix()
@@ -95,7 +94,7 @@ def resolve_root_confined_path(
     normalized_request = normalize_requested_path(path)
     requested_path = Path(normalized_request)
     if requested_path.is_absolute():
-        raise ValueError("Chat tool paths must be relative to the configured root.")
+        raise ValueError("Tool paths must be relative to the configured root.")
 
     resolved_root = root_path.resolve()
     candidate_target = resolved_root / requested_path
@@ -107,7 +106,7 @@ def resolve_root_confined_path(
 
     resolved_target = candidate_target.resolve()
     if not resolved_target.is_relative_to(resolved_root):
-        raise ValueError("Requested chat tool path escapes the configured root.")
+        raise ValueError("Requested tool path escapes the configured root.")
     if not resolved_target.exists():
         raise ValueError(
             f"Requested {expected_kind} does not exist: {normalized_request}"
@@ -175,7 +174,7 @@ def entry_type(path: Path) -> DirectoryEntryType:
 def should_include_entry(
     relative_path: Path,
     *,
-    source_filters: ChatSourceFilters,
+    source_filters: SourceFilters,
 ) -> bool:
     """Return whether an entry should be exposed to the model."""
     if is_hidden(relative_path) and not source_filters.include_hidden:
@@ -191,7 +190,7 @@ def should_include_entry(
 def should_prune_directory(
     relative_path: Path,
     *,
-    source_filters: ChatSourceFilters,
+    source_filters: SourceFilters,
 ) -> bool:
     """Return whether a directory subtree should be skipped entirely."""
     if is_hidden(relative_path) and not source_filters.include_hidden:
@@ -220,22 +219,5 @@ def build_file_match(root_path: Path, path: Path) -> FileMatch:
         path=relative_path.as_posix(),
         name=path.name,
         parent_path="." if parent_path == "." else parent_path,
-        is_hidden=is_hidden(relative_path),
-    )
-
-
-def build_text_search_match(
-    root_path: Path,
-    path: Path,
-    *,
-    line_number: int,
-    line_text: str,
-) -> TextSearchMatch:
-    """Return one text-search match payload."""
-    relative_path = path.relative_to(root_path)
-    return TextSearchMatch(
-        path=relative_path.as_posix(),
-        line_number=line_number,
-        line_text=line_text,
         is_hidden=is_hidden(relative_path),
     )

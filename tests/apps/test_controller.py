@@ -51,11 +51,12 @@ def test_default_registry_contains_safe_builtins_only() -> None:
         "read_file",
         "write_file",
         "list_directory",
+        "find_files",
+        "get_file_info",
         "run_git_status",
         "run_git_diff",
         "run_git_log",
-        "file_text_search",
-        "directory_text_search",
+        "search_text",
     ]
 
 

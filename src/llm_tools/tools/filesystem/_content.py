@@ -1,4 +1,4 @@
-"""Readable-content and file-metadata helpers for repository chat tools."""
+"""Readable-content and file-metadata helpers for repository filesystem tools."""
 
 from __future__ import annotations
 
@@ -9,13 +9,12 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from llm_tools.tools.chat._paths import is_hidden
-from llm_tools.tools.chat.models import (
-    ChatSessionConfig,
-    ChatToolLimits,
+from llm_tools.tools.filesystem._paths import is_hidden
+from llm_tools.tools.filesystem.models import (
     FileInfoResult,
     FileInfoStatus,
     FileReadKind,
+    ToolLimits,
 )
 
 MARKITDOWN_EXTENSIONS = {
@@ -30,6 +29,7 @@ MARKITDOWN_EXTENSIONS = {
     ".xls",
     ".xlsx",
 }
+DEFAULT_MAX_READ_FILE_CHARS = 4000
 TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
 
 
@@ -41,6 +41,47 @@ class LoadedReadableContent:
     status: FileInfoStatus
     content: str | None
     error_message: str | None = None
+
+
+def _get_read_file_cache_root() -> Path:
+    """Return the cache root for converted file content."""
+    return Path(tempfile.gettempdir()) / "llm_tools" / "read_file_cache"
+
+
+def _get_cached_conversion_paths(resolved: Path) -> tuple[Path, Path]:
+    """Return the markdown and metadata cache paths for a source file."""
+    cache_key = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()
+    cache_dir = _get_read_file_cache_root() / cache_key
+    return cache_dir / "content.md", cache_dir / "metadata.json"
+
+
+def _read_cached_conversion(resolved: Path) -> str | None:
+    """Return cached converted markdown when the source has not changed."""
+    content_path, metadata_path = _get_cached_conversion_paths(resolved)
+    if not content_path.exists() or not metadata_path.exists():
+        return None
+
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    stat = resolved.stat()
+    if (
+        metadata.get("mtime_ns") != stat.st_mtime_ns
+        or metadata.get("size_bytes") != stat.st_size
+    ):
+        return None
+    return content_path.read_text(encoding="utf-8")
+
+
+def _write_cached_conversion(resolved: Path, markdown: str) -> Path:
+    """Persist converted markdown and source metadata for future reads."""
+    content_path, metadata_path = _get_cached_conversion_paths(resolved)
+    content_path.parent.mkdir(parents=True, exist_ok=True)
+    content_path.write_text(markdown, encoding="utf-8")
+    stat = resolved.stat()
+    metadata_path.write_text(
+        json.dumps({"mtime_ns": stat.st_mtime_ns, "size_bytes": stat.st_size}),
+        encoding="utf-8",
+    )
+    return content_path
 
 
 def read_searchable_text(path: Path) -> str | None:
@@ -67,15 +108,15 @@ def load_readable_content(path: Path) -> LoadedReadableContent:
             read_kind="unsupported",
             status="unsupported",
             content=None,
-            error_message="File type is not supported for chat reads",
+            error_message="File type is not supported for repository reads",
         )
 
-    cache_path = markitdown_cache_path(path)
-    if cache_path.exists():
+    cached = _read_cached_conversion(path)
+    if cached is not None:
         return LoadedReadableContent(
             read_kind="markitdown",
             status="ok",
-            content=cache_path.read_text(encoding="utf-8"),
+            content=cached,
         )
 
     try:
@@ -88,20 +129,8 @@ def load_readable_content(path: Path) -> LoadedReadableContent:
             error_message=str(exc),
         )
 
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(converted, encoding="utf-8")
+    _write_cached_conversion(path, converted)
     return LoadedReadableContent(read_kind="markitdown", status="ok", content=converted)
-
-
-def markitdown_cache_path(path: Path) -> Path:
-    """Return the stable markdown cache path for one source file."""
-    cache_root = Path(tempfile.gettempdir()) / "llm_tools-chat-markitdown-cache"
-    cache_root.mkdir(parents=True, exist_ok=True)
-    stat = path.stat()
-    cache_key = hashlib.sha256(
-        f"{path.resolve().as_posix()}:{stat.st_size}:{stat.st_mtime_ns}".encode()
-    ).hexdigest()
-    return cache_root / f"{cache_key}.md"
 
 
 def convert_with_markitdown(path: Path) -> str:
@@ -138,21 +167,18 @@ def estimate_token_count(text: str) -> int:
 def is_within_character_limit(
     content: str | None,
     *,
-    tool_limits: ChatToolLimits,
+    tool_limits: ToolLimits,
 ) -> bool:
     """Return whether readable content fits within the configured size cap."""
     return content is not None and len(content) <= tool_limits.max_file_size_characters
 
 
-def effective_full_read_char_limit(
-    session_config: ChatSessionConfig,
-    tool_limits: ChatToolLimits,
-) -> int:
-    """Return the full-read cap derived from config and context window."""
+def effective_full_read_char_limit(tool_limits: ToolLimits) -> int:
+    """Return the full-read cap derived from effective tool limits."""
     configured_limit = tool_limits.max_read_file_chars
     if configured_limit is not None:
         return configured_limit
-    return max(1, session_config.max_context_tokens * 4)
+    return DEFAULT_MAX_READ_FILE_CHARS
 
 
 def normalize_range(
@@ -182,12 +208,11 @@ def build_file_info_result(
     candidate_file: Path,
     resolved_file: Path,
     relative_candidate_path: Path,
-    session_config: ChatSessionConfig,
-    tool_limits: ChatToolLimits,
+    tool_limits: ToolLimits,
     loaded_content: LoadedReadableContent,
 ) -> FileInfoResult:
     """Return deterministic metadata for one root-confined file."""
-    full_read_char_limit = effective_full_read_char_limit(session_config, tool_limits)
+    full_read_char_limit = effective_full_read_char_limit(tool_limits)
     size_bytes = resolved_file.stat().st_size
     content = loaded_content.content
     character_count = len(content) if content is not None else None

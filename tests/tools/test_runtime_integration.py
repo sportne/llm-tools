@@ -71,7 +71,7 @@ def test_runtime_executes_filesystem_and_text_builtins(tmp_path: str) -> None:
     )
     search_result = runtime.execute(
         ToolInvocationRequest(
-            tool_name="directory_text_search",
+            tool_name="search_text",
             arguments={"path": ".", "query": "hello"},
         ),
         ToolContext(invocation_id="inv-4", workspace=str(tmp_path)),
@@ -79,22 +79,27 @@ def test_runtime_executes_filesystem_and_text_builtins(tmp_path: str) -> None:
 
     assert write_result.ok is True
     assert read_result.output == {
-        "path": "docs/note.txt",
-        "resolved_path": str((tmp_path / "docs" / "note.txt").resolve()),
+        "requested_path": "docs/note.txt",
+        "resolved_path": "docs/note.txt",
         "content": "hello world",
-        "content_format": "text",
-        "line_start": 1,
-        "line_end": 1,
-        "total_lines": 1,
+        "read_kind": "text",
+        "status": "ok",
         "truncated": False,
-        "cached_markdown_path": None,
-        "used_cached_conversion": False,
+        "content_char_count": 11,
+        "character_count": 11,
+        "start_char": 0,
+        "end_char": 11,
+        "file_size_bytes": 11,
+        "max_file_size_characters": 262144,
+        "full_read_char_limit": 4000,
+        "estimated_token_count": 2,
+        "error_message": None,
     }
     assert [entry["path"] for entry in list_result.output["entries"]] == [
         "docs",
         "docs/note.txt",
     ]
-    assert search_result.output["results"][0]["path"] == "docs/note.txt"
+    assert search_result.output["matches"][0]["path"] == "docs/note.txt"
 
 
 def test_runtime_normalizes_workspace_root_enforcement_failures(

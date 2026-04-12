@@ -27,7 +27,7 @@ from llm_tools.apps.textual_chat.screens import (
 )
 from llm_tools.llm_providers import OpenAICompatibleProvider, ProviderModeStrategy
 from llm_tools.tool_api import SideEffectClass, ToolContext, ToolPolicy, ToolRegistry
-from llm_tools.tools import register_chat_tools
+from llm_tools.tools import register_filesystem_tools, register_text_tools
 from llm_tools.workflow_api import (
     ChatWorkflowResultEvent,
     ChatWorkflowStatusEvent,
@@ -494,7 +494,8 @@ def create_provider(
 def build_chat_executor() -> tuple[ToolRegistry, WorkflowExecutor]:
     """Return the read-only chat registry and executor."""
     registry = ToolRegistry()
-    register_chat_tools(registry)
+    register_filesystem_tools(registry)
+    register_text_tools(registry)
     policy = ToolPolicy(
         allowed_side_effects={SideEffectClass.NONE, SideEffectClass.LOCAL_READ},
         allow_network=False,
@@ -506,13 +507,20 @@ def build_chat_executor() -> tuple[ToolRegistry, WorkflowExecutor]:
 
 def build_chat_context(screen: ChatScreen) -> ToolContext:
     """Build the tool context passed into chat workflow execution."""
+    effective_read_limit = (
+        screen._config.tool_limits.max_read_file_chars
+        if screen._config.tool_limits.max_read_file_chars is not None
+        else max(1, screen._config.session.max_context_tokens * 4)
+    )
+    effective_tool_limits = screen._config.tool_limits.model_copy(
+        update={"max_read_file_chars": effective_read_limit}
+    )
     return ToolContext(
         invocation_id=f"textual-chat-{uuid4()}",
         workspace=str(screen._root_path),
         metadata={
             "source_filters": screen._config.source_filters.model_dump(mode="json"),
-            "session_config": screen._config.session.model_dump(mode="json"),
-            "tool_limits": screen._config.tool_limits.model_dump(mode="json"),
+            "tool_limits": effective_tool_limits.model_dump(mode="json"),
         },
     )
 
