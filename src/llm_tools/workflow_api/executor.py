@@ -9,11 +9,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel
 
-from llm_tools.llm_adapters import (
-    ModelOutputParsingAdapter,
-    ParsedModelResponse,
-    ToolExposureAdapter,
-)
+from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import (
     PolicyVerdict,
     Tool,
@@ -43,6 +39,15 @@ class _PendingApprovalState:
     expires_at: datetime
 
 
+@dataclass(slots=True, frozen=True)
+class PreparedModelInteraction:
+    """Prepared model-facing contract for one workflow turn."""
+
+    response_model: type[BaseModel]
+    schema: dict[str, Any]
+    tool_names: list[str]
+
+
 class WorkflowExecutor:
     """Bridge adapters and runtime for one parsed model turn."""
 
@@ -58,12 +63,27 @@ class WorkflowExecutor:
 
     def export_tools(
         self,
-        adapter: ToolExposureAdapter,
+        adapter: ActionEnvelopeAdapter,
         *,
         context: ToolContext | None = None,
         include_requires_approval: bool = False,
     ) -> object:
-        """Export registered tools through the supplied adapter."""
+        """Export model-facing schema through the supplied action adapter."""
+        prepared = self.prepare_model_interaction(
+            adapter,
+            context=context,
+            include_requires_approval=include_requires_approval,
+        )
+        return prepared.schema
+
+    def prepare_model_interaction(
+        self,
+        adapter: ActionEnvelopeAdapter,
+        *,
+        context: ToolContext | None = None,
+        include_requires_approval: bool = False,
+    ) -> PreparedModelInteraction:
+        """Prepare a typed response model and schema for one model turn."""
         tools = self._registry.list_registered_tools()
         if context is not None:
             tools = self._filter_tools_for_exposure(
@@ -75,7 +95,12 @@ class WorkflowExecutor:
         input_models: dict[str, type[BaseModel]] = {
             tool.spec.name: tool.input_model for tool in tools
         }
-        return adapter.export_tool_descriptions(specs, input_models)
+        response_model = adapter.build_response_model(specs, input_models)
+        return PreparedModelInteraction(
+            response_model=response_model,
+            schema=adapter.export_schema(response_model),
+            tool_names=[spec.name for spec in specs],
+        )
 
     def execute_parsed_response(
         self,
@@ -113,7 +138,7 @@ class WorkflowExecutor:
 
     def execute_model_output(
         self,
-        adapter: ModelOutputParsingAdapter,
+        adapter: ActionEnvelopeAdapter,
         payload: object,
         context: ToolContext,
     ) -> WorkflowTurnResult:
@@ -123,7 +148,7 @@ class WorkflowExecutor:
 
     async def execute_model_output_async(
         self,
-        adapter: ModelOutputParsingAdapter,
+        adapter: ActionEnvelopeAdapter,
         payload: object,
         context: ToolContext,
     ) -> WorkflowTurnResult:

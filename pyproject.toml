@@ -21,6 +21,7 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
+  "instructor>=1,<2",
   "atlassian-python-api>=4,<5",
   "markitdown>=0.1.5,<0.2",
   "openai>=1,<2",
@@ -87,6 +88,10 @@ show_error_codes = true
 
 [[tool.mypy.overrides]]
 module = ["textual", "textual.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["instructor"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

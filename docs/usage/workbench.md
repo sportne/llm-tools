@@ -38,8 +38,8 @@ llm-tools-workbench
 The workbench exposes four main activities:
 
 - inspect the currently registered built-in tools
-- export adapter-specific tool descriptions
-- run one provider-backed model turn through any supported mode
+- export the canonical action-envelope schema
+- run one provider-backed model turn
 - execute one tool directly through `ToolRuntime`
 
 ## Default Behavior
@@ -51,18 +51,20 @@ On startup the workbench:
 - uses an Ollama-oriented provider preset by default
 - keeps all configuration in memory only
 
-## Interaction Modes
+## Provider Strategy
 
-The workbench supports:
+For provider-backed turns, the workbench uses:
 
-- native tool calling
-- structured output
-- prompt schema
+- `ActionEnvelopeAdapter` for one canonical structured action contract
+- `OpenAICompatibleProvider` with selectable strategy:
+  - `auto` (`TOOLS -> JSON -> MD_JSON`)
+  - `tools`
+  - `json`
+  - `md_json`
 
-For provider-backed turns it uses `OpenAICompatibleProvider`, then passes the
-parsed result into `WorkflowExecutor` when execution-after-parse is enabled.
-Provider and workflow calls use async execution paths under the hood while
-preserving the same visible one-turn behavior.
+The parsed result is passed into `WorkflowExecutor` when execution-after-parse
+is enabled. Provider and workflow calls use async execution paths under the
+hood while preserving the same one-turn behavior.
 
 ## Direct Tool Execution
 

@@ -1,27 +1,9 @@
-"""Adapters that translate LLM-facing I/O into canonical model-turn outcomes."""
+"""Adapters that translate model output into canonical turn outcomes."""
 
-from llm_tools.llm_adapters.base import (
-    LLMAdapter,
-    ModelOutputParsingAdapter,
-    ParsedModelResponse,
-    ToolExposureAdapter,
-)
-from llm_tools.llm_adapters.native_tool_calling import NativeToolCallingAdapter
-from llm_tools.llm_adapters.prompt_schema import PromptSchemaAdapter
-from llm_tools.llm_adapters.structured_output import (
-    StructuredOutputAdapter,
-    StructuredOutputEnvelope,
-    StructuredToolAction,
-)
+from llm_tools.llm_adapters.action_envelope import ActionEnvelopeAdapter
+from llm_tools.llm_adapters.base import ParsedModelResponse
 
 __all__ = [
-    "LLMAdapter",
-    "ModelOutputParsingAdapter",
-    "NativeToolCallingAdapter",
+    "ActionEnvelopeAdapter",
     "ParsedModelResponse",
-    "PromptSchemaAdapter",
-    "StructuredOutputAdapter",
-    "StructuredOutputEnvelope",
-    "StructuredToolAction",
-    "ToolExposureAdapter",
 ]

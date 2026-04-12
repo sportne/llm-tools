@@ -211,27 +211,16 @@ Step 0 note:
 
 ## 8. LLM adapters
 
-### 8.1 Shared adapter abstractions
-- [x] Implement adapter base interfaces
-- [x] Separate tool exposure from invocation parsing cleanly
-- [x] Support parsing model turns into tool invocations or a final response
+### 8.1 Canonical adapter contract
+- [x] Implement `ParsedModelResponse`
+- [x] Enforce XOR mode (`invocations` or `final_response`)
+- [x] Support canonical one-turn normalization
 
-### 8.2 OpenAI tool-calling adapter
-- [x] Export OpenAI-compatible tool schemas from canonical tool definitions
-- [x] Parse OpenAI tool call payloads into canonical turn outcomes
-- [x] Parse plain final assistant responses when no tool call is present
-- [x] Add adapter tests
-
-### 8.3 Structured response adapter
-- [x] Define canonical structured action/final-response schema
-- [x] Export structured response schema
-- [x] Parse structured model outputs into canonical turn outcomes
-- [x] Add adapter tests
-
-### 8.4 Prompt-schema adapter
-- [x] Render prompt instructions for expected JSON action/final-response shape
-- [x] Parse prompt-returned JSON into canonical turn outcomes
-- [x] Add basic repair/retry handling
+### 8.2 Action-envelope adapter
+- [x] Implement `ActionEnvelopeAdapter`
+- [x] Build typed dynamic action-envelope response models
+- [x] Constrain `tool_name` to visible tools and validate `arguments` by input model
+- [x] Parse canonical envelope payloads into canonical turn outcomes
 - [x] Add adapter tests
 
 ---
@@ -240,13 +229,13 @@ Step 0 note:
 
 ### 9.1 Integration flows
 - [x] Register built-in tools and execute through runtime
-- [x] Execute through OpenAI adapter path
-- [x] Execute through structured response path
-- [x] Execute through prompt-schema path
+- [x] Prepare a typed model interaction contract through workflow + adapter
+- [x] Execute parsed responses through one-turn workflow execution
+- [x] Preserve approval-aware tool visibility controls for model-facing exposure
 
 ### 9.2 Integration tests
-- [x] Add end-to-end tests for each adapter mode
-- [x] Add tests for common failure modes across adapters
+- [x] Add end-to-end tests for canonical action-envelope parsing/execution
+- [x] Add tests for common failure modes across adapter/workflow boundaries
 
 ---
 
@@ -262,9 +251,9 @@ Step 0 note:
 ### 10.2 Examples
 - [x] Add minimal example project
 - [x] Add example using built-in tools directly
-- [x] Add example using OpenAI tool calling
-- [x] Add example using structured response fallback
-- [x] Add example using prompt-schema fallback
+- [x] Add example using OpenAI-compatible wiring with action envelopes
+- [x] Add example using structured action payloads
+- [x] Add example using prompt-emitted JSON action payloads
 
 ---
 
@@ -318,7 +307,7 @@ Step 0 note:
 - [x] Add sync/async bridging rules for sync-only and async-only tools
 
 ### 13.2 Provider and workflow async APIs
-- [x] Add async provider entrypoints for all interaction modes
+- [x] Add async provider entrypoints for canonical one-turn run flow
 - [x] Add async workflow execution/resume/finalize entrypoints
 - [x] Preserve existing synchronous public APIs
 
@@ -329,7 +318,26 @@ Step 0 note:
 
 ---
 
-## 14. Deferred / post-v0.1
+## 14. Instructor-centric structured actions
+
+### 14.1 Breaking adapter migration
+- [x] Consolidate adapter surface to `ActionEnvelopeAdapter`
+- [x] Remove legacy multi-adapter public APIs
+- [x] Keep downstream runtime/workflow contracts unchanged
+
+### 14.2 Provider migration
+- [x] Add Instructor-backed parsing to `OpenAICompatibleProvider`
+- [x] Consolidate to `run(...)` / `run_async(...)`
+- [x] Support provider mode strategy fallback (`TOOLS -> JSON -> MD_JSON`)
+
+### 14.3 Integration, tests, and docs
+- [x] Update workflow and workbench to one adapter/provider flow
+- [x] Replace legacy adapter/provider tests
+- [x] Update docs/examples to canonical structured-action architecture
+
+---
+
+## 15. Deferred / post-v0.1
 
 - [-] Manifest-based tool discovery
 - [-] Plugin ecosystem support

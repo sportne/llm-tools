@@ -9,8 +9,9 @@ from typing import Any
 import pytest
 
 from llm_tools.apps.textual_workbench.controller import WorkbenchController
-from llm_tools.apps.textual_workbench.models import ProviderPreset, WorkbenchMode
+from llm_tools.apps.textual_workbench.models import ProviderModeStrategy, ProviderPreset
 from llm_tools.llm_adapters import ParsedModelResponse
+from llm_tools.llm_providers import ProviderModeStrategy as ProviderRunMode
 from llm_tools.tool_api import SideEffectClass
 from llm_tools.workflow_api import WorkflowTurnResult
 from llm_tools.workflow_api.models import WorkflowInvocationStatus
@@ -31,35 +32,15 @@ class _FakeProvider:
     def for_ollama(cls, **kwargs: Any) -> _FakeProvider:
         return cls(**kwargs)
 
-    def run_native_tool_calling(self, **kwargs: Any) -> ParsedModelResponse:
-        type(self).last_mode = "native_tool_calling"
+    def run(self, **kwargs: Any) -> ParsedModelResponse:
+        type(self).last_mode = "run"
         type(self).last_kwargs = kwargs
-        return ParsedModelResponse(final_response="native ok")
+        return ParsedModelResponse(final_response="run ok")
 
-    def run_structured_output(self, **kwargs: Any) -> ParsedModelResponse:
-        type(self).last_mode = "structured_output"
+    async def run_async(self, **kwargs: Any) -> ParsedModelResponse:
+        type(self).last_mode = "run_async"
         type(self).last_kwargs = kwargs
-        return ParsedModelResponse(final_response="structured ok")
-
-    def run_prompt_schema(self, **kwargs: Any) -> ParsedModelResponse:
-        type(self).last_mode = "prompt_schema"
-        type(self).last_kwargs = kwargs
-        return ParsedModelResponse(final_response="prompt ok")
-
-    async def run_native_tool_calling_async(self, **kwargs: Any) -> ParsedModelResponse:
-        type(self).last_mode = "native_tool_calling_async"
-        type(self).last_kwargs = kwargs
-        return ParsedModelResponse(final_response="native async ok")
-
-    async def run_structured_output_async(self, **kwargs: Any) -> ParsedModelResponse:
-        type(self).last_mode = "structured_output_async"
-        type(self).last_kwargs = kwargs
-        return ParsedModelResponse(final_response="structured async ok")
-
-    async def run_prompt_schema_async(self, **kwargs: Any) -> ParsedModelResponse:
-        type(self).last_mode = "prompt_schema_async"
-        type(self).last_kwargs = kwargs
-        return ParsedModelResponse(final_response="prompt async ok")
+        return ParsedModelResponse(final_response="run async ok")
 
 
 def test_default_registry_contains_safe_builtins_only() -> None:
@@ -106,53 +87,33 @@ def test_provider_preset_defaults_are_applied() -> None:
     assert custom_config.base_url == ""
 
 
-def test_cycle_helpers_walk_presets_and_modes() -> None:
+def test_cycle_helpers_walk_presets_and_provider_mode_strategy() -> None:
     controller = WorkbenchController()
     config = controller.default_config()
 
     cycled_provider = controller.cycle_provider_preset(
         config.model_copy(update={"provider_preset": ProviderPreset.OPENAI})
     )
-    cycled_mode = controller.cycle_mode(
-        config.model_copy(update={"mode": WorkbenchMode.NATIVE_TOOL_CALLING})
+    cycled_mode = controller.cycle_provider_mode_strategy(
+        config.model_copy(update={"provider_mode_strategy": ProviderModeStrategy.AUTO})
     )
 
     assert cycled_provider.provider_preset is ProviderPreset.OLLAMA
-    assert cycled_mode.mode is WorkbenchMode.STRUCTURED_OUTPUT
+    assert cycled_mode.provider_mode_strategy is ProviderModeStrategy.TOOLS
 
 
-def test_export_tools_matches_mode_shape() -> None:
+def test_export_tools_returns_schema_and_respects_visibility() -> None:
     controller = WorkbenchController()
     config = controller.default_config()
 
-    native_export = controller.export_tools(config).exported_tools
-    structured_export = controller.export_tools(
-        config.model_copy(update={"mode": WorkbenchMode.STRUCTURED_OUTPUT})
-    ).exported_tools
-    prompt_export = controller.export_tools(
-        config.model_copy(update={"mode": WorkbenchMode.PROMPT_SCHEMA})
-    ).exported_tools
+    exported = controller.export_tools(config).exported_tools
 
-    assert isinstance(native_export, list)
-    assert isinstance(structured_export, dict)
-    assert isinstance(prompt_export, str)
-    assert [tool["function"]["name"] for tool in native_export] == [
-        "read_file",
-        "list_directory",
-        "run_git_status",
-        "run_git_diff",
-        "run_git_log",
-        "file_text_search",
-        "directory_text_search",
-    ]
-    assert "write_file" not in [tool["function"]["name"] for tool in native_export]
-    assert (
-        "write_file"
-        not in structured_export["properties"]["actions"]["items"]["properties"][
-            "tool_name"
-        ]["enum"]
-    )
-    assert "Tool: write_file" not in prompt_export
+    assert isinstance(exported, dict)
+    assert "ActionEnvelope" in exported["title"]
+    exported_str = str(exported)
+    assert "read_file" in exported_str
+    assert "list_directory" in exported_str
+    assert "write_file" not in exported_str
 
 
 def test_execute_direct_tool_produces_tool_result(tmp_path: Path) -> None:
@@ -196,30 +157,32 @@ def test_execute_direct_tool_rejects_invalid_json() -> None:
 
 
 @pytest.mark.parametrize(
-    ("mode", "expected_mode", "expected_response"),
+    "strategy",
     [
-        (WorkbenchMode.NATIVE_TOOL_CALLING, "native_tool_calling", "native ok"),
-        (WorkbenchMode.STRUCTURED_OUTPUT, "structured_output", "structured ok"),
-        (WorkbenchMode.PROMPT_SCHEMA, "prompt_schema", "prompt ok"),
+        ProviderModeStrategy.AUTO,
+        ProviderModeStrategy.TOOLS,
+        ProviderModeStrategy.JSON,
+        ProviderModeStrategy.MD_JSON,
     ],
 )
-def test_run_model_turn_routes_to_the_selected_provider_mode(
-    mode: WorkbenchMode,
-    expected_mode: str,
-    expected_response: str,
+def test_run_model_turn_uses_single_provider_run_path(
+    strategy: ProviderModeStrategy,
 ) -> None:
     controller = WorkbenchController(provider_factory=_FakeProvider)
-    config = controller.default_config().model_copy(update={"mode": mode})
+    config = controller.default_config().model_copy(
+        update={"provider_mode_strategy": strategy}
+    )
 
     result = controller.run_model_turn(config, prompt="hello")
 
-    assert _FakeProvider.last_mode == expected_mode
+    assert _FakeProvider.last_mode == "run"
     assert _FakeProvider.last_kwargs is not None
-    assert "tool_descriptions" in _FakeProvider.last_kwargs
-    assert "registry" not in _FakeProvider.last_kwargs
-    assert result.parsed_response.final_response == expected_response
+    assert "response_model" in _FakeProvider.last_kwargs
+    assert result.parsed_response.final_response == "run ok"
     assert isinstance(result.workflow_result, WorkflowTurnResult)
     assert result.workflow_result.outcomes == []
+    provider = controller._build_provider(config)
+    assert provider.kwargs["mode_strategy"] is ProviderRunMode(strategy.value)
 
 
 def test_run_model_turn_can_stop_after_parse_without_execution() -> None:
@@ -230,7 +193,7 @@ def test_run_model_turn_can_stop_after_parse_without_execution() -> None:
 
     result = controller.run_model_turn(config, prompt="hello")
 
-    assert result.parsed_response.final_response == "native ok"
+    assert result.parsed_response.final_response == "run ok"
     assert result.workflow_result is None
 
 
@@ -369,36 +332,28 @@ def test_build_policy_and_direct_execution_validation_cover_extra_branches() -> 
 
 
 @pytest.mark.parametrize(
-    ("mode", "expected_mode", "expected_response"),
+    "strategy",
     [
-        (
-            WorkbenchMode.NATIVE_TOOL_CALLING,
-            "native_tool_calling_async",
-            "native async ok",
-        ),
-        (
-            WorkbenchMode.STRUCTURED_OUTPUT,
-            "structured_output_async",
-            "structured async ok",
-        ),
-        (WorkbenchMode.PROMPT_SCHEMA, "prompt_schema_async", "prompt async ok"),
+        ProviderModeStrategy.AUTO,
+        ProviderModeStrategy.TOOLS,
+        ProviderModeStrategy.JSON,
+        ProviderModeStrategy.MD_JSON,
     ],
 )
-def test_async_model_turn_routes_to_selected_provider_mode(
-    mode: WorkbenchMode,
-    expected_mode: str,
-    expected_response: str,
+def test_async_model_turn_routes_to_single_provider_path(
+    strategy: ProviderModeStrategy,
 ) -> None:
     async def run() -> None:
         controller = WorkbenchController(provider_factory=_FakeProvider)
-        config = controller.default_config().model_copy(update={"mode": mode})
+        config = controller.default_config().model_copy(
+            update={"provider_mode_strategy": strategy}
+        )
         result = await controller.run_model_turn_async(config, prompt="hello")
 
-        assert _FakeProvider.last_mode == expected_mode
+        assert _FakeProvider.last_mode == "run_async"
         assert _FakeProvider.last_kwargs is not None
-        assert "tool_descriptions" in _FakeProvider.last_kwargs
-        assert "registry" not in _FakeProvider.last_kwargs
-        assert result.parsed_response.final_response == expected_response
+        assert "response_model" in _FakeProvider.last_kwargs
+        assert result.parsed_response.final_response == "run async ok"
         assert isinstance(result.workflow_result, WorkflowTurnResult)
         assert result.workflow_result.outcomes == []
 

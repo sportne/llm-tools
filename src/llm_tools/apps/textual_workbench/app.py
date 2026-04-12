@@ -150,10 +150,10 @@ class TextualWorkbenchApp(App[None]):
                     id="provider-preset-button",
                     classes="toggle-button",
                 )
-                yield Static("Mode", classes="section-title")
+                yield Static("Provider mode strategy", classes="section-title")
                 yield Static("", id="mode-value", classes="value-box")
                 yield Button(
-                    "Cycle mode",
+                    "Cycle provider mode",
                     id="mode-button",
                     classes="toggle-button",
                 )
@@ -340,7 +340,9 @@ class TextualWorkbenchApp(App[None]):
             return True
 
         if button_id == "mode-button":
-            self._config_state = self._controller.cycle_mode(self._config_state)
+            self._config_state = self._controller.cycle_provider_mode_strategy(
+                self._config_state
+            )
             self._sync_ui_from_state()
             return True
 
@@ -507,7 +509,7 @@ class TextualWorkbenchApp(App[None]):
             self._append_event(
                 "Configuration changed; workflow session was rebuilt and pending approvals were cleared."
             )
-        self._append_event("Exported tools for the current adapter mode.")
+        self._append_event("Exported tools for the current action envelope.")
         self._sync_ui_from_state()
 
     def _handle_model_turn_success(self, result: ModelTurnExecutionResult) -> None:
@@ -660,7 +662,9 @@ class TextualWorkbenchApp(App[None]):
         self.query_one("#provider-preset-value", Static).update(
             self._config_state.provider_preset.value
         )
-        self.query_one("#mode-value", Static).update(self._config_state.mode.value)
+        self.query_one("#mode-value", Static).update(
+            self._config_state.provider_mode_strategy.value
+        )
         self.query_one("#toggle-filesystem-tools", Button).label = self._toggle_label(
             "Filesystem tools",
             self._config_state.enable_filesystem_tools,

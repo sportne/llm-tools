@@ -1,372 +1,280 @@
-"""Tests for the OpenAI-compatible provider layer."""
+"""Tests for the Instructor-backed OpenAI-compatible provider."""
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
-import pytest
 from pydantic import BaseModel
 
-from llm_tools.llm_adapters import (
-    NativeToolCallingAdapter,
-    PromptSchemaAdapter,
-    StructuredOutputAdapter,
-)
-from llm_tools.llm_providers import OpenAICompatibleProvider
-from llm_tools.tool_api import Tool, ToolContext, ToolRegistry, ToolSpec
+import llm_tools.llm_providers.openai_compatible as provider_module
+from llm_tools.llm_adapters import ActionEnvelopeAdapter
+from llm_tools.llm_providers import OpenAICompatibleProvider, ProviderModeStrategy
+from llm_tools.tool_api import ToolSpec
 
 
 class EchoInput(BaseModel):
-    """Test input."""
-
     value: str
 
 
-class EchoOutput(BaseModel):
-    """Test output."""
-
-    echoed: str
-
-
-class EchoTool(Tool[EchoInput, EchoOutput]):
-    spec = ToolSpec(
-        name="echo",
-        description="Echo a value.",
-        tags=["example"],
+def _response_model() -> tuple[ActionEnvelopeAdapter, type[BaseModel]]:
+    adapter = ActionEnvelopeAdapter()
+    response_model = adapter.build_response_model(
+        [ToolSpec(name="echo", description="Echo a value.")],
+        {"echo": EchoInput},
     )
-    input_model = EchoInput
-    output_model = EchoOutput
+    return adapter, response_model
 
-    def invoke(self, context: ToolContext, args: EchoInput) -> EchoOutput:
-        return EchoOutput(echoed=f"{context.invocation_id}:{args.value}")
+
+class _SyncCompletions:
+    def __init__(self, outcomes: dict[str, object]) -> None:
+        self._outcomes = outcomes
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **kwargs: Any) -> object:
+        self.calls.append(kwargs)
+        mode = kwargs.get("__mode", "TOOLS")
+        outcome = self._outcomes[mode]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+class _AsyncCompletions:
+    def __init__(self, outcomes: dict[str, object]) -> None:
+        self._outcomes = outcomes
+        self.calls: list[dict[str, Any]] = []
+
+    async def create(self, **kwargs: Any) -> object:
+        self.calls.append(kwargs)
+        mode = kwargs.get("__mode", "TOOLS")
+        outcome = self._outcomes[mode]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
 
 @dataclass
-class _FakeChoice:
-    message: object
+class _SyncClient:
+    outcomes: dict[str, object]
+
+    def __post_init__(self) -> None:
+        self.chat = type(
+            "_SyncChat",
+            (),
+            {"completions": _SyncCompletions(self.outcomes)},
+        )()
 
 
 @dataclass
-class _FakeResponse:
-    choices: list[_FakeChoice]
+class _AsyncClient:
+    outcomes: dict[str, object]
+
+    def __post_init__(self) -> None:
+        self.chat = type(
+            "_AsyncChat",
+            (),
+            {"completions": _AsyncCompletions(self.outcomes)},
+        )()
 
 
-class _FakeCompletions:
-    def __init__(self, response: object) -> None:
-        self.response = response
-        self.calls: list[dict[str, Any]] = []
-
-    def create(self, **kwargs: Any) -> _FakeResponse:
-        self.calls.append(kwargs)
-        return _FakeResponse(choices=[_FakeChoice(message=self.response)])
+class _FakeMode(str, Enum):  # noqa: UP042
+    TOOLS = "TOOLS"
+    JSON = "JSON"
+    MD_JSON = "MD_JSON"
 
 
-class _FakeChat:
-    def __init__(self, response: object) -> None:
-        self.completions = _FakeCompletions(response)
+class _PatchedCompletions:
+    def __init__(self, completions: _SyncCompletions, *, mode: _FakeMode) -> None:
+        self._completions = completions
+        self._mode = mode
+
+    def create(self, **kwargs: Any) -> object:
+        return self._completions.create(__mode=self._mode.value, **kwargs)
 
 
-class _FakeClient:
-    def __init__(self, response: object) -> None:
-        self.chat = _FakeChat(response)
+class _PatchedAsyncCompletions:
+    def __init__(self, completions: _AsyncCompletions, *, mode: _FakeMode) -> None:
+        self._completions = completions
+        self._mode = mode
+
+    async def create(self, **kwargs: Any) -> object:
+        return await self._completions.create(__mode=self._mode.value, **kwargs)
 
 
-class _FakeAsyncCompletions:
-    def __init__(self, response: object) -> None:
-        self.response = response
-        self.calls: list[dict[str, Any]] = []
+class _FakeInstructor:
+    Mode = _FakeMode
 
-    async def create(self, **kwargs: Any) -> _FakeResponse:
-        self.calls.append(kwargs)
-        return _FakeResponse(choices=[_FakeChoice(message=self.response)])
-
-
-class _FakeAsyncChat:
-    def __init__(self, response: object) -> None:
-        self.completions = _FakeAsyncCompletions(response)
-
-
-class _FakeAsyncClient:
-    def __init__(self, response: object) -> None:
-        self.chat = _FakeAsyncChat(response)
-
-
-class _ModelDumpMessage:
-    def __init__(self, content: object) -> None:
-        self._content = content
-
-    def model_dump(self, *, mode: str, exclude_none: bool) -> dict[str, object]:
-        del mode, exclude_none
-        return {"content": self._content}
-
-
-def _registry() -> ToolRegistry:
-    registry = ToolRegistry()
-    registry.register(EchoTool())
-    return registry
-
-
-def test_provider_runs_native_tool_calling_requests() -> None:
-    fake_client = _FakeClient(
-        {
-            "tool_calls": [
+    @staticmethod
+    def from_openai(client: Any, *, mode: _FakeMode) -> Any:
+        completions = client.chat.completions
+        if isinstance(completions, _AsyncCompletions):
+            return type(
+                "_PatchedAsyncClient",
+                (),
                 {
-                    "id": "call_1",
-                    "type": "function",
-                    "function": {
-                        "name": "echo",
-                        "arguments": '{"value": "hello"}',
-                    },
-                }
-            ]
+                    "chat": type(
+                        "_PatchedAsyncChat",
+                        (),
+                        {
+                            "completions": _PatchedAsyncCompletions(
+                                completions, mode=mode
+                            )
+                        },
+                    )()
+                },
+            )()
+        return type(
+            "_PatchedSyncClient",
+            (),
+            {
+                "chat": type(
+                    "_PatchedSyncChat",
+                    (),
+                    {"completions": _PatchedCompletions(completions, mode=mode)},
+                )()
+            },
+        )()
+
+
+class _StrictInstructorModule:
+    __name__ = "instructor"
+    Mode = _FakeMode
+
+    @staticmethod
+    def from_openai(client: Any, *, mode: _FakeMode) -> Any:
+        del client, mode
+        raise AssertionError("from_openai should be bypassed for fake clients")
+
+
+def test_provider_run_prefers_tools_mode_when_available(monkeypatch: Any) -> None:
+    monkeypatch.setattr(provider_module, "_instructor", _FakeInstructor())
+    adapter, response_model = _response_model()
+    client = _SyncClient(
+        outcomes={
+            "TOOLS": {
+                "actions": [{"tool_name": "echo", "arguments": {"value": "hello"}}],
+                "final_response": None,
+            },
+            "JSON": RuntimeError("should-not-run"),
+            "MD_JSON": RuntimeError("should-not-run"),
         }
     )
     provider = OpenAICompatibleProvider(
         model="demo-model",
-        client=fake_client,
+        client=client,
         default_request_params={"temperature": 0},
     )
 
-    parsed = provider.run_native_tool_calling(
-        adapter=NativeToolCallingAdapter(),
-        messages=[{"role": "user", "content": "Say hello"}],
-        registry=_registry(),
+    parsed = provider.run(
+        adapter=adapter,
+        messages=[{"role": "user", "content": "hello"}],
+        response_model=response_model,
     )
 
-    call = fake_client.chat.completions.calls[0]
-    assert call["model"] == "demo-model"
-    assert call["messages"] == [{"role": "user", "content": "Say hello"}]
-    assert call["temperature"] == 0
-    assert call["tools"][0]["function"]["name"] == "echo"
     assert parsed.invocations[0].tool_name == "echo"
     assert parsed.invocations[0].arguments == {"value": "hello"}
+    assert provider.last_mode_used is ProviderModeStrategy.TOOLS
+    call = client.chat.completions.calls[0]
+    assert call["model"] == "demo-model"
+    assert call["temperature"] == 0
 
 
-def test_provider_runs_structured_output_requests() -> None:
-    fake_client = _FakeClient(
-        '{"actions":[{"tool_name":"echo","arguments":{"value":"hi"}}]}'
+def test_provider_run_auto_falls_back_to_json(monkeypatch: Any) -> None:
+    monkeypatch.setattr(provider_module, "_instructor", _FakeInstructor())
+    adapter, response_model = _response_model()
+    client = _SyncClient(
+        outcomes={
+            "TOOLS": RuntimeError("tools failed"),
+            "JSON": {"actions": [], "final_response": "done"},
+            "MD_JSON": RuntimeError("should-not-run"),
+        }
     )
-    provider = OpenAICompatibleProvider(model="demo-model", client=fake_client)
+    provider = OpenAICompatibleProvider(model="demo-model", client=client)
 
-    parsed = provider.run_structured_output(
-        adapter=StructuredOutputAdapter(),
-        messages=[{"role": "user", "content": "Use echo"}],
-        registry=_registry(),
-        request_params={"temperature": 0.2},
-    )
-
-    call = fake_client.chat.completions.calls[0]
-    assert call["response_format"]["type"] == "json_schema"
-    assert call["response_format"]["json_schema"]["schema"]["properties"]["actions"][
-        "items"
-    ]["properties"]["tool_name"]["enum"] == ["echo"]
-    assert call["temperature"] == 0.2
-    assert parsed.invocations[0].tool_name == "echo"
-
-
-def test_provider_runs_prompt_schema_requests() -> None:
-    fake_client = _FakeClient('{"final_response":"done"}')
-    provider = OpenAICompatibleProvider(model="demo-model", client=fake_client)
-
-    parsed = provider.run_prompt_schema(
-        adapter=PromptSchemaAdapter(),
-        messages=[{"role": "user", "content": "No tool"}],
-        registry=_registry(),
+    parsed = provider.run(
+        adapter=adapter,
+        messages=[{"role": "user", "content": "hello"}],
+        response_model=response_model,
     )
 
-    call = fake_client.chat.completions.calls[0]
-    assert call["messages"][0]["role"] == "system"
-    assert "Choose exactly one" in call["messages"][0]["content"]
-    assert call["messages"][1] == {"role": "user", "content": "No tool"}
     assert parsed.final_response == "done"
+    assert provider.last_mode_used is ProviderModeStrategy.JSON
+    assert [call["__mode"] for call in client.chat.completions.calls] == [
+        "TOOLS",
+        "JSON",
+    ]
 
 
-def test_provider_runs_native_tool_calling_async_requests() -> None:
-    async def run() -> None:
-        fake_async_client = _FakeAsyncClient(
-            {
-                "tool_calls": [
-                    {
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {
-                            "name": "echo",
-                            "arguments": '{"value": "hello"}',
-                        },
-                    }
-                ]
-            }
-        )
-        provider = OpenAICompatibleProvider(
-            model="demo-model",
-            async_client=fake_async_client,
-            default_request_params={"temperature": 0},
-        )
+def test_provider_run_honors_explicit_mode_strategy(monkeypatch: Any) -> None:
+    monkeypatch.setattr(provider_module, "_instructor", _FakeInstructor())
+    adapter, response_model = _response_model()
+    client = _SyncClient(
+        outcomes={
+            "TOOLS": RuntimeError("unused"),
+            "JSON": RuntimeError("unused"),
+            "MD_JSON": {"actions": [], "final_response": "md-json"},
+        }
+    )
+    provider = OpenAICompatibleProvider(
+        model="demo-model",
+        client=client,
+        mode_strategy=ProviderModeStrategy.MD_JSON,
+    )
 
-        parsed = await provider.run_native_tool_calling_async(
-            adapter=NativeToolCallingAdapter(),
-            messages=[{"role": "user", "content": "Say hello"}],
-            registry=_registry(),
-        )
+    parsed = provider.run(
+        adapter=adapter,
+        messages=[{"role": "user", "content": "hello"}],
+        response_model=response_model,
+    )
 
-        call = fake_async_client.chat.completions.calls[0]
-        assert call["model"] == "demo-model"
-        assert call["messages"] == [{"role": "user", "content": "Say hello"}]
-        assert call["temperature"] == 0
-        assert call["tools"][0]["function"]["name"] == "echo"
-        assert parsed.invocations[0].tool_name == "echo"
-        assert parsed.invocations[0].arguments == {"value": "hello"}
-
-    asyncio.run(run())
+    assert parsed.final_response == "md-json"
+    assert provider.last_mode_used is ProviderModeStrategy.MD_JSON
+    assert [call["__mode"] for call in client.chat.completions.calls] == ["MD_JSON"]
 
 
-def test_provider_runs_structured_and_prompt_async_requests() -> None:
-    async def run() -> None:
-        structured_client = _FakeAsyncClient(
-            '{"actions":[{"tool_name":"echo","arguments":{"value":"hi"}}]}'
-        )
-        prompt_client = _FakeAsyncClient('{"final_response":"done"}')
-        structured_provider = OpenAICompatibleProvider(
-            model="demo-model",
-            async_client=structured_client,
-        )
-        prompt_provider = OpenAICompatibleProvider(
-            model="demo-model",
-            async_client=prompt_client,
-        )
+def test_provider_run_async_uses_fallback_order(monkeypatch: Any) -> None:
+    monkeypatch.setattr(provider_module, "_instructor", _FakeInstructor())
+    adapter, response_model = _response_model()
+    client = _AsyncClient(
+        outcomes={
+            "TOOLS": RuntimeError("tools failed"),
+            "JSON": RuntimeError("json failed"),
+            "MD_JSON": {
+                "actions": [{"tool_name": "echo", "arguments": {"value": "async"}}],
+                "final_response": None,
+            },
+        }
+    )
+    provider = OpenAICompatibleProvider(model="demo-model", async_client=client)
 
-        structured_parsed = await structured_provider.run_structured_output_async(
-            adapter=StructuredOutputAdapter(),
-            messages=[{"role": "user", "content": "Use echo"}],
-            registry=_registry(),
-            request_params={"temperature": 0.2},
-        )
-        prompt_parsed = await prompt_provider.run_prompt_schema_async(
-            adapter=PromptSchemaAdapter(),
-            messages=[{"role": "user", "content": "No tool"}],
-            registry=_registry(),
-        )
-
-        structured_call = structured_client.chat.completions.calls[0]
-        assert structured_call["response_format"]["type"] == "json_schema"
-        assert structured_call["temperature"] == 0.2
-        assert structured_parsed.invocations[0].tool_name == "echo"
-
-        prompt_call = prompt_client.chat.completions.calls[0]
-        assert prompt_call["messages"][0]["role"] == "system"
-        assert "Choose exactly one" in prompt_call["messages"][0]["content"]
-        assert prompt_parsed.final_response == "done"
-
-    asyncio.run(run())
-
-
-def test_provider_rejects_missing_choices() -> None:
-    class NoChoicesClient:
-        class Chat:
-            class Completions:
-                def create(self, **kwargs: Any) -> object:
-                    del kwargs
-                    return object()
-
-            completions = Completions()
-
-        chat = Chat()
-
-    provider = OpenAICompatibleProvider(model="demo-model", client=NoChoicesClient())
-
-    try:
-        provider.run_native_tool_calling(
-            adapter=NativeToolCallingAdapter(),
+    parsed = asyncio.run(
+        provider.run_async(
+            adapter=adapter,
             messages=[{"role": "user", "content": "hello"}],
-            registry=_registry(),
+            response_model=response_model,
         )
-    except ValueError as exc:
-        assert "choices" in str(exc)
-    else:
-        raise AssertionError("Expected ValueError for missing choices.")
-
-
-def test_provider_rejects_missing_message() -> None:
-    provider = OpenAICompatibleProvider(model="demo-model", client=_FakeClient(None))
-
-    try:
-        provider.run_native_tool_calling(
-            adapter=NativeToolCallingAdapter(),
-            messages=[{"role": "user", "content": "hello"}],
-            registry=_registry(),
-        )
-    except ValueError as exc:
-        assert "message" in str(exc)
-    else:
-        raise AssertionError("Expected ValueError for missing message.")
-
-
-def test_provider_extracts_content_from_supported_message_shapes() -> None:
-    provider = OpenAICompatibleProvider(model="demo-model", client=_FakeClient({}))
-
-    class ContentModel(BaseModel):
-        content: object
-
-    class AttributeMessage:
-        def __init__(self, content: object) -> None:
-            self.content = content
-
-    assert (
-        provider._extract_content(_FakeResponse(choices=[_FakeChoice(message="hello")]))
-        == "hello"
-    )
-    assert (
-        provider._extract_content(
-            _FakeResponse(
-                choices=[
-                    _FakeChoice(message=ContentModel(content='{"final_response":"ok"}'))
-                ]
-            )
-        )
-        == '{"final_response":"ok"}'
-    )
-    assert (
-        provider._extract_content(
-            _FakeResponse(
-                choices=[
-                    _FakeChoice(
-                        message=_ModelDumpMessage(
-                            '{"actions":[{"tool_name":"echo","arguments":{"value":"hi"}}]}'
-                        )
-                    )
-                ]
-            )
-        )
-        == '{"actions":[{"tool_name":"echo","arguments":{"value":"hi"}}]}'
-    )
-    assert (
-        provider._extract_content(
-            _FakeResponse(
-                choices=[_FakeChoice(message={"content": '{"final_response":"done"}'})]
-            )
-        )
-        == '{"final_response":"done"}'
-    )
-    assert (
-        provider._extract_content(
-            _FakeResponse(
-                choices=[
-                    _FakeChoice(message=AttributeMessage('{"final_response":"attr"}'))
-                ]
-            )
-        )
-        == '{"final_response":"attr"}'
     )
 
+    assert parsed.invocations[0].arguments == {"value": "async"}
+    assert provider.last_mode_used is ProviderModeStrategy.MD_JSON
+    assert [call["__mode"] for call in client.chat.completions.calls] == [
+        "TOOLS",
+        "JSON",
+        "MD_JSON",
+    ]
 
-def test_provider_presets_configure_openai_compatible_targets() -> None:
+
+def test_provider_presets_keep_openai_compatible_defaults() -> None:
     ollama = OpenAICompatibleProvider.for_ollama(
-        model="gemma4:26b", client=_FakeClient({})
+        model="gemma4:26b",
+        client=_SyncClient({"TOOLS": {"actions": [], "final_response": "ok"}}),
     )
     openai = OpenAICompatibleProvider.for_openai(
-        model="gpt-4.1-mini", client=_FakeClient({})
+        model="gpt-4.1-mini",
+        client=_SyncClient({"TOOLS": {"actions": [], "final_response": "ok"}}),
     )
 
     assert ollama.base_url == "http://localhost:11434/v1"
@@ -375,46 +283,45 @@ def test_provider_presets_configure_openai_compatible_targets() -> None:
     assert openai.model == "gpt-4.1-mini"
 
 
-def test_provider_prefers_precomputed_tool_descriptions() -> None:
-    fake_client = _FakeClient(
-        {
-            "tool_calls": [
-                {
-                    "id": "call_1",
-                    "type": "function",
-                    "function": {"name": "echo", "arguments": '{"value":"x"}'},
-                }
-            ]
+def test_provider_uses_local_fallback_when_instructor_missing(monkeypatch: Any) -> None:
+    monkeypatch.setattr(provider_module, "_instructor", None)
+    adapter, response_model = _response_model()
+    client = _SyncClient(
+        outcomes={
+            "TOOLS": {"actions": [], "final_response": "fallback"},
+            "JSON": {"actions": [], "final_response": "fallback"},
+            "MD_JSON": {"actions": [], "final_response": "fallback"},
         }
     )
-    provider = OpenAICompatibleProvider(model="demo-model", client=fake_client)
-    precomputed_tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "echo",
-                "description": "precomputed",
-                "parameters": {"type": "object"},
-            },
-        }
-    ]
+    provider = OpenAICompatibleProvider(model="demo-model", client=client)
 
-    provider.run_native_tool_calling(
-        adapter=NativeToolCallingAdapter(),
+    parsed = provider.run(
+        adapter=adapter,
         messages=[{"role": "user", "content": "hello"}],
-        tool_descriptions=precomputed_tools,
+        response_model=response_model,
     )
 
-    call = fake_client.chat.completions.calls[0]
-    assert call["tools"] == precomputed_tools
+    assert parsed.final_response == "fallback"
 
 
-def test_provider_rejects_missing_tool_source_for_export() -> None:
-    provider = OpenAICompatibleProvider(model="demo-model", client=_FakeClient({}))
+def test_provider_bypasses_real_instructor_wrapper_for_non_openai_clients(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(provider_module, "_instructor", _StrictInstructorModule())
+    adapter, response_model = _response_model()
+    client = _SyncClient(
+        outcomes={
+            "TOOLS": {"actions": [], "final_response": "ok"},
+            "JSON": {"actions": [], "final_response": "ok"},
+            "MD_JSON": {"actions": [], "final_response": "ok"},
+        }
+    )
+    provider = OpenAICompatibleProvider(model="demo-model", client=client)
 
-    with pytest.raises(ValueError):
-        provider._resolve_tool_descriptions(
-            adapter=NativeToolCallingAdapter(),
-            registry=None,
-            tool_descriptions=None,
-        )
+    parsed = provider.run(
+        adapter=adapter,
+        messages=[{"role": "user", "content": "hello"}],
+        response_model=response_model,
+    )
+
+    assert parsed.final_response == "ok"

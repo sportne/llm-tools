@@ -12,12 +12,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 import llm_tools.tools.git.tools as git_tools
-from llm_tools.llm_adapters import (
-    NativeToolCallingAdapter,
-    ParsedModelResponse,
-    PromptSchemaAdapter,
-    StructuredOutputAdapter,
-)
+from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import (
     ErrorCode,
     SideEffectClass,
@@ -225,46 +220,23 @@ def test_workflow_turn_result_rejects_non_ascending_outcome_indices() -> None:
         )
 
 
-@pytest.mark.parametrize(
-    ("adapter", "expected_type"),
-    [
-        (NativeToolCallingAdapter(), list),
-        (StructuredOutputAdapter(), dict),
-        (PromptSchemaAdapter(), str),
-    ],
-)
-def test_workflow_executor_exports_registered_tools(
-    adapter: object, expected_type: type[object]
-) -> None:
+def test_workflow_executor_prepares_registered_tools_for_model_interaction() -> None:
     registry = ToolRegistry()
     register_filesystem_tools(registry)
     register_text_tools(registry)
     executor = _executor(registry)
 
-    exported = executor.export_tools(adapter)  # type: ignore[arg-type]
+    prepared = executor.prepare_model_interaction(ActionEnvelopeAdapter())
 
-    assert isinstance(exported, expected_type)
-    if isinstance(exported, list):
-        assert [tool["function"]["name"] for tool in exported] == [
-            "read_file",
-            "write_file",
-            "list_directory",
-            "file_text_search",
-            "directory_text_search",
-        ]
-    elif isinstance(exported, dict):
-        assert exported["properties"]["actions"]["items"]["properties"]["tool_name"][
-            "enum"
-        ] == [
-            "read_file",
-            "write_file",
-            "list_directory",
-            "file_text_search",
-            "directory_text_search",
-        ]
-    else:
-        assert "read_file" in exported
-        assert "directory_text_search" in exported
+    assert prepared.tool_names == [
+        "read_file",
+        "write_file",
+        "list_directory",
+        "file_text_search",
+        "directory_text_search",
+    ]
+    assert isinstance(prepared.schema, dict)
+    assert "ActionEnvelope" in prepared.schema["title"]
 
 
 def test_workflow_executor_export_filters_out_policy_denied_tools_with_context(
@@ -274,13 +246,12 @@ def test_workflow_executor_export_filters_out_policy_denied_tools_with_context(
     register_filesystem_tools(registry)
     executor = _executor(registry, allow_write=False)
 
-    exported = executor.export_tools(
-        NativeToolCallingAdapter(),
+    prepared = executor.prepare_model_interaction(
+        ActionEnvelopeAdapter(),
         context=ToolContext(invocation_id="export-1", workspace=str(tmp_path)),
     )
 
-    assert isinstance(exported, list)
-    assert [tool["function"]["name"] for tool in exported] == [
+    assert prepared.tool_names == [
         "read_file",
         "list_directory",
     ]
@@ -297,20 +268,18 @@ def test_workflow_executor_export_can_include_approval_required_tools(
     )
     executor = WorkflowExecutor(registry, policy=policy)
 
-    hidden_export = executor.export_tools(
-        NativeToolCallingAdapter(),
+    hidden_export = executor.prepare_model_interaction(
+        ActionEnvelopeAdapter(),
         context=ToolContext(invocation_id="export-2", workspace=str(tmp_path)),
     )
-    shown_export = executor.export_tools(
-        NativeToolCallingAdapter(),
+    shown_export = executor.prepare_model_interaction(
+        ActionEnvelopeAdapter(),
         context=ToolContext(invocation_id="export-3", workspace=str(tmp_path)),
         include_requires_approval=True,
     )
 
-    assert isinstance(hidden_export, list)
-    assert isinstance(shown_export, list)
-    assert hidden_export == []
-    assert [tool["function"]["name"] for tool in shown_export] == [
+    assert hidden_export.tool_names == []
+    assert shown_export.tool_names == [
         "read_file",
         "list_directory",
     ]
@@ -344,7 +313,7 @@ def test_workflow_executor_executes_single_parsed_invocation(tmp_path: str) -> N
     context = ToolContext(invocation_id="turn-2", workspace=str(tmp_path))
 
     write_result = executor.execute_model_output(
-        StructuredOutputAdapter(),
+        ActionEnvelopeAdapter(),
         {
             "actions": [
                 {
@@ -375,7 +344,7 @@ def test_workflow_executor_executes_multiple_invocations_sequentially(
     executor = _executor(registry, allow_write=True)
 
     setup_result = executor.execute_model_output(
-        StructuredOutputAdapter(),
+        ActionEnvelopeAdapter(),
         {
             "actions": [
                 {
@@ -393,7 +362,7 @@ def test_workflow_executor_executes_multiple_invocations_sequentially(
     assert _executed_tool_results(setup_result)[0].ok is True
 
     result = executor.execute_model_output(
-        StructuredOutputAdapter(),
+        ActionEnvelopeAdapter(),
         {
             "actions": [
                 {"tool_name": "read_file", "arguments": {"path": "docs/note.txt"}},
@@ -428,13 +397,13 @@ def test_workflow_executor_executes_multiple_invocations_sequentially(
     assert "base-log" not in executed_results[1].logs
 
 
-def test_workflow_executor_executes_native_tool_calling_path(tmp_path: str) -> None:
+def test_workflow_executor_executes_action_envelope_path(tmp_path: str) -> None:
     registry = ToolRegistry()
     register_filesystem_tools(registry)
     executor = _executor(registry, allow_write=True)
 
     setup = executor.execute_model_output(
-        StructuredOutputAdapter(),
+        ActionEnvelopeAdapter(),
         {
             "actions": [
                 {
@@ -452,17 +421,10 @@ def test_workflow_executor_executes_native_tool_calling_path(tmp_path: str) -> N
     assert _executed_tool_results(setup)[0].ok is True
 
     result = executor.execute_model_output(
-        NativeToolCallingAdapter(),
+        ActionEnvelopeAdapter(),
         {
-            "tool_calls": [
-                {
-                    "id": "call_1",
-                    "type": "function",
-                    "function": {
-                        "name": "read_file",
-                        "arguments": '{"path": "docs/note.txt"}',
-                    },
-                }
+            "actions": [
+                {"tool_name": "read_file", "arguments": {"path": "docs/note.txt"}}
             ]
         },
         ToolContext(invocation_id="turn-4", workspace=str(tmp_path)),
@@ -473,7 +435,7 @@ def test_workflow_executor_executes_native_tool_calling_path(tmp_path: str) -> N
     assert executed_results[0].output["content"] == "hello openai"
 
 
-def test_workflow_executor_executes_native_tool_calling_final_response_path(
+def test_workflow_executor_executes_action_envelope_final_response_path(
     tmp_path: str,
 ) -> None:
     registry = ToolRegistry()
@@ -481,8 +443,8 @@ def test_workflow_executor_executes_native_tool_calling_final_response_path(
     executor = _executor(registry)
 
     result = executor.execute_model_output(
-        NativeToolCallingAdapter(),
-        {"content": "No tool needed."},
+        ActionEnvelopeAdapter(),
+        {"actions": [], "final_response": "No tool needed."},
         ToolContext(invocation_id="turn-5", workspace=str(tmp_path)),
     )
 
@@ -490,13 +452,15 @@ def test_workflow_executor_executes_native_tool_calling_final_response_path(
     assert result.outcomes == []
 
 
-def test_workflow_executor_executes_prompt_schema_paths(tmp_path: str) -> None:
+def test_workflow_executor_executes_action_envelope_json_string_paths(
+    tmp_path: str,
+) -> None:
     registry = ToolRegistry()
     register_filesystem_tools(registry)
     executor = _executor(registry, allow_write=True)
 
     setup = executor.execute_model_output(
-        StructuredOutputAdapter(),
+        ActionEnvelopeAdapter(),
         {
             "actions": [
                 {
@@ -514,15 +478,13 @@ def test_workflow_executor_executes_prompt_schema_paths(tmp_path: str) -> None:
     assert _executed_tool_results(setup)[0].ok is True
 
     action_result = executor.execute_model_output(
-        PromptSchemaAdapter(),
-        """```json
-{"actions":[{"tool_name":"read_file","arguments":{"path":"docs/note.txt"}}]}
-```""",
+        ActionEnvelopeAdapter(),
+        '{"actions":[{"tool_name":"read_file","arguments":{"path":"docs/note.txt"}}],"final_response":null}',
         ToolContext(invocation_id="turn-6", workspace=str(tmp_path)),
     )
     final_result = executor.execute_model_output(
-        PromptSchemaAdapter(),
-        '{"final_response": "Already answered."}',
+        ActionEnvelopeAdapter(),
+        '{"actions": [], "final_response": "Already answered."}',
         ToolContext(invocation_id="turn-7", workspace=str(tmp_path)),
     )
 
@@ -536,7 +498,7 @@ def test_workflow_executor_normalizes_unknown_tool_failure(tmp_path: str) -> Non
     executor = _executor(registry)
 
     result = executor.execute_model_output(
-        StructuredOutputAdapter(),
+        ActionEnvelopeAdapter(),
         {"actions": [{"tool_name": "missing_tool", "arguments": {}}]},
         ToolContext(invocation_id="turn-8", workspace=str(tmp_path)),
     )
@@ -552,7 +514,7 @@ def test_workflow_executor_normalizes_policy_denied_failure(tmp_path: str) -> No
     executor = _executor(registry)
 
     result = executor.execute_model_output(
-        StructuredOutputAdapter(),
+        ActionEnvelopeAdapter(),
         {
             "actions": [
                 {
@@ -591,7 +553,7 @@ def test_workflow_executor_emits_approval_requested_and_pauses_at_first_pending(
     )
 
     result = executor.execute_model_output(
-        StructuredOutputAdapter(),
+        ActionEnvelopeAdapter(),
         {
             "actions": [
                 {"tool_name": "list_directory", "arguments": {"path": "."}},
@@ -629,7 +591,7 @@ def test_workflow_executor_approve_resumes_and_continues_execution(
     )
 
     initial = executor.execute_model_output(
-        StructuredOutputAdapter(),
+        ActionEnvelopeAdapter(),
         {
             "actions": [
                 {"tool_name": "list_directory", "arguments": {"path": "."}},
@@ -675,7 +637,7 @@ def test_workflow_executor_deny_marks_outcome_and_continues(
     )
 
     initial = executor.execute_model_output(
-        StructuredOutputAdapter(),
+        ActionEnvelopeAdapter(),
         {
             "actions": [
                 {"tool_name": "list_directory", "arguments": {"path": "."}},
@@ -717,7 +679,7 @@ def test_workflow_executor_finalizes_expired_approvals(
     )
 
     executor.execute_model_output(
-        StructuredOutputAdapter(),
+        ActionEnvelopeAdapter(),
         {
             "actions": [
                 {"tool_name": "list_directory", "arguments": {"path": "."}},
@@ -756,7 +718,7 @@ def test_workflow_executor_can_queue_multiple_pending_approvals_sequentially(
     )
 
     seed = executor.execute_model_output(
-        StructuredOutputAdapter(),
+        ActionEnvelopeAdapter(),
         {
             "actions": [
                 {"tool_name": "list_directory", "arguments": {"path": "."}},
@@ -783,7 +745,7 @@ def test_workflow_executor_normalizes_input_validation_failure(tmp_path: str) ->
     executor = _executor(registry)
 
     result = executor.execute_model_output(
-        StructuredOutputAdapter(),
+        ActionEnvelopeAdapter(),
         {
             "actions": [
                 {
@@ -807,7 +769,7 @@ def test_workflow_executor_propagates_adapter_parse_failure(tmp_path: str) -> No
 
     with pytest.raises(ValueError):
         executor.execute_model_output(
-            PromptSchemaAdapter(),
+            ActionEnvelopeAdapter(),
             "not json",
             ToolContext(invocation_id="turn-11", workspace=str(tmp_path)),
         )
@@ -859,12 +821,12 @@ def test_workflow_executor_executes_git_and_jira_paths(
     executor = _executor(registry)
 
     git_result = executor.execute_model_output(
-        StructuredOutputAdapter(),
+        ActionEnvelopeAdapter(),
         {"actions": [{"tool_name": "run_git_status", "arguments": {"path": "."}}]},
         ToolContext(invocation_id="turn-12", workspace=str(tmp_path)),
     )
     jira_result = executor.execute_model_output(
-        StructuredOutputAdapter(),
+        ActionEnvelopeAdapter(),
         {
             "actions": [
                 {"tool_name": "search_jira", "arguments": {"jql": "project = DEMO"}}
@@ -891,7 +853,7 @@ def test_workflow_executor_async_executes_sync_tooling_paths(tmp_path: str) -> N
         executor = _executor(registry, allow_write=True)
 
         setup = await executor.execute_model_output_async(
-            StructuredOutputAdapter(),
+            ActionEnvelopeAdapter(),
             {
                 "actions": [
                     {
@@ -907,7 +869,7 @@ def test_workflow_executor_async_executes_sync_tooling_paths(tmp_path: str) -> N
             ToolContext(invocation_id="async-setup", workspace=str(tmp_path)),
         )
         result = await executor.execute_model_output_async(
-            StructuredOutputAdapter(),
+            ActionEnvelopeAdapter(),
             {
                 "actions": [
                     {"tool_name": "read_file", "arguments": {"path": "docs/note.txt"}}
@@ -964,7 +926,7 @@ def test_workflow_executor_async_approval_roundtrip(tmp_path: str) -> None:
         )
 
         initial = await executor.execute_model_output_async(
-            StructuredOutputAdapter(),
+            ActionEnvelopeAdapter(),
             {
                 "actions": [
                     {"tool_name": "list_directory", "arguments": {"path": "."}},

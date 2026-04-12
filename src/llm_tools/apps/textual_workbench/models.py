@@ -13,12 +13,13 @@ from llm_tools.tool_api import ToolResult
 from llm_tools.workflow_api import ApprovalRequest, WorkflowTurnResult
 
 
-class WorkbenchMode(str, Enum):  # noqa: UP042
-    """Supported interaction modes in the workbench."""
+class ProviderModeStrategy(str, Enum):  # noqa: UP042
+    """Provider mode strategy exposed in the workbench."""
 
-    NATIVE_TOOL_CALLING = "native_tool_calling"
-    STRUCTURED_OUTPUT = "structured_output"
-    PROMPT_SCHEMA = "prompt_schema"
+    AUTO = "auto"
+    TOOLS = "tools"
+    JSON = "json"
+    MD_JSON = "md_json"
 
 
 class ProviderPreset(str, Enum):  # noqa: UP042
@@ -37,7 +38,7 @@ class WorkbenchConfigState(BaseModel):
     base_url: str = "http://localhost:11434/v1"
     model: str = "gemma4:26b"
     api_key: str = "ollama"
-    mode: WorkbenchMode = WorkbenchMode.NATIVE_TOOL_CALLING
+    provider_mode_strategy: ProviderModeStrategy = ProviderModeStrategy.AUTO
 
     enable_filesystem_tools: bool = True
     enable_git_tools: bool = True

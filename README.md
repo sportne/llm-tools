@@ -14,8 +14,8 @@ The core v0.1 foundation is implemented:
 - canonical tool and runtime models
 - registry, runtime, policy, and observability
 - built-in filesystem, git, Atlassian, and text tools
-- native-tool-calling, structured-output, and prompt-schema adapters
-- an OpenAI-compatible provider layer built on the OpenAI Python SDK
+- one canonical structured-action adapter (`ActionEnvelopeAdapter`)
+- an Instructor-backed OpenAI-compatible provider layer
 - a thin `workflow_api` bridge for one parsed model turn
 - dual sync/async execution paths across runtime, provider, and workflow layers
 - an optional `apps` layer with a developer-facing Textual workbench

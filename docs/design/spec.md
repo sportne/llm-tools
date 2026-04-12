@@ -169,26 +169,12 @@ Defines constraints on tool execution, including:
 
 ### 4.9 LLM Adapters
 
-Adapters translate between external LLM interaction modes and the internal tool invocation model.
+Adapters translate between model output payloads and the internal tool
+invocation model.
 
-Three modes must be supported:
+v0.1 uses one canonical adapter: `ActionEnvelopeAdapter`.
 
-#### 4.9.1 Native Tool Calling Adapter
-- Uses a provider's native tool-calling surface when available
-- Converts `ToolSpec` into a native tool schema
-- Parses provider output into either tool invocations or a final assistant response
-
-#### 4.9.2 Structured Output Adapter
-- Model emits structured JSON matching a defined schema
-- No native tool calling required
-- Output is parsed into either tool invocations or a final assistant response
-
-#### 4.9.3 Prompt Schema Adapter
-- Model is instructed via prompt to return JSON
-- Output is parsed post hoc
-- Includes retry/repair handling
-
-All adapters must produce a canonical model-turn outcome that contains either:
+The adapter defines a structured envelope that contains either:
 
 - one or more ToolInvocationRequest objects
 - or a final assistant response with no tool use
@@ -201,12 +187,13 @@ than a planning or agent loop.
 
 Provider clients are a separate layer above adapters.
 
-- They use the OpenAI Python SDK and OpenAI-compatible request semantics.
+- They use the OpenAI Python SDK plus Instructor with OpenAI-compatible request
+  semantics.
 - They can target multiple actual providers only when those providers expose an
   OpenAI-compatible endpoint.
 - They do not execute tools directly.
-- They call a model, extract the raw response payload, and hand it to an
-  adapter for parsing.
+- They call a model using a typed response model prepared by workflow/adapters,
+  then hand the parsed payload to the adapter for normalization.
 
 ---
 
@@ -455,14 +442,11 @@ project/
         registry.py
         runtime.py
         policy.py
-        observability.py
+        redaction.py
         errors.py
-        decorators.py
       llm_adapters/
         base.py
-        native_tool_calling.py
-        structured_output.py
-        prompt_schema.py
+        action_envelope.py
       llm_providers/
         __init__.py
         openai_compatible.py
@@ -501,15 +485,14 @@ runtime behavior described in this spec begin in later implementation steps.
 
 ### Milestone 3: LLM adapters
 
-* native tool-calling adapter
-* structured output adapter
-* prompt schema adapter
+* canonical action-envelope adapter
+* `ParsedModelResponse` normalization
 
 ### Milestone 3.5: LLM providers
 
 * OpenAI-compatible provider layer
-* provider-managed request construction
-* provider response extraction before adapter parsing
+* Instructor-backed typed parsing
+* provider mode strategy fallback (`TOOLS -> JSON -> MD_JSON`)
 
 ### Milestone 4: Built-in tools
 
@@ -530,9 +513,8 @@ runtime behavior described in this spec begin in later implementation steps.
 * Execute tools through runtime with validation
 * Enforce basic policy
 * Return structured results
-* Export OpenAI-compatible schemas
-* Support structured-response fallback
-* Support prompt-based fallback
+* Export canonical action-envelope schemas
+* Support provider strategy fallback for OpenAI-compatible endpoints
 * Provide example tools
 * Include tests for core functionality
 

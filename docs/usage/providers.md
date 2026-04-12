@@ -10,72 +10,77 @@ The provider layer is separate from `llm_tools.llm_adapters`:
 
 ## OpenAI-Compatible Provider
 
-`OpenAICompatibleProvider` is the first concrete provider client.
+`OpenAICompatibleProvider` is the canonical provider client.
 
 It accepts:
 
 - `model`
 - `api_key`
 - `base_url`
-- optional default request parameters
+- `mode_strategy`
+- optional `default_request_params`
 
-It uses only the OpenAI Python SDK. It does not use vendor-native SDKs.
+It uses the OpenAI Python SDK for transport and Instructor for structured
+response parsing.
 
-That means this layer can work with any actual provider that offers an
-OpenAI-compatible endpoint, such as local Ollama setups or other compatible
-gateways.
+## Public Methods
 
-## Interaction Modes
+The provider now exposes one sync and one async call surface:
 
-`OpenAICompatibleProvider` exposes one entry point per interaction mode:
+- `run(...) -> ParsedModelResponse`
+- `run_async(...) -> ParsedModelResponse`
 
-- `run_native_tool_calling(...)`
-- `run_structured_output(...)`
-- `run_prompt_schema(...)`
-- `run_native_tool_calling_async(...)`
-- `run_structured_output_async(...)`
-- `run_prompt_schema_async(...)`
+Both methods accept:
 
-Each method:
+- `adapter: ActionEnvelopeAdapter`
+- `messages: Sequence[dict[str, Any]]`
+- `response_model: type[BaseModel]`
+- optional `request_params`
 
-1. exports tool descriptions through the supplied adapter
-2. calls the model through the OpenAI SDK
-3. extracts the raw response payload
-4. parses it through the adapter into `ParsedModelResponse`
+`response_model` should come from
+`WorkflowExecutor.prepare_model_interaction(...)`.
 
-Providers do not execute tools directly.
+## Strategy Modes
 
-The async methods use the OpenAI SDK's `AsyncOpenAI` client while preserving
-the same request/response semantics as the sync methods.
+`mode_strategy` controls Instructor mode selection:
+
+- `auto` (default): tries `TOOLS`, then `JSON`, then `MD_JSON`
+- `tools`
+- `json`
+- `md_json`
+
+This preserves the reliability ladder while keeping one provider API.
 
 ## Example
 
 ```python
-from llm_tools.llm_adapters import NativeToolCallingAdapter
+from llm_tools.llm_adapters import ActionEnvelopeAdapter
 from llm_tools.llm_providers import OpenAICompatibleProvider
+from llm_tools.tool_api import ToolContext
 from llm_tools.workflow_api import WorkflowExecutor
 
-adapter = NativeToolCallingAdapter()
+adapter = ActionEnvelopeAdapter()
 provider = OpenAICompatibleProvider.for_ollama(model="gemma4:26b")
 executor = WorkflowExecutor(registry)
 
-parsed = provider.run_native_tool_calling(
+context = ToolContext(invocation_id="turn-1")
+prepared = executor.prepare_model_interaction(adapter, context=context)
+
+parsed = provider.run(
     adapter=adapter,
     messages=[{"role": "user", "content": "Read README.md"}],
-    registry=registry,
+    response_model=prepared.response_model,
 )
 turn_result = executor.execute_parsed_response(parsed, context)
 ```
 
-For runnable samples, see the [examples directory](../../examples/README.md).
-
-Async usage follows the same shape with `await`:
+Async usage:
 
 ```python
-parsed = await provider.run_native_tool_calling_async(
+parsed = await provider.run_async(
     adapter=adapter,
     messages=[{"role": "user", "content": "Read README.md"}],
-    registry=registry,
+    response_model=prepared.response_model,
 )
 turn_result = await executor.execute_parsed_response_async(parsed, context)
 ```

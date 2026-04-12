@@ -143,7 +143,7 @@ async def _run_startup_assertions(tmp_path: Path) -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app.query_one("#provider-preset-value", Static).renderable == "ollama"
-        assert app.query_one("#mode-value", Static).renderable == "native_tool_calling"
+        assert app.query_one("#mode-value", Static).renderable == "auto"
         tools_text = str(app.query_one("#registered-tools-box", Static).renderable)
         assert "read_file" in tools_text
         assert "run_git_status" in tools_text

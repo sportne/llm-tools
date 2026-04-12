@@ -6,7 +6,7 @@ import os
 import sys
 from tempfile import TemporaryDirectory
 
-from llm_tools.llm_adapters import NativeToolCallingAdapter, StructuredOutputAdapter
+from llm_tools.llm_adapters import ActionEnvelopeAdapter
 from llm_tools.llm_providers import OpenAICompatibleProvider
 from llm_tools.tool_api import SideEffectClass, ToolContext, ToolPolicy, ToolRegistry
 from llm_tools.tools import register_filesystem_tools
@@ -25,8 +25,7 @@ def main() -> int:
 
     registry = ToolRegistry()
     register_filesystem_tools(registry)
-    native_adapter = NativeToolCallingAdapter()
-    setup_adapter = StructuredOutputAdapter()
+    adapter = ActionEnvelopeAdapter()
     executor = WorkflowExecutor(
         registry,
         policy=ToolPolicy(
@@ -39,8 +38,14 @@ def main() -> int:
     )
 
     with TemporaryDirectory() as workspace:
+        context = ToolContext(invocation_id="live-turn", workspace=workspace)
+        prepared = executor.prepare_model_interaction(
+            adapter,
+            context=context,
+            include_requires_approval=True,
+        )
         setup = executor.execute_model_output(
-            setup_adapter,
+            adapter,
             {
                 "actions": [
                     {
@@ -58,8 +63,8 @@ def main() -> int:
         print("Setup turn:", setup.model_dump(mode="json"))
 
         try:
-            parsed = provider.run_native_tool_calling(
-                adapter=native_adapter,
+            parsed = provider.run(
+                adapter=adapter,
                 messages=[
                     {
                         "role": "user",
@@ -69,7 +74,7 @@ def main() -> int:
                         ),
                     }
                 ],
-                registry=registry,
+                response_model=prepared.response_model,
             )
         except Exception as exc:
             print(
@@ -87,7 +92,7 @@ def main() -> int:
 
         turn_result = executor.execute_parsed_response(
             parsed,
-            ToolContext(invocation_id="live-turn", workspace=workspace),
+            context,
         )
         print("Model turn:", turn_result.model_dump(mode="json"))
         return 0

@@ -15,16 +15,16 @@ These examples do not make network calls:
 - `builtins_direct.py`
   Registers built-in tools and executes them directly.
 - `openai_wiring.py`
-  Uses the native-tool-calling adapter plus the provider layer without making a
-  live API call.
+  Shows one-turn wiring with `ActionEnvelopeAdapter` and
+  `OpenAICompatibleProvider` without a live API call.
 - `async_model_turn.py`
   Uses async provider and workflow APIs with the same one-turn model/tool flow.
 - `structured_response.py`
-  Uses the structured-output adapter through the provider layer and executes the
-  parsed result through `WorkflowExecutor`.
+  Demonstrates the same canonical action-envelope flow with a structured-output
+  style payload.
 - `prompt_schema.py`
-  Uses the prompt-schema adapter through the provider layer and executes the
-  parsed result through `WorkflowExecutor`.
+  Demonstrates the same canonical action-envelope flow with a prompt-emitted
+  JSON payload shape.
 
 ## Live Ollama Example
 

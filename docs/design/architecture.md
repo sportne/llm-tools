@@ -61,19 +61,16 @@ Defines the canonical internal model for:
 
 #### `llm_adapters`
 
-Translate between model-facing interaction modes and the canonical internal
-invocation model.
+Translate between model payloads and the canonical internal invocation model.
 
-Supported modes:
+v0.1 uses one canonical adapter:
 
-* native tool calling
-* structured output action selection
-* prompt-schema action selection
+* `ActionEnvelopeAdapter`
 
 #### `llm_providers`
 
-Own model-call setup and response extraction using the OpenAI Python SDK
-against OpenAI-compatible endpoints.
+Own model-call setup and typed response extraction using the OpenAI Python SDK
+and Instructor against OpenAI-compatible endpoints.
 
 #### `tools`
 
@@ -173,7 +170,9 @@ The main architectural components are:
 * `ToolPolicy`
 * `PolicyDecision`
 * `ExecutionRecord`
-* `LLMAdapter`
+* `ActionEnvelopeAdapter`
+* `OpenAICompatibleProvider`
+* `WorkflowExecutor`
 
 These form the stable system boundary for v0.1.
 
@@ -261,41 +260,39 @@ project/
         registry.py
         runtime.py
         policy.py
-        observability.py
+        redaction.py
         errors.py
-        decorators.py
       llm_adapters/
         __init__.py
         base.py
-        native_tool_calling.py
-        structured_output.py
-        prompt_schema.py
+        action_envelope.py
       llm_providers/
         __init__.py
         openai_compatible.py
+      apps/
+        textual_workbench/
+          __init__.py
+          __main__.py
+          app.py
+          controller.py
+          models.py
+          presentation.py
+          screens.py
       tools/
         __init__.py
+        _path_utils.py
         filesystem/
           __init__.py
-          read_file.py
-          write_file.py
-          list_directory.py
-          register.py
+          tools.py
         git/
           __init__.py
-          run_git_status.py
-          run_git_diff.py
-          run_git_log.py
-          register.py
+          tools.py
         atlassian/
           __init__.py
-          search_jira.py
-          read_jira_issue.py
-          register.py
+          tools.py
         text/
           __init__.py
-          search_text.py
-          register.py
+          tools.py
       workflow_api/
         __init__.py
         models.py
@@ -428,9 +425,7 @@ class ToolInvocationRequest(BaseModel):
 
 This is the normalization point across:
 
-* native tool-calling mode
-* structured output mode
-* prompt-schema mode
+* action-envelope structured model turns
 * direct Python callers
 
 ---
@@ -882,7 +877,8 @@ A simple early implementation may:
 
 ## 13.1 Design goal
 
-Adapters translate between model-facing interaction styles and the canonical internal invocation model.
+Adapters translate between structured model payloads and the canonical internal
+invocation model.
 
 Adapters must not:
 
@@ -895,107 +891,62 @@ They are translation layers only.
 
 ---
 
-## 13.2 Two separate concerns
+## 13.2 Canonical adapter
 
-The architecture distinguishes:
+`ActionEnvelopeAdapter` is the single canonical adapter in v0.1.
 
-### Tool exposure
+It supports two responsibilities:
 
-How available tools are described to a model.
+* build a typed action envelope model for the visible tools
+* parse provider payloads into `ParsedModelResponse`
 
-### Invocation parsing
+The envelope is XOR-constrained:
 
-How model output is interpreted as `ToolInvocationRequest` objects.
+* either one or more `actions`
+* or a plain `final_response`
 
-These are conceptually separate even if some implementations combine them.
+When actions are present:
 
----
-
-## 13.3 Base conceptual interface
-
-```python
-class LLMAdapter(ABC):
-    @abstractmethod
-    def export_tool_descriptions(
-        self,
-        specs: list[ToolSpec],
-        input_models: dict[str, type[BaseModel]],
-    ) -> object:
-        raise NotImplementedError
-
-    @abstractmethod
-    def parse_model_output(self, payload: object) -> ParsedModelResponse:
-        raise NotImplementedError
-```
+* `tool_name` is constrained to visible tool names
+* `arguments` are validated against each tool's canonical `input_model`
 
 ---
 
-## 13.4 Native tool-calling adapter
-
-Responsibilities:
-
-* export canonical native tool schemas
-* parse returned model payloads
-* normalize them into either tool invocations or a final assistant response
-
-This adapter uses canonical `ToolSpec` and `input_model` information as source material.
-
----
-
-## 13.5 Structured output adapter
-
-Responsibilities:
-
-* define a structured action schema for model output
-* parse structured JSON into either tool invocations or a final assistant response
-
-Suggested action envelope:
-
-```python
-from pydantic import BaseModel, Field
-from typing import Any
-
-class ToolAction(BaseModel):
-    tool_name: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
-
-class ToolActionEnvelope(BaseModel):
-    actions: list[ToolAction]
-    final_response: str | None = None
-```
-
-Even if v0.1 typically executes one action at a time, using an envelope creates a clean future path.
-
----
-
-## 13.6 Prompt-schema adapter
-
-Responsibilities:
-
-* render prompt instructions for the expected JSON action shape
-* parse and validate model output post hoc
-* support repair/retry behavior where useful
-
-This is the least reliable mode and is treated as fallback compatibility mode.
-
----
-
-## 13.7 Provider layer
+## 13.3 Provider layer
 
 Provider clients sit above adapters and own transport concerns.
 
-Responsibilities:
+`OpenAICompatibleProvider`:
 
-* call models through the OpenAI Python SDK
-* target OpenAI-compatible endpoints via configurable `base_url`
-* construct requests from adapter-exported artifacts
-* extract raw response payloads and hand them back to adapters for parsing
+* uses the OpenAI Python SDK for transport
+* uses Instructor for typed response parsing
+* accepts OpenAI-compatible `base_url` values for multiple provider targets
+* exposes `run(...)` and `run_async(...)`
+
+The provider mode strategy is configurable:
+
+* `auto` (default): `TOOLS -> JSON -> MD_JSON`
+* `tools`
+* `json`
+* `md_json`
 
 Provider clients must not:
 
 * execute tools directly
 * reimplement runtime validation or policy
 * depend on vendor-native SDKs in v0.1
+
+---
+
+## 13.4 Workflow bridge
+
+`WorkflowExecutor` prepares the model-facing contract and executes parsed
+results:
+
+* `prepare_model_interaction(...)` returns the typed response model and schema
+* providers run using that response model
+* parsed responses are executed sequentially through runtime when invocations
+  are present
 
 ---
 
@@ -1109,9 +1060,9 @@ Testing should happen at several levels.
 
 ### Adapter tests
 
-* native tool schema generation
-* structured output parsing
-* prompt-schema parsing and repair behavior
+* typed action-envelope schema generation
+* action-envelope payload parsing and validation
+* parsed-response normalization
 
 ### Integration tests
 
@@ -1180,17 +1131,16 @@ Implement a small starter set:
 
 Implement:
 
-* native tool schema export
-* structured output adapter
-* prompt-schema adapter
+* canonical action-envelope adapter
+* parsed model-response normalization
 
 ### Phase 5.5: Providers
 
 Implement:
 
 * OpenAI-compatible provider client
-* provider-managed request construction
-* response extraction before adapter parsing
+* Instructor-backed typed parsing
+* mode-strategy fallback (`TOOLS -> JSON -> MD_JSON`)
 
 ### Phase 6: Polish
 
@@ -1215,7 +1165,7 @@ The library now exposes dual sync/async execution surfaces:
 * tools can implement `invoke`, `ainvoke`, or both
 * runtime exposes `execute` and `execute_async`
 * workflow exposes sync and async one-turn execution APIs
-* provider clients expose sync and async mode entrypoints
+* provider clients expose sync and async one-turn entrypoints
 
 Sync compatibility is preserved while allowing non-blocking async integration.
 

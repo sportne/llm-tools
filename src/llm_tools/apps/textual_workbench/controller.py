@@ -13,18 +13,13 @@ from llm_tools.apps.textual_workbench.models import (
     DirectExecutionResult,
     ExportToolsResult,
     ModelTurnExecutionResult,
+    ProviderModeStrategy,
     ProviderPreset,
     WorkbenchConfigState,
-    WorkbenchMode,
 )
-from llm_tools.llm_adapters import (
-    LLMAdapter,
-    NativeToolCallingAdapter,
-    ParsedModelResponse,
-    PromptSchemaAdapter,
-    StructuredOutputAdapter,
-)
+from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.llm_providers import OpenAICompatibleProvider
+from llm_tools.llm_providers import ProviderModeStrategy as ProviderRunMode
 from llm_tools.tool_api import (
     SideEffectClass,
     ToolContext,
@@ -119,16 +114,19 @@ class WorkbenchController:
             }
         )
 
-    def cycle_mode(self, config: WorkbenchConfigState) -> WorkbenchConfigState:
-        """Return a config with the next interaction mode selected."""
+    def cycle_provider_mode_strategy(
+        self, config: WorkbenchConfigState
+    ) -> WorkbenchConfigState:
+        """Return a config with the next provider mode strategy selected."""
         ordered = [
-            WorkbenchMode.NATIVE_TOOL_CALLING,
-            WorkbenchMode.STRUCTURED_OUTPUT,
-            WorkbenchMode.PROMPT_SCHEMA,
+            ProviderModeStrategy.AUTO,
+            ProviderModeStrategy.TOOLS,
+            ProviderModeStrategy.JSON,
+            ProviderModeStrategy.MD_JSON,
         ]
-        current_index = ordered.index(config.mode)
+        current_index = ordered.index(config.provider_mode_strategy)
         next_mode = ordered[(current_index + 1) % len(ordered)]
-        return config.model_copy(update={"mode": next_mode})
+        return config.model_copy(update={"provider_mode_strategy": next_mode})
 
     def build_registry(self, config: WorkbenchConfigState) -> ToolRegistry:
         """Build a fresh registry from the current UI configuration."""
@@ -179,14 +177,14 @@ class WorkbenchController:
         )
 
     def export_tools(self, config: WorkbenchConfigState) -> ExportToolsResult:
-        """Export tools for the currently selected interaction mode."""
-        adapter = self._build_adapter(config.mode)
+        """Export tools for the canonical action-envelope adapter."""
+        adapter = self._build_adapter()
         context = self._make_context(config, invocation_id="workbench-export-tools")
         executor, session_rebuilt = self._get_or_rebuild_session(config)
-        exported = executor.export_tools(adapter, context=context)
+        prepared = executor.prepare_model_interaction(adapter, context=context)
         return ExportToolsResult(
             session_rebuilt=session_rebuilt,
-            exported_tools=exported,
+            exported_tools=prepared.schema,
         )
 
     def execute_direct_tool(
@@ -265,42 +263,27 @@ class WorkbenchController:
         *,
         prompt: str,
     ) -> ModelTurnExecutionResult:
-        """Run one provider-backed model turn through the selected mode."""
+        """Run one provider-backed model turn through the action envelope."""
         normalized_prompt = prompt.strip()
         if normalized_prompt == "":
             raise ValueError("A prompt is required to run a model turn.")
 
-        adapter = self._build_adapter(config.mode)
+        adapter = self._build_adapter()
         policy_context = self._make_context(
             config, invocation_id="workbench-model-turn"
         )
         executor, session_rebuilt = self._get_or_rebuild_session(config)
-        exported_tools = executor.export_tools(
+        prepared = executor.prepare_model_interaction(
             adapter,
             context=policy_context,
             include_requires_approval=True,
         )
         provider = self._build_provider(config)
-        messages = [{"role": "user", "content": normalized_prompt}]
-
-        if config.mode is WorkbenchMode.NATIVE_TOOL_CALLING:
-            parsed = provider.run_native_tool_calling(
-                adapter=adapter,  # type: ignore[arg-type]
-                messages=messages,
-                tool_descriptions=exported_tools,
-            )
-        elif config.mode is WorkbenchMode.STRUCTURED_OUTPUT:
-            parsed = provider.run_structured_output(
-                adapter=adapter,  # type: ignore[arg-type]
-                messages=messages,
-                tool_descriptions=exported_tools,
-            )
-        else:
-            parsed = provider.run_prompt_schema(
-                adapter=adapter,  # type: ignore[arg-type]
-                messages=messages,
-                tool_descriptions=exported_tools,
-            )
+        parsed = provider.run(
+            adapter=adapter,
+            messages=[{"role": "user", "content": normalized_prompt}],
+            response_model=prepared.response_model,
+        )
 
         workflow_result = None
         if config.execute_after_parse:
@@ -308,7 +291,7 @@ class WorkbenchController:
 
         return ModelTurnExecutionResult(
             session_rebuilt=session_rebuilt,
-            exported_tools=exported_tools,
+            exported_tools=prepared.schema,
             parsed_response=parsed,
             workflow_result=workflow_result,
         )
@@ -324,37 +307,22 @@ class WorkbenchController:
         if normalized_prompt == "":
             raise ValueError("A prompt is required to run a model turn.")
 
-        adapter = self._build_adapter(config.mode)
+        adapter = self._build_adapter()
         policy_context = self._make_context(
             config, invocation_id="workbench-model-turn"
         )
         executor, session_rebuilt = self._get_or_rebuild_session(config)
-        exported_tools = executor.export_tools(
+        prepared = executor.prepare_model_interaction(
             adapter,
             context=policy_context,
             include_requires_approval=True,
         )
         provider = self._build_provider(config)
-        messages = [{"role": "user", "content": normalized_prompt}]
-
-        if config.mode is WorkbenchMode.NATIVE_TOOL_CALLING:
-            parsed = await provider.run_native_tool_calling_async(
-                adapter=adapter,  # type: ignore[arg-type]
-                messages=messages,
-                tool_descriptions=exported_tools,
-            )
-        elif config.mode is WorkbenchMode.STRUCTURED_OUTPUT:
-            parsed = await provider.run_structured_output_async(
-                adapter=adapter,  # type: ignore[arg-type]
-                messages=messages,
-                tool_descriptions=exported_tools,
-            )
-        else:
-            parsed = await provider.run_prompt_schema_async(
-                adapter=adapter,  # type: ignore[arg-type]
-                messages=messages,
-                tool_descriptions=exported_tools,
-            )
+        parsed = await provider.run_async(
+            adapter=adapter,
+            messages=[{"role": "user", "content": normalized_prompt}],
+            response_model=prepared.response_model,
+        )
 
         workflow_result = None
         if config.execute_after_parse:
@@ -364,7 +332,7 @@ class WorkbenchController:
 
         return ModelTurnExecutionResult(
             session_rebuilt=session_rebuilt,
-            exported_tools=exported_tools,
+            exported_tools=prepared.schema,
             parsed_response=parsed,
             workflow_result=workflow_result,
         )
@@ -458,12 +426,9 @@ class WorkbenchController:
             allow_subprocess=config.allow_subprocess,
         )
 
-    def _build_adapter(self, mode: WorkbenchMode) -> LLMAdapter:
-        if mode is WorkbenchMode.NATIVE_TOOL_CALLING:
-            return NativeToolCallingAdapter()
-        if mode is WorkbenchMode.STRUCTURED_OUTPUT:
-            return StructuredOutputAdapter()
-        return PromptSchemaAdapter()
+    @staticmethod
+    def _build_adapter() -> ActionEnvelopeAdapter:
+        return ActionEnvelopeAdapter()
 
     def _build_provider(
         self,
@@ -477,6 +442,7 @@ class WorkbenchController:
             return self._provider_factory.for_openai(
                 model=model,
                 api_key=config.api_key.strip() or None,
+                mode_strategy=ProviderRunMode(config.provider_mode_strategy.value),
             )
 
         if config.provider_preset is ProviderPreset.OLLAMA:
@@ -487,6 +453,7 @@ class WorkbenchController:
                 model=model,
                 base_url=base_url,
                 api_key=config.api_key.strip() or "ollama",
+                mode_strategy=ProviderRunMode(config.provider_mode_strategy.value),
             )
 
         base_url = config.base_url.strip()
@@ -497,6 +464,7 @@ class WorkbenchController:
             model=model,
             base_url=base_url,
             api_key=config.api_key.strip() or None,
+            mode_strategy=ProviderRunMode(config.provider_mode_strategy.value),
         )
 
     def _get_or_rebuild_session(

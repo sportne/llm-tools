@@ -1,93 +1,63 @@
 # Adapters
 
-`llm_tools.llm_adapters` contains pure interaction-mode translators.
+`llm_tools.llm_adapters` now exposes one canonical adapter:
+`ActionEnvelopeAdapter`.
 
-Adapters do two things:
+The adapter is intentionally transport-agnostic. It handles only two concerns:
 
-- expose available tools in a model-facing format
-- parse model output into a canonical `ParsedModelResponse`
+- build the canonical structured action envelope for visible tools
+- parse model payloads into canonical `ParsedModelResponse`
 
-They do not make network calls, execute tools, or enforce policy.
+It does not call models, execute tools, or enforce policy.
 
-## Parsed Model Response
+## Canonical Turn Shape
 
-Adapters normalize one model turn into exactly one of these shapes:
+`ParsedModelResponse` normalizes one model turn into exactly one of:
 
 - `invocations`: one or more `ToolInvocationRequest` objects
 - `final_response`: a plain assistant response string
 
-Exactly one mode is allowed at a time.
+Exactly one mode is valid at a time.
 
-## Available Adapters
+## Action Envelope
 
-### Native tool calling
+`ActionEnvelopeAdapter` uses one canonical envelope:
 
-`NativeToolCallingAdapter`:
+- tool path: `{"actions": [...], "final_response": null}`
+- final-response path: `{"actions": [], "final_response": "..."}`
 
-- exports canonical native tool definitions
-- parses native tool-call payloads
-- parses plain final assistant text when no tool call is present
+When tools are visible, `actions` are typed per tool:
 
-### Structured output
+- `tool_name` is constrained to registered/visible tool names
+- `arguments` are validated against each tool’s `input_model`
 
-`StructuredOutputAdapter`:
+## Typical Flow
 
-- exports a canonical JSON schema
-- expects an envelope with `actions` or `final_response`
-- parses JSON strings or decoded payloads
-
-### Prompt schema
-
-`PromptSchemaAdapter`:
-
-- renders prompt instructions for the canonical JSON envelope
-- parses prompt-returned JSON post hoc
-- supports one deterministic repair pass for fenced JSON
-
-## Providers vs Adapters
-
-Adapters describe interaction modes. Providers handle transport.
-
-`llm_tools.llm_providers` contains provider clients built on the OpenAI Python
-SDK for OpenAI-compatible endpoints such as OpenAI-compatible gateways,
-Ollama, and similar compatibility surfaces.
-
-The usual flow is:
-
-1. choose an adapter for the interaction mode
-2. call a provider client
-3. receive a `ParsedModelResponse`
-4. execute it with `WorkflowExecutor` when tool invocations are present
-
-## Executing Adapter Output
-
-`WorkflowExecutor` is the thin one-turn bridge above adapters and runtime:
+Use `WorkflowExecutor.prepare_model_interaction(...)` to derive the typed
+response model and JSON schema once per turn, then pass that response model to
+the provider:
 
 ```python
-from llm_tools.llm_adapters import StructuredOutputAdapter
+from llm_tools.llm_adapters import ActionEnvelopeAdapter
 from llm_tools.llm_providers import OpenAICompatibleProvider
-from llm_tools.tool_api import ToolContext, ToolRegistry
+from llm_tools.tool_api import ToolContext
 from llm_tools.workflow_api import WorkflowExecutor
 
-adapter = StructuredOutputAdapter()
-provider = OpenAICompatibleProvider(model="demo-model")
+adapter = ActionEnvelopeAdapter()
 executor = WorkflowExecutor(registry)
+provider = OpenAICompatibleProvider.for_ollama(model="gemma4:26b")
 
-parsed = provider.run_structured_output(
+context = ToolContext(invocation_id="turn-1")
+prepared = executor.prepare_model_interaction(adapter, context=context)
+
+parsed = provider.run(
     adapter=adapter,
     messages=[{"role": "user", "content": "Read README.md"}],
-    registry=registry,
+    response_model=prepared.response_model,
 )
-turn_result = executor.execute_parsed_response(
-    parsed,
-    ToolContext(invocation_id="turn-1"),
-)
+
+turn_result = executor.execute_parsed_response(parsed, context)
 ```
 
-The workflow layer:
-
-- parses one model output
-- executes parsed invocations sequentially when present
-- returns a final-response-only result when no tool is needed
-
-It does not perform multi-turn loops, replanning, or follow-up model calls.
+The workflow layer remains a one-turn bridge. It does not add replanning,
+multi-turn loops, or follow-up model calls.
