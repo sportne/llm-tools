@@ -109,14 +109,24 @@ def resolve_root_confined_path(
     if not resolved_target.is_relative_to(resolved_root):
         raise ValueError("Requested chat tool path escapes the configured root.")
     if not resolved_target.exists():
-        raise ValueError(f"Requested {expected_kind} does not exist: {normalized_request}")
+        raise ValueError(
+            f"Requested {expected_kind} does not exist: {normalized_request}"
+        )
 
-    kind_check = resolved_target.is_dir if expected_kind == "directory" else resolved_target.is_file
+    kind_check = (
+        resolved_target.is_dir
+        if expected_kind == "directory"
+        else resolved_target.is_file
+    )
     if not kind_check():
-        raise ValueError(f"Requested path is not a {expected_kind}: {normalized_request}")
+        raise ValueError(
+            f"Requested path is not a {expected_kind}: {normalized_request}"
+        )
 
     resolved_relative = resolved_target.relative_to(resolved_root)
-    resolved_path = resolved_relative.as_posix() if resolved_relative.as_posix() else "."
+    resolved_path = (
+        resolved_relative.as_posix() if resolved_relative.as_posix() else "."
+    )
     return ResolvedRootPath(
         root=resolved_root,
         candidate=candidate_target,

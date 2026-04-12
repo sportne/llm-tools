@@ -112,7 +112,9 @@ class ChatSessionTurnRunner:
                 return
 
             round_context = self._base_context.model_copy(
-                update={"invocation_id": f"{self._base_context.invocation_id}:{uuid4()}"}
+                update={
+                    "invocation_id": f"{self._base_context.invocation_id}:{uuid4()}"
+                }
             )
             prepared = self._executor.prepare_model_interaction(
                 self._adapter,
@@ -199,7 +201,9 @@ class ChatSessionTurnRunner:
                 )
                 return
 
-            workflow_result = self._executor.execute_parsed_response(parsed, round_context)
+            workflow_result = self._executor.execute_parsed_response(
+                parsed, round_context
+            )
             for outcome in workflow_result.outcomes:
                 if self._cancel_requested:
                     yield self._finalized_event(
@@ -401,7 +405,9 @@ def _summarize_session_token_usage(
     session_state: ChatSessionState,
     active_context_messages: list[ChatMessage],
 ) -> ChatTokenUsage:
-    session_tokens = sum(_estimate_turn_total_tokens(turn) for turn in session_state.turns)
+    session_tokens = sum(
+        _estimate_turn_total_tokens(turn) for turn in session_state.turns
+    )
     active_context_tokens = _estimate_messages_tokens(active_context_messages)
     if base_usage is None:
         current_turn_total_tokens = (
@@ -438,7 +444,9 @@ def _finalize_session_turn_result(
     active_context_messages = [
         system_message,
         *_flatten_turn_messages(
-            updated_session_state.turns[updated_session_state.active_context_start_turn :]
+            updated_session_state.turns[
+                updated_session_state.active_context_start_turn :
+            ]
         ),
     ]
     token_usage = _summarize_session_token_usage(

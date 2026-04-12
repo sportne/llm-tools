@@ -79,7 +79,9 @@ class TranscriptCopyModal(ModalScreen[None]):
                 "Select transcript text with the mouse, then use the copy buttons.",
                 id="transcript-copy-help",
             )
-            yield TextArea(self._transcript_text, id="transcript-copy-area", read_only=True)
+            yield TextArea(
+                self._transcript_text, id="transcript-copy-area", read_only=True
+            )
             yield Static("", id="transcript-copy-status")
             with Horizontal(id="transcript-copy-actions"):
                 yield Button("Copy Selected", id="transcript-copy-selection")
@@ -98,7 +100,9 @@ class TranscriptCopyModal(ModalScreen[None]):
         selected_text = text_area.selected_text or text_area.text
         self.app.copy_to_clipboard(selected_text)
         self._set_status(
-            "Copied selection." if text_area.selected_text else "No selection; copied full transcript."
+            "Copied selection."
+            if text_area.selected_text
+            else "No selection; copied full transcript."
         )
 
     @on(Button.Pressed, "#transcript-copy-all")

@@ -45,12 +45,16 @@ def _runtime(tmp_path: Path) -> tuple[ToolRuntime, ToolContext]:
 def test_chat_tools_list_find_and_search(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / ".hidden").mkdir()
-    (tmp_path / "src" / "app.py").write_text("needle = 1\nneedle = 2\n", encoding="utf-8")
+    (tmp_path / "src" / "app.py").write_text(
+        "needle = 1\nneedle = 2\n", encoding="utf-8"
+    )
     (tmp_path / ".hidden" / "secret.py").write_text("needle\n", encoding="utf-8")
     runtime, context = _runtime(tmp_path)
 
     listing = runtime.execute(
-        ToolInvocationRequest(tool_name="list_directory_recursive", arguments={"path": "."}),
+        ToolInvocationRequest(
+            tool_name="list_directory_recursive", arguments={"path": "."}
+        ),
         context.model_copy(),
     )
     assert listing.ok is True

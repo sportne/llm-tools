@@ -41,8 +41,12 @@ def _require_chat_metadata(
 ) -> tuple[Path, ChatSourceFilters, ChatSessionConfig, ChatToolLimits]:
     workspace = Path(context.workspace or Path.cwd()).resolve()
     metadata = context.metadata
-    source_filters = ChatSourceFilters.model_validate(metadata.get("source_filters", {}))
-    session_config = ChatSessionConfig.model_validate(metadata.get("session_config", {}))
+    source_filters = ChatSourceFilters.model_validate(
+        metadata.get("source_filters", {})
+    )
+    session_config = ChatSessionConfig.model_validate(
+        metadata.get("session_config", {})
+    )
     tool_limits = ChatToolLimits.model_validate(metadata.get("tool_limits", {}))
     return workspace, source_filters, session_config, tool_limits
 
@@ -66,7 +70,9 @@ class ListDirectoryTool(Tool[ListDirectoryInput, ListDirectoryOutput]):
     input_model = ListDirectoryInput
     output_model = ListDirectoryOutput
 
-    def invoke(self, context: ToolContext, args: ListDirectoryInput) -> ListDirectoryOutput:
+    def invoke(
+        self, context: ToolContext, args: ListDirectoryInput
+    ) -> ListDirectoryOutput:
         root_path, source_filters, _, tool_limits = _require_chat_metadata(context)
         result = list_directory_impl(
             root_path,

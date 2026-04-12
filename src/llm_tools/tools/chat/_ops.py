@@ -54,7 +54,9 @@ def list_directory_impl(
     resolved_request = resolve_directory_path(root_path, path)
     entries: list[DirectoryEntry] = []
     truncated = False
-    for child in sorted(resolved_request.resolved.iterdir(), key=lambda item: item.name):
+    for child in sorted(
+        resolved_request.resolved.iterdir(), key=lambda item: item.name
+    ):
         relative_child = child.relative_to(resolved_request.root)
         if not should_include_entry(relative_child, source_filters=source_filters):
             continue
@@ -142,7 +144,9 @@ def find_files_impl(
             if child.is_symlink():
                 continue
             if child.is_dir():
-                if should_prune_directory(relative_child, source_filters=source_filters):
+                if should_prune_directory(
+                    relative_child, source_filters=source_filters
+                ):
                     continue
                 if not walk_directory(child):
                     return False
@@ -186,13 +190,17 @@ def resolve_search_file_or_directory(
     resolved_relative = resolved_target.relative_to(resolved_root)
     if candidate_target.is_symlink():
         symlink_kind = (
-            "directory" if resolved_target.exists() and resolved_target.is_dir() else "file"
+            "directory"
+            if resolved_target.exists() and resolved_target.is_dir()
+            else "file"
         )
         raise ValueError(
             f"Requested path must not be a symlinked {symlink_kind}: {normalized_path}"
         )
     if not candidate_target.exists():
-        raise ValueError(f"Requested file or directory does not exist: {normalized_path}")
+        raise ValueError(
+            f"Requested file or directory does not exist: {normalized_path}"
+        )
     return normalized_path, resolved_root, candidate_target, resolved_relative
 
 
@@ -210,7 +218,9 @@ def search_text_impl(
         resolve_search_file_or_directory(root_path, path)
     )
     if candidate_target.resolve().is_file():
-        resolved_path = resolved_relative.as_posix() if resolved_relative.as_posix() else "."
+        resolved_path = (
+            resolved_relative.as_posix() if resolved_relative.as_posix() else "."
+        )
         resolved_request = ResolvedRootPath(
             root=resolved_root,
             candidate=candidate_target,
@@ -237,7 +247,9 @@ def search_text_impl(
             if child.is_symlink():
                 continue
             if child.is_dir():
-                if should_prune_directory(relative_child, source_filters=source_filters):
+                if should_prune_directory(
+                    relative_child, source_filters=source_filters
+                ):
                     continue
                 if not walk_directory(child):
                     return False
@@ -307,7 +319,9 @@ def _search_loaded_content(
             matches=[],
             truncated=False,
         )
-    for line_number, line_text in enumerate(loaded_content.content.splitlines(), start=1):
+    for line_number, line_text in enumerate(
+        loaded_content.content.splitlines(), start=1
+    ):
         if query not in line_text:
             continue
         if len(matches) >= tool_limits.max_search_matches:
@@ -372,7 +386,9 @@ def _get_single_file_info(
         resolved_path=resolved_request.resolved_path,
         candidate_file=resolved_request.candidate,
         resolved_file=resolved_request.resolved,
-        relative_candidate_path=resolved_request.candidate.relative_to(resolved_request.root),
+        relative_candidate_path=resolved_request.candidate.relative_to(
+            resolved_request.root
+        ),
         session_config=session_config,
         tool_limits=tool_limits,
         loaded_content=loaded_content,

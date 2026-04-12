@@ -69,7 +69,12 @@ session:
 
 
 def test_textual_chat_presentation_helpers_render_expected_text() -> None:
-    assert format_citation(ChatCitation(source_path="src/app.py", line_start=4, line_end=6)) == "src/app.py:4-6"
+    assert (
+        format_citation(
+            ChatCitation(source_path="src/app.py", line_start=4, line_end=6)
+        )
+        == "src/app.py:4-6"
+    )
     formatted = format_final_response(
         ChatFinalResponse(
             answer="Done",
@@ -100,10 +105,15 @@ def test_textual_chat_app_launches_with_shell_layout_and_startup_message(
             await pilot.pause()
             assert isinstance(app.screen, ChatScreen)
             transcript = app.screen.query_one("#transcript", VerticalScroll)
-            texts = [str(getattr(child, "renderable", child.render())) for child in transcript.children]
+            texts = [
+                str(getattr(child, "renderable", child.render()))
+                for child in transcript.children
+            ]
             assert any("Root:" in text for text in texts)
             assert "quit or exit" in texts[0]
-            assert "F6 copy transcript" in str(app.screen.query_one("#footer-bar", Static).renderable)
+            assert "F6 copy transcript" in str(
+                app.screen.query_one("#footer-bar", Static).renderable
+            )
             app.exit()
             await pilot.pause()
 
@@ -128,7 +138,9 @@ def test_textual_chat_controller_renders_completed_turn(tmp_path: Path) -> None:
                     citations=[{"source_path": "src/app.py", "line_start": 1}],
                     confidence=0.5,
                 ),
-                token_usage=ChatTokenUsage(total_tokens=9, session_tokens=9, active_context_tokens=20),
+                token_usage=ChatTokenUsage(
+                    total_tokens=9, session_tokens=9, active_context_tokens=20
+                ),
                 session_state=ChatSessionState(),
             )
             screen._controller.handle_turn_result(
@@ -136,7 +148,10 @@ def test_textual_chat_controller_renders_completed_turn(tmp_path: Path) -> None:
             )
             await pilot.pause()
             transcript = screen.query_one("#transcript", VerticalScroll)
-            assert any(isinstance(child, AssistantMarkdownEntry) for child in transcript.children)
+            assert any(
+                isinstance(child, AssistantMarkdownEntry)
+                for child in transcript.children
+            )
             footer = str(screen.query_one("#footer-bar", Static).renderable)
             assert "confidence: 0.50" in footer
             app.exit()

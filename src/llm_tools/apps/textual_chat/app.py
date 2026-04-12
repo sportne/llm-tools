@@ -59,7 +59,9 @@ class ChatScreen(Screen[None]):
     """Main chat screen with transcript, composer, status, and footer rows."""
 
     BINDINGS = [
-        Binding("f6", "open_transcript_copy", "Copy transcript", show=False, priority=True)
+        Binding(
+            "f6", "open_transcript_copy", "Copy transcript", show=False, priority=True
+        )
     ]
 
     DEFAULT_CSS = """
@@ -187,7 +189,9 @@ class ChatScreen(Screen[None]):
                 yield ComposerTextArea("", id="composer")
                 with Vertical(id="composer-actions"):
                     yield Button("Send", id="send-button", variant="primary")
-                    yield Button("Stop", id="stop-button", variant="warning", disabled=True)
+                    yield Button(
+                        "Stop", id="stop-button", variant="warning", disabled=True
+                    )
             yield Static("", id="footer-bar")
 
     def on_mount(self) -> None:
@@ -199,7 +203,10 @@ class ChatScreen(Screen[None]):
                 "Use /help for guidance. Type quit or exit to leave."
             ),
         )
-        metadata = self._credential_metadata_override or self._config.llm.credential_prompt_metadata()
+        metadata = (
+            self._credential_metadata_override
+            or self._config.llm.credential_prompt_metadata()
+        )
         env_var = self._config.llm.api_key_env_var or "OPENAI_API_KEY"
         if self._provider is None and metadata.expects_api_key and not getenv(env_var):
             self.app.push_screen(
@@ -214,11 +221,15 @@ class ChatScreen(Screen[None]):
 
     @on(ComposerTextArea.SubmitRequested, "#composer")
     def handle_composer_submit(self) -> None:
-        self._controller.submit_draft(self.query_one("#composer", ComposerTextArea).text)
+        self._controller.submit_draft(
+            self.query_one("#composer", ComposerTextArea).text
+        )
 
     @on(Button.Pressed, "#send-button")
     def handle_send_button(self) -> None:
-        self._controller.submit_draft(self.query_one("#composer", ComposerTextArea).text)
+        self._controller.submit_draft(
+            self.query_one("#composer", ComposerTextArea).text
+        )
 
     @on(Button.Pressed, "#stop-button")
     def handle_stop_button(self) -> None:

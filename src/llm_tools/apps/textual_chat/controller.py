@@ -205,9 +205,7 @@ class ChatScreenController:
             if self._screen._footer_active_context_tokens is not None
             else "-"
         )
-        footer = (
-            f"session tokens: {session_tokens} | active context tokens: {active_context_tokens}"
-        )
+        footer = f"session tokens: {session_tokens} | active context tokens: {active_context_tokens}"
         if self._screen._footer_confidence is not None:
             footer += f" | confidence: {self._screen._footer_confidence:.2f}"
         if self._screen._busy:
@@ -306,7 +304,9 @@ class ChatScreenController:
     def handle_interrupt_confirmation(self, confirmed: bool | None) -> None:
         if confirmed:
             pending_draft = self._screen.query_one("#composer", ComposerTextArea).text
-            self._screen._pending_interrupt_draft = pending_draft if pending_draft.strip() else None
+            self._screen._pending_interrupt_draft = (
+                pending_draft if pending_draft.strip() else None
+            )
             self.cancel_active_turn(status_text="stopping")
         self._screen.query_one("#composer", ComposerTextArea).focus()
 
@@ -338,7 +338,9 @@ class ChatScreenController:
     def handle_turn_result(self, event: object) -> None:
         typed_event = ChatWorkflowResultEvent.model_validate(event)
         result = ChatWorkflowTurnResult.model_validate(typed_event.result)
-        self._screen._session_state = result.session_state or self._screen._session_state
+        self._screen._session_state = (
+            result.session_state or self._screen._session_state
+        )
         if result.context_warning:
             self.append_transcript("system", result.context_warning)
         if result.status == "needs_continuation" and result.continuation_reason:
@@ -368,7 +370,9 @@ class ChatScreenController:
                         assistant_completion_state="interrupted",
                     )
         self.update_footer_metrics(
-            session_tokens=result.token_usage.session_tokens if result.token_usage else None,
+            session_tokens=result.token_usage.session_tokens
+            if result.token_usage
+            else None,
             active_context_tokens=(
                 result.token_usage.active_context_tokens if result.token_usage else None
             ),
@@ -513,7 +517,9 @@ def build_chat_context(screen: ChatScreen) -> ToolContext:
     )
 
 
-def build_chat_system_prompt_for_screen(screen: ChatScreen, registry: ToolRegistry) -> str:
+def build_chat_system_prompt_for_screen(
+    screen: ChatScreen, registry: ToolRegistry
+) -> str:
     """Build the repository-chat system prompt from the active registry."""
     return build_chat_system_prompt(
         tool_registry=registry,

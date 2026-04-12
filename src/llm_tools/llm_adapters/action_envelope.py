@@ -39,10 +39,7 @@ class _EnvelopeModeMixin(BaseModel):
         has_actions = len(actions) > 0
         has_final_response = self.final_response is not None
 
-        if (
-            isinstance(self.final_response, str)
-            and self.final_response.strip() == ""
-        ):
+        if isinstance(self.final_response, str) and self.final_response.strip() == "":
             raise ValueError("final_response must not be empty.")
         if has_actions == has_final_response:
             raise ValueError(
@@ -168,7 +165,9 @@ class ActionEnvelopeAdapter:
                 ToolInvocationRequest(tool_name=tool_name, arguments=arguments)
             )
 
-        final_response = self._normalize_payload(getattr(envelope, "final_response", None))
+        final_response = self._normalize_payload(
+            getattr(envelope, "final_response", None)
+        )
         return ParsedModelResponse(
             invocations=invocations,
             final_response=final_response,

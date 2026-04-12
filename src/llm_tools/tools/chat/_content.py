@@ -58,7 +58,9 @@ def load_readable_content(path: Path) -> LoadedReadableContent:
     """Return deterministic readable content for one file."""
     text_content = read_searchable_text(path)
     if text_content is not None:
-        return LoadedReadableContent(read_kind="text", status="ok", content=text_content)
+        return LoadedReadableContent(
+            read_kind="text", status="ok", content=text_content
+        )
 
     if path.suffix.lower() not in MARKITDOWN_EXTENSIONS:
         return LoadedReadableContent(

@@ -25,7 +25,9 @@ def format_final_response(response: ChatFinalResponse) -> str:
     if response.citations:
         sections.append(
             "Citations:\n"
-            + "\n".join(f"- {format_citation(citation)}" for citation in response.citations)
+            + "\n".join(
+                f"- {format_citation(citation)}" for citation in response.citations
+            )
         )
     if response.uncertainty:
         sections.append(
@@ -50,7 +52,9 @@ def format_final_response_metadata(response: ChatFinalResponse) -> str:
     if response.citations:
         parts.append(
             "Citations:\n"
-            + "\n".join(f"- {format_citation(citation)}" for citation in response.citations)
+            + "\n".join(
+                f"- {format_citation(citation)}" for citation in response.citations
+            )
         )
     if response.uncertainty:
         parts.append(

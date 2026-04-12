@@ -44,7 +44,9 @@ def _context(tmp_path: Path) -> ToolContext:
         metadata={
             "source_filters": {"include_hidden": False},
             "session_config": ChatSessionConfig().model_dump(mode="json"),
-            "tool_limits": ChatToolLimits(max_tool_result_chars=500).model_dump(mode="json"),
+            "tool_limits": ChatToolLimits(max_tool_result_chars=500).model_dump(
+                mode="json"
+            ),
         },
     )
 
@@ -94,7 +96,9 @@ def test_chat_session_runner_executes_tool_then_returns_final_response(
     assert len(result_event.result.session_state.turns) == 1
 
 
-def test_chat_session_runner_returns_continuation_for_tool_budget(tmp_path: Path) -> None:
+def test_chat_session_runner_returns_continuation_for_tool_budget(
+    tmp_path: Path,
+) -> None:
     config = ChatSessionConfig(max_tool_calls_per_round=1)
     runner = run_interactive_chat_session_turn(
         user_message="Need more tools",
@@ -105,7 +109,10 @@ def test_chat_session_runner_returns_continuation_for_tool_budget(tmp_path: Path
                 ParsedModelResponse(
                     invocations=[
                         {"tool_name": "list_directory", "arguments": {"path": "."}},
-                        {"tool_name": "find_files", "arguments": {"path": ".", "pattern": "**/*.py"}},
+                        {
+                            "tool_name": "find_files",
+                            "arguments": {"path": ".", "pattern": "**/*.py"},
+                        },
                     ]
                 )
             ]
