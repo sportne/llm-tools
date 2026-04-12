@@ -1,0 +1,415 @@
+"""Additional branch-coverage tests for the Textual chat app."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+pytest.importorskip("textual")
+
+from textual.widgets import Input, Static
+
+from llm_tools.apps.textual_chat import __main__ as chat_main_module
+from llm_tools.apps.textual_chat.app import ChatApp, run_chat_app
+from llm_tools.apps.textual_chat.config import load_textual_chat_config
+from llm_tools.apps.textual_chat.controller import (
+    build_chat_context,
+    build_chat_executor,
+    build_chat_system_prompt_for_screen,
+    create_provider,
+)
+from llm_tools.apps.textual_chat.models import (
+    ChatCredentialPromptMetadata,
+    ProviderPreset,
+    TextualChatConfig,
+)
+from llm_tools.apps.textual_chat.screens import (
+    ComposerTextArea,
+    CredentialModal,
+    InterruptConfirmModal,
+    TranscriptCopyModal,
+)
+from llm_tools.workflow_api import (
+    ChatSessionState,
+    ChatTokenUsage,
+    ChatWorkflowResultEvent,
+    ChatWorkflowTurnResult,
+)
+
+
+class _ProviderOk:
+    def __init__(self, models: list[str] | None = None) -> None:
+        self._models = models or ["demo-model"]
+
+    def list_available_models(self) -> list[str]:
+        return self._models
+
+
+class _ProviderBoom:
+    def list_available_models(self) -> list[str]:
+        raise RuntimeError("listing failed")
+
+
+class _Cancelable:
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+def test_textual_chat_config_errors_and_model_metadata(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.yaml"
+    with pytest.raises(ValueError):
+        load_textual_chat_config(missing)
+
+    directory = tmp_path / "dir"
+    directory.mkdir()
+    with pytest.raises(ValueError):
+        load_textual_chat_config(directory)
+
+    invalid_yaml = tmp_path / "bad.yaml"
+    invalid_yaml.write_text(":\n- [", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_textual_chat_config(invalid_yaml)
+
+    bad_root = tmp_path / "list.yaml"
+    bad_root.write_text("- item\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_textual_chat_config(bad_root)
+
+    bad_section = tmp_path / "section.yaml"
+    bad_section.write_text("llm: []\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_textual_chat_config(bad_section)
+
+    config = TextualChatConfig()
+    assert config.llm.credential_prompt_metadata().expects_api_key is False
+    openai_config = config.model_copy(
+        update={
+            "llm": config.llm.model_copy(update={"provider": ProviderPreset.OPENAI})
+        }
+    )
+    metadata = openai_config.llm.credential_prompt_metadata()
+    assert metadata.expects_api_key is True
+    assert metadata.api_key_env_var == "OPENAI_API_KEY"
+
+
+def test_textual_chat_provider_factory_and_main_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    openai_calls: list[dict[str, object]] = []
+    ollama_calls: list[dict[str, object]] = []
+    custom_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        "llm_tools.apps.textual_chat.controller.OpenAICompatibleProvider.for_openai",
+        lambda **kwargs: openai_calls.append(kwargs) or SimpleNamespace(kind="openai"),
+    )
+    monkeypatch.setattr(
+        "llm_tools.apps.textual_chat.controller.OpenAICompatibleProvider.for_ollama",
+        lambda **kwargs: ollama_calls.append(kwargs) or SimpleNamespace(kind="ollama"),
+    )
+    create_provider(
+        TextualChatConfig().llm.model_copy(update={"provider": ProviderPreset.OPENAI}),
+        api_key="secret",
+        model_name="gpt-demo",
+    )
+    create_provider(
+        TextualChatConfig().llm.model_copy(update={"provider": ProviderPreset.OLLAMA}),
+        api_key=None,
+        model_name="llama-demo",
+    )
+
+    class _CustomProvider:
+        @classmethod
+        def for_openai(cls, **kwargs: object) -> object:
+            return SimpleNamespace(kind="openai-from-custom", kwargs=kwargs)
+
+        @classmethod
+        def for_ollama(cls, **kwargs: object) -> object:
+            return SimpleNamespace(kind="ollama-from-custom", kwargs=kwargs)
+
+        def __init__(self, **kwargs: object) -> None:
+            custom_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        "llm_tools.apps.textual_chat.controller.OpenAICompatibleProvider",
+        _CustomProvider,
+    )
+    create_provider(
+        TextualChatConfig().llm.model_copy(
+            update={
+                "provider": ProviderPreset.CUSTOM_OPENAI_COMPATIBLE,
+                "api_base_url": "http://custom/v1",
+            }
+        ),
+        api_key="secret",
+        model_name="custom-demo",
+    )
+    with pytest.raises(ValueError):
+        create_provider(
+            TextualChatConfig().llm.model_copy(
+                update={
+                    "provider": ProviderPreset.CUSTOM_OPENAI_COMPATIBLE,
+                    "api_base_url": None,
+                }
+            ),
+            api_key=None,
+            model_name="custom-demo",
+        )
+    assert openai_calls and ollama_calls and custom_calls
+
+    called: list[int] = []
+    monkeypatch.setattr(
+        "llm_tools.apps.textual_chat.__main__._main",
+        lambda: called.append(1) or 7,
+    )
+    assert chat_main_module.main() == 7
+    assert called == [1]
+
+    run_called: list[object] = []
+    monkeypatch.setattr(
+        "llm_tools.apps.textual_chat.app.ChatApp.run",
+        lambda self: run_called.append(self),
+    )
+    assert run_chat_app(root_path=Path("."), config=TextualChatConfig()) == 0
+    assert len(run_called) == 1
+
+
+def test_textual_chat_screen_widgets_and_controller_branches(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            root_path=tmp_path,
+            config=TextualChatConfig(),
+            provider=_ProviderOk(),
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = app.screen
+            screen._run_turn_worker = lambda raw: None  # type: ignore[method-assign]
+
+            screen.query_one("#composer", ComposerTextArea).load_text("draft")
+            screen.handle_composer_submit()
+            screen.handle_send_button()
+            screen.handle_stop_button()
+            screen._busy = False
+
+            screen._controller.set_status("thinking")
+            screen._controller.set_status("thinking")
+            screen._controller._flush_pending_status()
+            screen._controller._advance_status_animation()
+            screen._controller.set_status("")
+            screen._controller.update_footer_metrics(
+                session_tokens=2,
+                active_context_tokens=3,
+                confidence=0.4,
+            )
+            assert "confidence: 0.40" in str(
+                screen.query_one("#footer-bar", Static).renderable
+            )
+
+            screen._controller._show_available_models()
+            assert "Available models:" in screen._controller.transcript_copy_text()
+
+            screen._provider = _ProviderBoom()
+            screen._controller._show_available_models()
+            screen._provider = _ProviderOk(models=[])
+            screen._controller._show_available_models()
+            screen._provider = None
+            screen._controller._show_available_models()
+
+            switched: list[str] = []
+            screen._create_provider = lambda config, api_key, model_name: (
+                switched.append(model_name) or _ProviderOk()
+            )
+            screen._provider = _ProviderOk()
+            screen._controller._switch_active_model(screen._active_model_name)
+            screen._controller._switch_active_model("")
+            screen._controller._switch_active_model("next-model")
+            assert "next-model" in switched
+
+            screen._busy = True
+            screen._controller._switch_active_model("blocked-model")
+            screen._busy = False
+            screen._create_provider = lambda config, api_key, model_name: (
+                _ for _ in ()
+            ).throw(RuntimeError("bad switch"))
+            screen._controller._switch_active_model("bad-model")
+
+            screen._controller.handle_inline_command("/help")
+            screen._controller.handle_inline_command("/copy")
+            assert app.screen_stack[-1].id == "transcript-copy-modal"
+            app.pop_screen()
+            assert screen._controller.handle_inline_command("unknown") is False
+
+            exited = {"value": False}
+            original_exit = app.exit
+            app.exit = lambda *args, **kwargs: exited.__setitem__("value", True)
+            assert screen._controller.handle_inline_command("quit") is True
+            assert exited["value"] is True
+            app.exit = original_exit
+
+            screen._active_runner = _Cancelable()
+            screen._controller.cancel_active_turn(status_text="stopping")
+            assert screen._active_runner.cancelled is True
+            screen._active_runner = None
+            screen._controller.cancel_active_turn(status_text="stopping")
+
+            screen._busy = True
+            screen._controller.submit_draft("/model x")
+            screen._controller.submit_draft("hello")
+            assert isinstance(app.screen_stack[-1], InterruptConfirmModal)
+            app.pop_screen()
+            screen._busy = False
+            screen._controller.handle_interrupt_confirmation(True)
+            screen._controller.handle_interrupt_confirmation(False)
+
+            screen._provider = _ProviderOk()
+            captured: list[str] = []
+            screen._run_turn_worker = lambda raw: captured.append(raw)  # type: ignore[method-assign]
+            screen._controller.submit_draft("hello")
+            assert captured == ["hello"]
+            assert screen._busy is True
+
+            screen._controller.handle_turn_error("boom")
+            assert screen._busy is False
+
+            screen._create_provider = lambda config, api_key, model_name: _ProviderOk()
+            screen._provider = None
+            screen._credential_prompt_completed = True
+            assert screen._controller.ensure_provider_ready() is True
+            screen._controller.initialize_provider()
+
+            screen._pending_interrupt_draft = "carry"
+            called_submit: list[str] = []
+            original_submit = screen._controller.submit_draft
+            screen._controller.submit_draft = lambda raw: called_submit.append(raw)  # type: ignore[method-assign]
+            result = ChatWorkflowTurnResult(
+                status="needs_continuation",
+                new_messages=[{"role": "assistant", "content": "partial"}],
+                continuation_reason="need more",
+                token_usage=ChatTokenUsage(
+                    total_tokens=1, session_tokens=2, active_context_tokens=3
+                ),
+                session_state=ChatSessionState(),
+                context_warning="trimmed",
+            )
+            screen._controller.handle_turn_result(
+                ChatWorkflowResultEvent(result=result).model_dump(mode="json")
+            )
+            assert called_submit == ["carry"]
+            screen._controller.submit_draft = original_submit  # type: ignore[method-assign]
+
+            interrupted = ChatWorkflowTurnResult(
+                status="interrupted",
+                new_messages=[
+                    {
+                        "role": "assistant",
+                        "content": "partial",
+                        "completion_state": "interrupted",
+                    }
+                ],
+                interruption_reason="stop",
+                token_usage=ChatTokenUsage(total_tokens=1),
+                session_state=ChatSessionState(),
+            )
+            screen._controller.handle_turn_result(
+                ChatWorkflowResultEvent(result=interrupted).model_dump(mode="json")
+            )
+            screen._controller.handle_turn_status(
+                {"event_type": "status", "status": "thinking"}
+            )
+
+            registry, executor = build_chat_executor()
+            assert registry.list_registered_tools()
+            assert executor is not None
+            context = build_chat_context(screen)
+            assert context.workspace == str(tmp_path)
+            assert "tool_limits" in context.metadata
+            prompt = build_chat_system_prompt_for_screen(screen, registry)
+            assert "Available tools:" in prompt
+
+            app.exit()
+            await pilot.pause()
+
+    asyncio.run(_run())
+
+
+def test_textual_chat_modals_and_credential_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _run() -> None:
+        config = TextualChatConfig()
+        config = config.model_copy(
+            update={
+                "llm": config.llm.model_copy(update={"provider": ProviderPreset.OPENAI})
+            }
+        )
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        app = ChatApp(root_path=tmp_path, config=config, provider=None)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.screen_stack[-1].id == "credential-modal"
+            modal = app.screen_stack[-1]
+            modal.query_one("#credential-input", Input).value = "secret"
+            modal.handle_submit()
+            await pilot.pause()
+
+            copy_modal = TranscriptCopyModal("hello")
+            app.push_screen(copy_modal)
+            await pilot.pause()
+            copy_modal.handle_copy_selection()
+            copy_modal.handle_copy_all()
+            copy_modal.handle_close()
+
+            confirm_modal = InterruptConfirmModal()
+            app.push_screen(confirm_modal)
+            await pilot.pause()
+            confirm_modal.handle_confirm()
+            confirm_modal.handle_cancel()
+
+            cred_modal = CredentialModal(ChatCredentialPromptMetadata())
+            app.push_screen(cred_modal)
+            await pilot.pause()
+            cred_modal.handle_cancel()
+
+            app.exit()
+            await pilot.pause()
+
+    asyncio.run(_run())
+
+
+def test_textual_chat_prompt_builder_and_strip_titles() -> None:
+    from llm_tools.apps.textual_chat.prompts import (
+        _strip_schema_titles,
+        build_chat_system_prompt,
+    )
+    from llm_tools.tool_api import ToolRegistry
+    from llm_tools.tools import register_chat_tools
+    from llm_tools.tools.chat import ChatToolLimits
+
+    payload = {
+        "title": "Root",
+        "properties": {
+            "child": {"title": "Child", "type": "string"},
+            "items": [{"title": "Nested", "type": "number"}],
+        },
+    }
+    stripped = _strip_schema_titles(payload)
+    assert "title" not in stripped
+    assert "title" not in stripped["properties"]["child"]
+    assert "title" not in stripped["properties"]["items"][0]
+
+    registry = ToolRegistry()
+    register_chat_tools(registry)
+    prompt = build_chat_system_prompt(
+        tool_registry=registry,
+        tool_limits=ChatToolLimits(),
+    )
+    assert "Available tools:" in prompt
+    assert "Final response fields:" in prompt
+    assert "missing_information" in prompt

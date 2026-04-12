@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 from pydantic import (
     BaseModel,
@@ -32,6 +32,7 @@ class _EnvelopeModeMixin(BaseModel):
     """Enforce one-turn output mode consistency."""
 
     model_config = ConfigDict(extra="forbid")
+    final_response: Any | None = None
 
     @model_validator(mode="after")
     def _validate_mode(self) -> _EnvelopeModeMixin:
@@ -82,11 +83,14 @@ class ActionEnvelopeAdapter:
             action_models.append(self._build_action_model(spec.name, input_model))
 
         if not action_models:
-            envelope_model = create_model(
-                "ActionEnvelopeNoTools",
-                __base__=_NoActionsEnvelopeMixin,
-                actions=(list[dict[str, Any]], Field(default_factory=list)),
-                final_response=(_optional_annotation(final_response_model), None),
+            envelope_model = cast(
+                type[BaseModel],
+                create_model(
+                    "ActionEnvelopeNoTools",
+                    __base__=_NoActionsEnvelopeMixin,
+                    actions=(list[dict[str, Any]], Field(default_factory=list)),
+                    final_response=(_optional_annotation(final_response_model), None),
+                ),
             )
             envelope_model.__module__ = __name__
             return envelope_model
@@ -101,11 +105,14 @@ class ActionEnvelopeAdapter:
 
         actions_annotation = list[action_union]  # type: ignore[valid-type]
 
-        envelope_model = create_model(
-            "ActionEnvelope",
-            __base__=_EnvelopeModeMixin,
-            actions=(actions_annotation, Field(default_factory=list)),
-            final_response=(_optional_annotation(final_response_model), None),
+        envelope_model = cast(
+            type[BaseModel],
+            create_model(
+                "ActionEnvelope",
+                __base__=_EnvelopeModeMixin,
+                actions=(actions_annotation, Field(default_factory=list)),
+                final_response=(_optional_annotation(final_response_model), None),
+            ),
         )
         envelope_model.__module__ = __name__
         return envelope_model

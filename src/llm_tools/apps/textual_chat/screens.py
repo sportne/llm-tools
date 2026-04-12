@@ -5,6 +5,7 @@ from __future__ import annotations
 from textual import events, on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static, TextArea
@@ -89,7 +90,13 @@ class TranscriptCopyModal(ModalScreen[None]):
                 yield Button("Close", id="transcript-copy-close")
 
     def on_mount(self) -> None:
-        self.query_one("#transcript-copy-area", TextArea).focus()
+        self.call_after_refresh(self._focus_text_area)
+
+    def _focus_text_area(self) -> None:
+        try:
+            self.query_one("#transcript-copy-area", TextArea).focus()
+        except NoMatches:
+            return
 
     def _set_status(self, text: str) -> None:
         self.query_one("#transcript-copy-status", Static).update(text)
