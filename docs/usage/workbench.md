@@ -61,6 +61,8 @@ The workbench supports:
 
 For provider-backed turns it uses `OpenAICompatibleProvider`, then passes the
 parsed result into `WorkflowExecutor` when execution-after-parse is enabled.
+Provider and workflow calls use async execution paths under the hood while
+preserving the same visible one-turn behavior.
 
 ## Direct Tool Execution
 

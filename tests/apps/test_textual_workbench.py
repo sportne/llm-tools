@@ -40,7 +40,9 @@ class _SlowExportController(WorkbenchController):
 
 
 class _FakeModelTurnController(WorkbenchController):
-    def run_model_turn(self, config, *, prompt):  # type: ignore[override]
+    async def run_model_turn_async(  # type: ignore[override]
+        self, config, *, prompt
+    ):
         del config, prompt
         parsed = ParsedModelResponse(final_response="done")
         return ModelTurnExecutionResult(
@@ -51,7 +53,9 @@ class _FakeModelTurnController(WorkbenchController):
 
 
 class _FakeToolCallController(WorkbenchController):
-    def run_model_turn(self, config, *, prompt):  # type: ignore[override]
+    async def run_model_turn_async(  # type: ignore[override]
+        self, config, *, prompt
+    ):
         del config, prompt
         parsed = ParsedModelResponse(
             invocations=[{"tool_name": "read_file", "arguments": {"path": "demo.txt"}}]
@@ -88,25 +92,31 @@ class _ErrorController(WorkbenchController):
 
 
 class _WorkerErrorController(WorkbenchController):
-    def run_model_turn(self, config, *, prompt):  # type: ignore[override]
+    async def run_model_turn_async(  # type: ignore[override]
+        self, config, *, prompt
+    ):
         del config, prompt
         raise ValueError("model worker boom")
 
-    def execute_direct_tool(self, config, *, tool_name, arguments_text):  # type: ignore[override]
+    async def execute_direct_tool_async(  # type: ignore[override]
+        self, config, *, tool_name, arguments_text
+    ):
         del config, tool_name, arguments_text
         raise ValueError("direct worker boom")
 
-    def resolve_pending_approval(self, config, *, approval_id, approved):  # type: ignore[override]
+    async def resolve_pending_approval_async(  # type: ignore[override]
+        self, config, *, approval_id, approved
+    ):
         del config, approval_id, approved
         raise ValueError("resolve worker boom")
 
-    def finalize_expired_approvals(self, config):  # type: ignore[override]
+    async def finalize_expired_approvals_async(self, config):  # type: ignore[override]
         del config
         raise ValueError("finalize worker boom")
 
 
 class _FinalizeSuccessController(WorkbenchController):
-    def finalize_expired_approvals(self, config):  # type: ignore[override]
+    async def finalize_expired_approvals_async(self, config):  # type: ignore[override]
         del config
         return ApprovalFinalizeResult(workflow_results=[])
 

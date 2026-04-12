@@ -296,13 +296,44 @@ Step 0 note:
 
 ---
 
-## 12. Deferred / post-v0.1
+## 12. Approval workflow outcomes
 
-- [-] Async execution support
+### 12.1 Workflow outcomes
+- [x] Add canonical approval-requested workflow outcomes
+- [x] Add pending approval metadata model
+- [x] Add approval resolve and timeout-finalization hooks
+
+### 12.2 Workbench approval UX
+- [x] Add approval queue and selected-request inspector
+- [x] Add approve/deny/finalize-expired actions
+- [x] Preserve in-memory approval state per workbench session
+
+---
+
+## 13. End-to-end async operation
+
+### 13.1 Tool and runtime contract
+- [x] Support tool implementations with `invoke` and/or `ainvoke`
+- [x] Add `ToolRuntime.execute_async(...)`
+- [x] Add sync/async bridging rules for sync-only and async-only tools
+
+### 13.2 Provider and workflow async APIs
+- [x] Add async provider entrypoints for all interaction modes
+- [x] Add async workflow execution/resume/finalize entrypoints
+- [x] Preserve existing synchronous public APIs
+
+### 13.3 Workbench async execution
+- [x] Add async controller execution methods
+- [x] Use async workers for model turn and execution actions
+- [x] Preserve current UI behavior and approval queue semantics
+
+---
+
+## 14. Deferred / post-v0.1
+
 - [-] Manifest-based tool discovery
 - [-] Plugin ecosystem support
 - [-] Remote execution
-- [-] Approval workflow UX
 - [-] Rich redaction framework
 - [-] Workflow engine implementation
 - [-] Version-aware multi-registration

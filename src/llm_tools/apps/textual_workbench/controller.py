@@ -224,6 +224,41 @@ class WorkbenchController:
             tool_result=self._latest_tool_result(workflow_result),
         )
 
+    async def execute_direct_tool_async(
+        self,
+        config: WorkbenchConfigState,
+        *,
+        tool_name: str,
+        arguments_text: str,
+    ) -> DirectExecutionResult:
+        """Asynchronously execute one tool through workflow execution."""
+        normalized_tool_name = tool_name.strip()
+        if normalized_tool_name == "":
+            raise ValueError("A tool name is required for direct execution.")
+
+        arguments = self._parse_json_object(
+            arguments_text,
+            error_prefix="Direct tool arguments",
+        )
+        context = self._make_context(config, invocation_id="workbench-direct-tool")
+        executor, session_rebuilt = self._get_or_rebuild_session(config)
+        workflow_result = await executor.execute_parsed_response_async(
+            ParsedModelResponse(
+                invocations=[
+                    ToolInvocationRequest(
+                        tool_name=normalized_tool_name,
+                        arguments=arguments,
+                    )
+                ]
+            ),
+            context,
+        )
+        return DirectExecutionResult(
+            session_rebuilt=session_rebuilt,
+            workflow_result=workflow_result,
+            tool_result=self._latest_tool_result(workflow_result),
+        )
+
     def run_model_turn(
         self,
         config: WorkbenchConfigState,
@@ -278,6 +313,62 @@ class WorkbenchController:
             workflow_result=workflow_result,
         )
 
+    async def run_model_turn_async(
+        self,
+        config: WorkbenchConfigState,
+        *,
+        prompt: str,
+    ) -> ModelTurnExecutionResult:
+        """Asynchronously run one provider-backed model turn."""
+        normalized_prompt = prompt.strip()
+        if normalized_prompt == "":
+            raise ValueError("A prompt is required to run a model turn.")
+
+        adapter = self._build_adapter(config.mode)
+        policy_context = self._make_context(
+            config, invocation_id="workbench-model-turn"
+        )
+        executor, session_rebuilt = self._get_or_rebuild_session(config)
+        exported_tools = executor.export_tools(
+            adapter,
+            context=policy_context,
+            include_requires_approval=True,
+        )
+        provider = self._build_provider(config)
+        messages = [{"role": "user", "content": normalized_prompt}]
+
+        if config.mode is WorkbenchMode.NATIVE_TOOL_CALLING:
+            parsed = await provider.run_native_tool_calling_async(
+                adapter=adapter,  # type: ignore[arg-type]
+                messages=messages,
+                tool_descriptions=exported_tools,
+            )
+        elif config.mode is WorkbenchMode.STRUCTURED_OUTPUT:
+            parsed = await provider.run_structured_output_async(
+                adapter=adapter,  # type: ignore[arg-type]
+                messages=messages,
+                tool_descriptions=exported_tools,
+            )
+        else:
+            parsed = await provider.run_prompt_schema_async(
+                adapter=adapter,  # type: ignore[arg-type]
+                messages=messages,
+                tool_descriptions=exported_tools,
+            )
+
+        workflow_result = None
+        if config.execute_after_parse:
+            workflow_result = await executor.execute_parsed_response_async(
+                parsed, policy_context
+            )
+
+        return ModelTurnExecutionResult(
+            session_rebuilt=session_rebuilt,
+            exported_tools=exported_tools,
+            parsed_response=parsed,
+            workflow_result=workflow_result,
+        )
+
     def resolve_pending_approval(
         self,
         config: WorkbenchConfigState,
@@ -296,6 +387,24 @@ class WorkbenchController:
             workflow_result=workflow_result,
         )
 
+    async def resolve_pending_approval_async(
+        self,
+        config: WorkbenchConfigState,
+        *,
+        approval_id: str,
+        approved: bool,
+    ) -> ApprovalResolutionResult:
+        """Asynchronously resolve one pending approval and continue execution."""
+        executor, session_rebuilt = self._get_or_rebuild_session(config)
+        workflow_result = await executor.resolve_pending_approval_async(
+            approval_id=approval_id,
+            approved=approved,
+        )
+        return ApprovalResolutionResult(
+            session_rebuilt=session_rebuilt,
+            workflow_result=workflow_result,
+        )
+
     def finalize_expired_approvals(
         self,
         config: WorkbenchConfigState,
@@ -305,6 +414,17 @@ class WorkbenchController:
         return ApprovalFinalizeResult(
             session_rebuilt=session_rebuilt,
             workflow_results=executor.finalize_expired_approvals(),
+        )
+
+    async def finalize_expired_approvals_async(
+        self,
+        config: WorkbenchConfigState,
+    ) -> ApprovalFinalizeResult:
+        """Asynchronously finalize approvals past their expiration."""
+        executor, session_rebuilt = self._get_or_rebuild_session(config)
+        return ApprovalFinalizeResult(
+            session_rebuilt=session_rebuilt,
+            workflow_results=await executor.finalize_expired_approvals_async(),
         )
 
     def build_policy(self, config: WorkbenchConfigState) -> ToolPolicy:

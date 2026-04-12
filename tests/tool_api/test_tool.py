@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 
 import pytest
@@ -35,6 +36,24 @@ def test_valid_tool_subclass_exposes_expected_contract() -> None:
     result = tool.invoke(ToolContext(invocation_id="inv-1"), ExampleInput(value="hi"))
     assert isinstance(result, ExampleOutput)
     assert result.value == "inv-1:hi"
+
+
+def test_async_only_tool_subclass_is_valid() -> None:
+    class AsyncEchoTool(Tool[ExampleInput, ExampleOutput]):
+        spec = ToolSpec(name="async-echo", description="Async echo tool.")
+        input_model = ExampleInput
+        output_model = ExampleOutput
+
+        async def ainvoke(
+            self, context: ToolContext, args: ExampleInput
+        ) -> ExampleOutput:
+            return ExampleOutput(value=f"{context.invocation_id}:{args.value}")
+
+    tool = AsyncEchoTool()
+    result = asyncio.run(
+        tool.ainvoke(ToolContext(invocation_id="inv-async"), ExampleInput(value="hi"))
+    )
+    assert result.value == "inv-async:hi"
 
 
 def test_abstract_intermediate_subclass_can_defer_required_class_attributes() -> None:
@@ -129,3 +148,18 @@ def test_invalid_tool_subclasses_fail_at_definition_time(
 
     with pytest.raises(TypeError, match=message):
         type(tool_name, (Tool,), namespace_with_invoke)
+
+
+def test_tool_subclass_without_invoke_or_ainvoke_is_rejected() -> None:
+    with pytest.raises(TypeError, match="at least one execution method"):
+        type(
+            "MissingExecutionMethodsTool",
+            (Tool,),
+            {
+                "__module__": __name__,
+                "__annotations__": {},
+                "spec": ToolSpec(name="missing-exec", description="desc"),
+                "input_model": ExampleInput,
+                "output_model": ExampleOutput,
+            },
+        )

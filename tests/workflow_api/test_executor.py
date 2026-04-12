@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from types import ModuleType
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 import llm_tools.tools.git.tools as git_tools
 from llm_tools.llm_adapters import (
@@ -20,10 +21,12 @@ from llm_tools.llm_adapters import (
 from llm_tools.tool_api import (
     ErrorCode,
     SideEffectClass,
+    Tool,
     ToolContext,
     ToolPolicy,
     ToolRegistry,
     ToolResult,
+    ToolSpec,
 )
 from llm_tools.tools.atlassian import register_atlassian_tools
 from llm_tools.tools.filesystem import register_filesystem_tools
@@ -35,6 +38,30 @@ from llm_tools.workflow_api.models import (
     WorkflowInvocationOutcome,
     WorkflowInvocationStatus,
 )
+
+
+class _AsyncEchoInput(BaseModel):
+    value: str
+
+
+class _AsyncEchoOutput(BaseModel):
+    value: str
+
+
+class _AsyncEchoTool(Tool[_AsyncEchoInput, _AsyncEchoOutput]):
+    spec = ToolSpec(
+        name="async_echo",
+        description="Async echo tool for workflow tests.",
+        side_effects=SideEffectClass.NONE,
+    )
+    input_model = _AsyncEchoInput
+    output_model = _AsyncEchoOutput
+
+    async def ainvoke(
+        self, context: ToolContext, args: _AsyncEchoInput
+    ) -> _AsyncEchoOutput:
+        context.logs.append("async-echo")
+        return _AsyncEchoOutput(value=f"{context.invocation_id}:{args.value}")
 
 
 def _executor(registry: ToolRegistry, *, allow_write: bool = False) -> WorkflowExecutor:
@@ -855,3 +882,111 @@ def test_workflow_executor_executes_git_and_jira_paths(
 
     assert _executed_tool_results(git_result)[0].output["status_text"] == "ok\n"
     assert _executed_tool_results(jira_result)[0].output["issues"][0]["key"] == "DEMO-1"
+
+
+def test_workflow_executor_async_executes_sync_tooling_paths(tmp_path: str) -> None:
+    async def run() -> None:
+        registry = ToolRegistry()
+        register_filesystem_tools(registry)
+        executor = _executor(registry, allow_write=True)
+
+        setup = await executor.execute_model_output_async(
+            StructuredOutputAdapter(),
+            {
+                "actions": [
+                    {
+                        "tool_name": "write_file",
+                        "arguments": {
+                            "path": "docs/note.txt",
+                            "content": "async hello",
+                            "create_parents": True,
+                        },
+                    }
+                ]
+            },
+            ToolContext(invocation_id="async-setup", workspace=str(tmp_path)),
+        )
+        result = await executor.execute_model_output_async(
+            StructuredOutputAdapter(),
+            {
+                "actions": [
+                    {"tool_name": "read_file", "arguments": {"path": "docs/note.txt"}}
+                ]
+            },
+            ToolContext(invocation_id="async-turn", workspace=str(tmp_path)),
+        )
+
+        assert _executed_tool_results(setup)[0].ok is True
+        executed = _executed_tool_results(result)[0]
+        assert executed.ok is True
+        assert executed.output["content"] == "async hello"
+
+    asyncio.run(run())
+
+
+def test_workflow_executor_async_handles_async_only_tools() -> None:
+    async def run() -> None:
+        registry = ToolRegistry()
+        registry.register(_AsyncEchoTool())
+        executor = _executor(registry)
+
+        result = await executor.execute_parsed_response_async(
+            ParsedModelResponse(
+                invocations=[
+                    {"tool_name": "async_echo", "arguments": {"value": "hello"}}
+                ]
+            ),
+            ToolContext(invocation_id="async-only"),
+        )
+
+        executed = _executed_tool_results(result)[0]
+        assert executed.ok is True
+        assert executed.output["value"] == "async-only:hello"
+        assert executed.logs == ["async-echo"]
+
+    asyncio.run(run())
+
+
+def test_workflow_executor_async_approval_roundtrip(tmp_path: str) -> None:
+    async def run() -> None:
+        registry = ToolRegistry()
+        register_filesystem_tools(registry)
+        executor = WorkflowExecutor(
+            registry,
+            policy=ToolPolicy(
+                allowed_side_effects={
+                    SideEffectClass.NONE,
+                    SideEffectClass.LOCAL_READ,
+                    SideEffectClass.LOCAL_WRITE,
+                },
+                require_approval_for={SideEffectClass.LOCAL_READ},
+            ),
+        )
+
+        initial = await executor.execute_model_output_async(
+            StructuredOutputAdapter(),
+            {
+                "actions": [
+                    {"tool_name": "list_directory", "arguments": {"path": "."}},
+                    {
+                        "tool_name": "write_file",
+                        "arguments": {"path": "after.txt", "content": "approved"},
+                    },
+                ]
+            },
+            ToolContext(invocation_id="async-approval", workspace=str(tmp_path)),
+        )
+
+        assert initial.outcomes[0].status is WorkflowInvocationStatus.APPROVAL_REQUESTED
+        approval_id = initial.outcomes[0].approval_request.approval_id  # type: ignore[union-attr]
+        resumed = await executor.resolve_pending_approval_async(
+            approval_id, approved=True
+        )
+
+        statuses = [outcome.status for outcome in resumed.outcomes]
+        assert statuses == [
+            WorkflowInvocationStatus.EXECUTED,
+            WorkflowInvocationStatus.EXECUTED,
+        ]
+
+    asyncio.run(run())

@@ -32,6 +32,9 @@ gateways.
 - `run_native_tool_calling(...)`
 - `run_structured_output(...)`
 - `run_prompt_schema(...)`
+- `run_native_tool_calling_async(...)`
+- `run_structured_output_async(...)`
+- `run_prompt_schema_async(...)`
 
 Each method:
 
@@ -41,6 +44,9 @@ Each method:
 4. parses it through the adapter into `ParsedModelResponse`
 
 Providers do not execute tools directly.
+
+The async methods use the OpenAI SDK's `AsyncOpenAI` client while preserving
+the same request/response semantics as the sync methods.
 
 ## Example
 
@@ -62,3 +68,14 @@ turn_result = executor.execute_parsed_response(parsed, context)
 ```
 
 For runnable samples, see the [examples directory](../../examples/README.md).
+
+Async usage follows the same shape with `await`:
+
+```python
+parsed = await provider.run_native_tool_calling_async(
+    adapter=adapter,
+    messages=[{"role": "user", "content": "Read README.md"}],
+    registry=registry,
+)
+turn_result = await executor.execute_parsed_response_async(parsed, context)
+```

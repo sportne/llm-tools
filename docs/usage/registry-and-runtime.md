@@ -51,6 +51,13 @@ result = runtime.execute(
 - normalized success/failure envelopes
 - execution record capture
 
+It provides both:
+
+- `execute(...)` for synchronous callers
+- `execute_async(...)` for asynchronous callers
+
+Execution semantics and result normalization are the same on both paths.
+
 ## Result Shape
 
 Runtime execution always returns a `ToolResult`.
@@ -89,4 +96,3 @@ executor = WorkflowExecutor(registry)
 
 It still stays one-turn scoped. It does not replan, loop, or make a second
 model call.
-

@@ -94,6 +94,23 @@ class WorkflowExecutor:
         )
         return WorkflowTurnResult(parsed_response=parsed_response, outcomes=outcomes)
 
+    async def execute_parsed_response_async(
+        self,
+        parsed_response: ParsedModelResponse,
+        context: ToolContext,
+    ) -> WorkflowTurnResult:
+        """Asynchronously execute parsed invocations or return a final response."""
+        if parsed_response.final_response is not None:
+            return WorkflowTurnResult(parsed_response=parsed_response)
+
+        outcomes = await self._execute_sequence_async(
+            parsed_response=parsed_response,
+            base_context=context,
+            start_index=1,
+            approved_indices=set(),
+        )
+        return WorkflowTurnResult(parsed_response=parsed_response, outcomes=outcomes)
+
     def execute_model_output(
         self,
         adapter: ModelOutputParsingAdapter,
@@ -103,6 +120,16 @@ class WorkflowExecutor:
         """Parse one model output and execute any resulting tool invocations."""
         parsed_response = adapter.parse_model_output(payload)
         return self.execute_parsed_response(parsed_response, context)
+
+    async def execute_model_output_async(
+        self,
+        adapter: ModelOutputParsingAdapter,
+        payload: object,
+        context: ToolContext,
+    ) -> WorkflowTurnResult:
+        """Asynchronously parse one model output and execute invocations."""
+        parsed_response = adapter.parse_model_output(payload)
+        return await self.execute_parsed_response_async(parsed_response, context)
 
     def list_pending_approvals(self) -> list[ApprovalRequest]:
         """Return pending approvals in insertion order."""
@@ -149,6 +176,47 @@ class WorkflowExecutor:
             outcomes=[denied_outcome, *remaining],
         )
 
+    async def resolve_pending_approval_async(
+        self,
+        approval_id: str,
+        approved: bool,
+        *,
+        now: datetime | None = None,
+    ) -> WorkflowTurnResult:
+        """Asynchronously resolve one pending approval and continue execution."""
+        del now
+        try:
+            state = self._pending_approvals.pop(approval_id)
+        except KeyError as exc:
+            raise ValueError(f"Unknown approval id: {approval_id}") from exc
+
+        if approved:
+            outcomes = await self._execute_sequence_async(
+                parsed_response=state.parsed_response,
+                base_context=state.base_context,
+                start_index=state.pending_index,
+                approved_indices={state.pending_index},
+            )
+            return WorkflowTurnResult(
+                parsed_response=state.parsed_response,
+                outcomes=outcomes,
+            )
+
+        denied_outcome = self._build_approval_outcome(
+            status=WorkflowInvocationStatus.APPROVAL_DENIED,
+            approval_request=state.approval_request,
+        )
+        remaining = await self._execute_sequence_async(
+            parsed_response=state.parsed_response,
+            base_context=state.base_context,
+            start_index=state.pending_index + 1,
+            approved_indices=set(),
+        )
+        return WorkflowTurnResult(
+            parsed_response=state.parsed_response,
+            outcomes=[denied_outcome, *remaining],
+        )
+
     def finalize_expired_approvals(
         self,
         *,
@@ -184,6 +252,41 @@ class WorkflowExecutor:
 
         return results
 
+    async def finalize_expired_approvals_async(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> list[WorkflowTurnResult]:
+        """Asynchronously finalize approvals past their deadline."""
+        current_time = now or self._utc_now()
+        expired_ids = [
+            approval_id
+            for approval_id, state in self._pending_approvals.items()
+            if state.expires_at <= current_time
+        ]
+
+        results: list[WorkflowTurnResult] = []
+        for approval_id in expired_ids:
+            state = self._pending_approvals.pop(approval_id)
+            timeout_outcome = self._build_approval_outcome(
+                status=WorkflowInvocationStatus.APPROVAL_TIMED_OUT,
+                approval_request=state.approval_request,
+            )
+            remaining = await self._execute_sequence_async(
+                parsed_response=state.parsed_response,
+                base_context=state.base_context,
+                start_index=state.pending_index + 1,
+                approved_indices=set(),
+            )
+            results.append(
+                WorkflowTurnResult(
+                    parsed_response=state.parsed_response,
+                    outcomes=[timeout_outcome, *remaining],
+                )
+            )
+
+        return results
+
     def _execute_sequence(
         self,
         *,
@@ -203,6 +306,41 @@ class WorkflowExecutor:
                 invocation_count=invocation_count,
             )
             outcome, pending_state = self._execute_one(
+                parsed_response=parsed_response,
+                base_context=base_context,
+                request=request,
+                index=index,
+                context=tool_context,
+                approval_override=index in approved_indices,
+            )
+            outcomes.append(outcome)
+            if pending_state is not None:
+                self._pending_approvals[pending_state.approval_request.approval_id] = (
+                    pending_state
+                )
+                break
+
+        return outcomes
+
+    async def _execute_sequence_async(
+        self,
+        *,
+        parsed_response: ParsedModelResponse,
+        base_context: ToolContext,
+        start_index: int,
+        approved_indices: set[int],
+    ) -> list[WorkflowInvocationOutcome]:
+        outcomes: list[WorkflowInvocationOutcome] = []
+        invocation_count = len(parsed_response.invocations)
+
+        for index in range(start_index, invocation_count + 1):
+            request = parsed_response.invocations[index - 1]
+            tool_context = self._make_tool_context(
+                base_context=base_context,
+                index=index,
+                invocation_count=invocation_count,
+            )
+            outcome, pending_state = await self._execute_one_async(
                 parsed_response=parsed_response,
                 base_context=base_context,
                 request=request,
@@ -265,6 +403,56 @@ class WorkflowExecutor:
         if approval_override and policy_decision.requires_approval:
             runtime = self._runtime_with_approval_override(tool)
         result = runtime.execute(request, context)
+        return self._build_executed_outcome(
+            index=index, request=request, result=result
+        ), None
+
+    async def _execute_one_async(
+        self,
+        *,
+        parsed_response: ParsedModelResponse,
+        base_context: ToolContext,
+        request: ToolInvocationRequest,
+        index: int,
+        context: ToolContext,
+        approval_override: bool,
+    ) -> tuple[WorkflowInvocationOutcome, _PendingApprovalState | None]:
+        try:
+            tool = self._registry.get(request.tool_name)
+            policy_decision = self._policy.evaluate(tool, context)
+        except Exception:
+            result = await self._runtime.execute_async(request, context)
+            return self._build_executed_outcome(
+                index=index, request=request, result=result
+            ), None
+
+        if policy_decision.requires_approval and not approval_override:
+            approval_request, expires_at = self._make_approval_request(
+                request=request,
+                index=index,
+                tool=tool,
+                policy_reason=policy_decision.reason,
+                policy_metadata=policy_decision.metadata,
+            )
+            pending_state = _PendingApprovalState(
+                approval_request=approval_request,
+                parsed_response=parsed_response.model_copy(deep=True),
+                base_context=base_context.model_copy(deep=True),
+                pending_index=index,
+                expires_at=expires_at,
+            )
+            return (
+                self._build_approval_outcome(
+                    status=WorkflowInvocationStatus.APPROVAL_REQUESTED,
+                    approval_request=approval_request,
+                ),
+                pending_state,
+            )
+
+        runtime = self._runtime
+        if approval_override and policy_decision.requires_approval:
+            runtime = self._runtime_with_approval_override(tool)
+        result = await runtime.execute_async(request, context)
         return self._build_executed_outcome(
             index=index, request=request, result=result
         ), None

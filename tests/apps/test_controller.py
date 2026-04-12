@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,21 @@ class _FakeProvider:
         type(self).last_mode = "prompt_schema"
         type(self).last_kwargs = kwargs
         return ParsedModelResponse(final_response="prompt ok")
+
+    async def run_native_tool_calling_async(self, **kwargs: Any) -> ParsedModelResponse:
+        type(self).last_mode = "native_tool_calling_async"
+        type(self).last_kwargs = kwargs
+        return ParsedModelResponse(final_response="native async ok")
+
+    async def run_structured_output_async(self, **kwargs: Any) -> ParsedModelResponse:
+        type(self).last_mode = "structured_output_async"
+        type(self).last_kwargs = kwargs
+        return ParsedModelResponse(final_response="structured async ok")
+
+    async def run_prompt_schema_async(self, **kwargs: Any) -> ParsedModelResponse:
+        type(self).last_mode = "prompt_schema_async"
+        type(self).last_kwargs = kwargs
+        return ParsedModelResponse(final_response="prompt async ok")
 
 
 def test_default_registry_contains_safe_builtins_only() -> None:
@@ -350,3 +366,87 @@ def test_build_policy_and_direct_execution_validation_cover_extra_branches() -> 
             tool_name="read_file",
             arguments_text='["not", "an", "object"]',
         )
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_mode", "expected_response"),
+    [
+        (
+            WorkbenchMode.NATIVE_TOOL_CALLING,
+            "native_tool_calling_async",
+            "native async ok",
+        ),
+        (
+            WorkbenchMode.STRUCTURED_OUTPUT,
+            "structured_output_async",
+            "structured async ok",
+        ),
+        (WorkbenchMode.PROMPT_SCHEMA, "prompt_schema_async", "prompt async ok"),
+    ],
+)
+def test_async_model_turn_routes_to_selected_provider_mode(
+    mode: WorkbenchMode,
+    expected_mode: str,
+    expected_response: str,
+) -> None:
+    async def run() -> None:
+        controller = WorkbenchController(provider_factory=_FakeProvider)
+        config = controller.default_config().model_copy(update={"mode": mode})
+        result = await controller.run_model_turn_async(config, prompt="hello")
+
+        assert _FakeProvider.last_mode == expected_mode
+        assert _FakeProvider.last_kwargs is not None
+        assert "tool_descriptions" in _FakeProvider.last_kwargs
+        assert "registry" not in _FakeProvider.last_kwargs
+        assert result.parsed_response.final_response == expected_response
+        assert isinstance(result.workflow_result, WorkflowTurnResult)
+        assert result.workflow_result.outcomes == []
+
+    asyncio.run(run())
+
+
+def test_async_direct_execution_and_approval_paths(tmp_path: Path) -> None:
+    async def run() -> None:
+        controller = WorkbenchController()
+        config = controller.default_config().model_copy(
+            update={
+                "workspace": str(tmp_path),
+                "allow_local_write": True,
+                "require_approval_for_local_read": True,
+            }
+        )
+
+        write_result = await controller.execute_direct_tool_async(
+            config,
+            tool_name="write_file",
+            arguments_text='{"path":"notes.txt","content":"hello"}',
+        )
+        pending = await controller.execute_direct_tool_async(
+            config,
+            tool_name="list_directory",
+            arguments_text='{"path":"."}',
+        )
+
+        assert write_result.tool_result is not None
+        assert write_result.tool_result.ok is True
+        assert pending.tool_result is None
+        assert (
+            pending.workflow_result.outcomes[0].status
+            is WorkflowInvocationStatus.APPROVAL_REQUESTED
+        )
+
+        queue = controller.list_pending_approvals(config)
+        denied = await controller.resolve_pending_approval_async(
+            config,
+            approval_id=queue[0].approval_id,
+            approved=False,
+        )
+        finalized = await controller.finalize_expired_approvals_async(config)
+
+        assert (
+            denied.workflow_result.outcomes[0].status
+            is WorkflowInvocationStatus.APPROVAL_DENIED
+        )
+        assert finalized.workflow_results == []
+
+    asyncio.run(run())

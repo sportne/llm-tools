@@ -435,53 +435,62 @@ class TextualWorkbenchApp(App[None]):
 
         self.call_from_thread(self._handle_export_tools_success, exported)
 
-    @work(thread=True, exclusive=True)
-    def _run_model_turn_worker(self, prompt: str) -> None:
+    @work(exclusive=True)
+    async def _run_model_turn_worker(self, prompt: str) -> None:
         try:
-            result = self._controller.run_model_turn(self._config_state, prompt=prompt)
+            result = await self._controller.run_model_turn_async(
+                self._config_state,
+                prompt=prompt,
+            )
         except Exception as exc:
-            self.call_from_thread(self._handle_worker_error, str(exc))
+            self._handle_worker_error(str(exc))
             return
 
-        self.call_from_thread(self._handle_model_turn_success, result)
+        self._handle_model_turn_success(result)
 
-    @work(thread=True, exclusive=True)
-    def _run_direct_tool_worker(self, tool_name: str, arguments_text: str) -> None:
+    @work(exclusive=True)
+    async def _run_direct_tool_worker(
+        self, tool_name: str, arguments_text: str
+    ) -> None:
         try:
-            result = self._controller.execute_direct_tool(
+            result = await self._controller.execute_direct_tool_async(
                 self._config_state,
                 tool_name=tool_name,
                 arguments_text=arguments_text,
             )
         except Exception as exc:
-            self.call_from_thread(self._handle_worker_error, str(exc))
+            self._handle_worker_error(str(exc))
             return
 
-        self.call_from_thread(self._handle_direct_tool_success, result)
+        self._handle_direct_tool_success(result)
 
-    @work(thread=True, exclusive=True)
-    def _run_resolve_approval_worker(self, approval_id: str, approved: bool) -> None:
+    @work(exclusive=True)
+    async def _run_resolve_approval_worker(
+        self, approval_id: str, approved: bool
+    ) -> None:
         try:
-            result = self._controller.resolve_pending_approval(
+            result = await self._controller.resolve_pending_approval_async(
                 self._config_state,
                 approval_id=approval_id,
                 approved=approved,
             )
         except Exception as exc:
-            self.call_from_thread(self._handle_worker_error, str(exc))
+            self._handle_worker_error(str(exc))
             return
 
-        self.call_from_thread(self._handle_resolve_approval_success, result, approved)
+        self._handle_resolve_approval_success(result, approved)
 
-    @work(thread=True, exclusive=True)
-    def _run_finalize_expired_worker(self) -> None:
+    @work(exclusive=True)
+    async def _run_finalize_expired_worker(self) -> None:
         try:
-            result = self._controller.finalize_expired_approvals(self._config_state)
+            result = await self._controller.finalize_expired_approvals_async(
+                self._config_state
+            )
         except Exception as exc:
-            self.call_from_thread(self._handle_worker_error, str(exc))
+            self._handle_worker_error(str(exc))
             return
 
-        self.call_from_thread(self._handle_finalize_expired_success, result)
+        self._handle_finalize_expired_success(result)
 
     def _handle_export_tools_success(self, result: ExportToolsResult) -> None:
         self._run_state = self._run_state.model_copy(

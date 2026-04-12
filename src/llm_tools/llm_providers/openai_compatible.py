@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 from pydantic import BaseModel
 
 from llm_tools.llm_adapters import (
@@ -29,11 +29,14 @@ class OpenAICompatibleProvider:
         base_url: str | None = None,
         default_request_params: dict[str, Any] | None = None,
         client: OpenAI | Any | None = None,
+        async_client: AsyncOpenAI | Any | None = None,
     ) -> None:
         self.model = model
         self.base_url = base_url
         self.default_request_params = dict(default_request_params or {})
-        self._client = client or OpenAI(api_key=api_key, base_url=base_url)
+        self._api_key = api_key
+        self._client = client
+        self._async_client = async_client
 
     @classmethod
     def for_openai(
@@ -43,6 +46,7 @@ class OpenAICompatibleProvider:
         api_key: str | None = None,
         default_request_params: dict[str, Any] | None = None,
         client: OpenAI | Any | None = None,
+        async_client: AsyncOpenAI | Any | None = None,
     ) -> OpenAICompatibleProvider:
         """Return a provider configured for OpenAI's default endpoint."""
         return cls(
@@ -50,6 +54,7 @@ class OpenAICompatibleProvider:
             api_key=api_key,
             default_request_params=default_request_params,
             client=client,
+            async_client=async_client,
         )
 
     @classmethod
@@ -61,6 +66,7 @@ class OpenAICompatibleProvider:
         api_key: str = "ollama",
         default_request_params: dict[str, Any] | None = None,
         client: OpenAI | Any | None = None,
+        async_client: AsyncOpenAI | Any | None = None,
     ) -> OpenAICompatibleProvider:
         """Return a provider configured for Ollama's compatibility endpoint."""
         return cls(
@@ -69,6 +75,7 @@ class OpenAICompatibleProvider:
             base_url=base_url,
             default_request_params=default_request_params,
             client=client,
+            async_client=async_client,
         )
 
     def run_native_tool_calling(
@@ -86,8 +93,32 @@ class OpenAICompatibleProvider:
             registry=registry,
             tool_descriptions=tool_descriptions,
         )
-        completions: Any = self._client.chat.completions
+        completions: Any = self._sync_client.chat.completions
         response = completions.create(
+            model=self.model,
+            messages=list(messages),
+            tools=tools,
+            **self._merged_request_params(request_params),
+        )
+        return adapter.parse_model_output(self._extract_message(response))
+
+    async def run_native_tool_calling_async(
+        self,
+        *,
+        adapter: NativeToolCallingAdapter,
+        messages: Sequence[dict[str, Any]],
+        registry: ToolRegistry | None = None,
+        tool_descriptions: object | None = None,
+        request_params: dict[str, Any] | None = None,
+    ) -> ParsedModelResponse:
+        """Asynchronously call native tool-calling mode and parse the result."""
+        tools = self._resolve_tool_descriptions(
+            adapter=adapter,
+            registry=registry,
+            tool_descriptions=tool_descriptions,
+        )
+        completions: Any = self._async_client_instance.chat.completions
+        response = await completions.create(
             model=self.model,
             messages=list(messages),
             tools=tools,
@@ -110,8 +141,38 @@ class OpenAICompatibleProvider:
             registry=registry,
             tool_descriptions=tool_descriptions,
         )
-        completions: Any = self._client.chat.completions
+        completions: Any = self._sync_client.chat.completions
         response = completions.create(
+            model=self.model,
+            messages=list(messages),
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "structured_output_envelope",
+                    "schema": schema,
+                },
+            },
+            **self._merged_request_params(request_params),
+        )
+        return adapter.parse_model_output(self._extract_content(response))
+
+    async def run_structured_output_async(
+        self,
+        *,
+        adapter: StructuredOutputAdapter,
+        messages: Sequence[dict[str, Any]],
+        registry: ToolRegistry | None = None,
+        tool_descriptions: object | None = None,
+        request_params: dict[str, Any] | None = None,
+    ) -> ParsedModelResponse:
+        """Asynchronously call structured-output mode and parse the result."""
+        schema = self._resolve_tool_descriptions(
+            adapter=adapter,
+            registry=registry,
+            tool_descriptions=tool_descriptions,
+        )
+        completions: Any = self._async_client_instance.chat.completions
+        response = await completions.create(
             model=self.model,
             messages=list(messages),
             response_format={
@@ -140,8 +201,31 @@ class OpenAICompatibleProvider:
             registry=registry,
             tool_descriptions=tool_descriptions,
         )
-        completions: Any = self._client.chat.completions
+        completions: Any = self._sync_client.chat.completions
         response = completions.create(
+            model=self.model,
+            messages=[{"role": "system", "content": prompt}, *list(messages)],
+            **self._merged_request_params(request_params),
+        )
+        return adapter.parse_model_output(self._extract_content(response))
+
+    async def run_prompt_schema_async(
+        self,
+        *,
+        adapter: PromptSchemaAdapter,
+        messages: Sequence[dict[str, Any]],
+        registry: ToolRegistry | None = None,
+        tool_descriptions: object | None = None,
+        request_params: dict[str, Any] | None = None,
+    ) -> ParsedModelResponse:
+        """Asynchronously call prompt-schema mode and parse the result."""
+        prompt = self._resolve_tool_descriptions(
+            adapter=adapter,
+            registry=registry,
+            tool_descriptions=tool_descriptions,
+        )
+        completions: Any = self._async_client_instance.chat.completions
+        response = await completions.create(
             model=self.model,
             messages=[{"role": "system", "content": prompt}, *list(messages)],
             **self._merged_request_params(request_params),
@@ -208,3 +292,18 @@ class OpenAICompatibleProvider:
         if request_params is not None:
             merged.update(request_params)
         return merged
+
+    @property
+    def _sync_client(self) -> OpenAI | Any:
+        if self._client is None:
+            self._client = OpenAI(api_key=self._api_key, base_url=self.base_url)
+        return self._client
+
+    @property
+    def _async_client_instance(self) -> AsyncOpenAI | Any:
+        if self._async_client is None:
+            self._async_client = AsyncOpenAI(
+                api_key=self._api_key,
+                base_url=self.base_url,
+            )
+        return self._async_client

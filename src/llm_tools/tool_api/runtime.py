@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -181,6 +182,135 @@ class ToolRuntime:
             output=validated_output.model_dump(mode="json"),
         )
 
+    async def execute_async(
+        self,
+        request: ToolInvocationRequest,
+        context: ToolContext,
+    ) -> ToolResult:
+        """Asynchronously execute one tool invocation and normalize the result."""
+        state = _ExecutionState(
+            invocation_id=context.invocation_id,
+            request=request,
+            started_at=self._utc_now(),
+            tool_name=request.tool_name,
+        )
+
+        try:
+            tool = self._resolve_tool(request)
+        except ToolNotRegisteredError as exc:
+            return self._finalize_failure(
+                state,
+                context,
+                self._make_error(
+                    code=ErrorCode.TOOL_NOT_FOUND,
+                    message=str(exc),
+                    details={"tool_name": request.tool_name},
+                ),
+            )
+        except Exception as exc:
+            return self._finalize_failure(
+                state,
+                context,
+                self._make_runtime_error(state, exc),
+            )
+
+        state.tool_name = tool.spec.name
+        state.tool_version = tool.spec.version
+
+        try:
+            policy_decision = self._evaluate_policy(tool, context)
+        except Exception as exc:
+            return self._finalize_failure(
+                state,
+                context,
+                self._make_runtime_error(state, exc),
+            )
+
+        state.policy_decision = policy_decision
+        if not policy_decision.allowed:
+            return self._finalize_failure(
+                state,
+                context,
+                self._make_error(
+                    code=ErrorCode.POLICY_DENIED,
+                    message=f"Policy denied execution for tool '{state.tool_name}'.",
+                    details={
+                        "tool_name": state.tool_name,
+                        "policy_decision": policy_decision.model_dump(mode="json"),
+                    },
+                ),
+            )
+
+        try:
+            validated_input = self._validate_input(tool, request.arguments)
+        except ValidationError as exc:
+            return self._finalize_failure(
+                state,
+                context,
+                self._make_error(
+                    code=ErrorCode.INPUT_VALIDATION_ERROR,
+                    message=f"Input validation failed for tool '{state.tool_name}'.",
+                    details={
+                        "tool_name": state.tool_name,
+                        "validation_errors": exc.errors(),
+                    },
+                ),
+            )
+        except Exception as exc:
+            return self._finalize_failure(
+                state,
+                context,
+                self._make_runtime_error(state, exc),
+            )
+
+        state.validated_input = validated_input.model_dump(mode="json")
+        state.redacted_input = self._redact_input(state.validated_input)
+
+        try:
+            raw_output = await self._invoke_tool_async(tool, context, validated_input)
+        except Exception as exc:
+            return self._finalize_failure(
+                state,
+                context,
+                self._make_error(
+                    code=ErrorCode.EXECUTION_FAILED,
+                    message=f"Tool '{state.tool_name}' execution failed.",
+                    details={
+                        "tool_name": state.tool_name,
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                    },
+                ),
+            )
+
+        try:
+            validated_output = self._validate_output(tool, raw_output)
+        except ValidationError as exc:
+            return self._finalize_failure(
+                state,
+                context,
+                self._make_error(
+                    code=ErrorCode.OUTPUT_VALIDATION_ERROR,
+                    message=f"Output validation failed for tool '{state.tool_name}'.",
+                    details={
+                        "tool_name": state.tool_name,
+                        "validation_errors": exc.errors(),
+                    },
+                ),
+            )
+        except Exception as exc:
+            return self._finalize_failure(
+                state,
+                context,
+                self._make_runtime_error(state, exc),
+            )
+
+        return self._finalize_success(
+            state,
+            context,
+            output=validated_output.model_dump(mode="json"),
+        )
+
     def _resolve_tool(self, request: ToolInvocationRequest) -> Tool[Any, Any]:
         return self._registry.get(request.tool_name)
 
@@ -204,7 +334,29 @@ class ToolRuntime:
         context: ToolContext,
         validated_input: BaseModel,
     ) -> Any:
-        return tool.invoke(context, validated_input)
+        if tool.__class__._has_sync_implementation():
+            return tool.invoke(context, validated_input)
+        if tool.__class__._has_async_implementation():
+            return self._run_async_tool_in_sync(tool, context, validated_input)
+        raise RuntimeError(
+            f"Tool '{tool.spec.name}' has no synchronous or asynchronous "
+            "implementation."
+        )
+
+    async def _invoke_tool_async(
+        self,
+        tool: Tool[Any, Any],
+        context: ToolContext,
+        validated_input: BaseModel,
+    ) -> Any:
+        if tool.__class__._has_async_implementation():
+            return await tool.ainvoke(context, validated_input)
+        if tool.__class__._has_sync_implementation():
+            return await asyncio.to_thread(tool.invoke, context, validated_input)
+        raise RuntimeError(
+            f"Tool '{tool.spec.name}' has no synchronous or asynchronous "
+            "implementation."
+        )
 
     def _validate_output(self, tool: Tool[Any, Any], output: Any) -> BaseModel:
         return cast(BaseModel, tool.output_model.model_validate(output))
@@ -354,3 +506,18 @@ class ToolRuntime:
     def _duration_ms(started_at: datetime, ended_at: datetime) -> int:
         duration = ended_at - started_at
         return max(int(duration.total_seconds() * 1000), 0)
+
+    @staticmethod
+    def _run_async_tool_in_sync(
+        tool: Tool[Any, Any],
+        context: ToolContext,
+        validated_input: BaseModel,
+    ) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(tool.ainvoke(context, validated_input))
+        raise RuntimeError(
+            "Cannot execute an async-only tool from ToolRuntime.execute() while an "
+            "event loop is already running. Use ToolRuntime.execute_async() instead."
+        )

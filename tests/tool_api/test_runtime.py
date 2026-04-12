@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, cast
 
 from pydantic import BaseModel
@@ -123,6 +124,39 @@ class InvalidOutputTool(Tool[RuntimeInput, RuntimeOutput]):
     def invoke(self, context: ToolContext, args: RuntimeInput) -> RuntimeOutput:
         del context, args
         return cast(RuntimeOutput, "not-a-valid-output")
+
+
+class AsyncEchoTool(Tool[RuntimeInput, RuntimeOutput]):
+    spec = ToolSpec(
+        name="async_echo",
+        description="Async echo tool.",
+        side_effects=SideEffectClass.NONE,
+    )
+    input_model = RuntimeInput
+    output_model = RuntimeOutput
+
+    async def ainvoke(self, context: ToolContext, args: RuntimeInput) -> RuntimeOutput:
+        context.logs.append("async-echo-start")
+        context.artifacts.append("async.txt")
+        return RuntimeOutput(value=f"{context.invocation_id}:{args.value}")
+
+
+class DualEchoTool(Tool[RuntimeInput, RuntimeOutput]):
+    spec = ToolSpec(
+        name="dual_echo",
+        description="Tool with sync and async implementations.",
+        side_effects=SideEffectClass.NONE,
+    )
+    input_model = RuntimeInput
+    output_model = RuntimeOutput
+
+    def invoke(self, context: ToolContext, args: RuntimeInput) -> RuntimeOutput:
+        context.logs.append("sync-path")
+        return RuntimeOutput(value=f"sync:{args.value}")
+
+    async def ainvoke(self, context: ToolContext, args: RuntimeInput) -> RuntimeOutput:
+        context.logs.append("async-path")
+        return RuntimeOutput(value=f"async:{args.value}")
 
 
 class BrokenPolicy(ToolPolicy):
@@ -387,3 +421,155 @@ def test_runtime_redaction_normalizes_field_name_variants() -> None:
             "access_token": "[REDACTED]",
         },
     }
+
+
+def test_runtime_execute_async_supports_sync_only_tools() -> None:
+    runtime = ToolRuntime(_registry(EchoTool()))
+    result = asyncio.run(
+        runtime.execute_async(
+            ToolInvocationRequest(tool_name="echo", arguments={"value": "hi"}),
+            _context(),
+        )
+    )
+
+    assert result.ok is True
+    assert result.output == {"value": "inv-1:hi"}
+    assert result.logs == ["echo-start"]
+
+
+def test_runtime_execute_async_supports_async_only_tools() -> None:
+    runtime = ToolRuntime(_registry(AsyncEchoTool()))
+    result = asyncio.run(
+        runtime.execute_async(
+            ToolInvocationRequest(tool_name="async_echo", arguments={"value": "hi"}),
+            _context(),
+        )
+    )
+
+    assert result.ok is True
+    assert result.output == {"value": "inv-1:hi"}
+    assert result.logs == ["async-echo-start"]
+    assert result.artifacts == ["async.txt"]
+
+
+def test_runtime_execute_sync_can_bridge_async_only_tools_without_loop() -> None:
+    runtime = ToolRuntime(_registry(AsyncEchoTool()))
+    result = runtime.execute(
+        ToolInvocationRequest(tool_name="async_echo", arguments={"value": "hi"}),
+        _context(),
+    )
+    assert result.ok is True
+    assert result.output == {"value": "inv-1:hi"}
+
+
+def test_runtime_execute_sync_rejects_async_only_tools_inside_event_loop() -> None:
+    runtime = ToolRuntime(_registry(AsyncEchoTool()))
+
+    async def run() -> None:
+        result = runtime.execute(
+            ToolInvocationRequest(tool_name="async_echo", arguments={"value": "hi"}),
+            _context(),
+        )
+        assert result.ok is False
+        assert result.error is not None
+        assert result.error.code is ErrorCode.EXECUTION_FAILED
+        assert (
+            "Use ToolRuntime.execute_async()"
+            in result.error.details["exception_message"]
+        )
+
+    asyncio.run(run())
+
+
+def test_runtime_prefers_sync_for_execute_and_async_for_execute_async() -> None:
+    runtime = ToolRuntime(_registry(DualEchoTool()))
+
+    sync_result = runtime.execute(
+        ToolInvocationRequest(tool_name="dual_echo", arguments={"value": "hello"}),
+        _context(),
+    )
+    async_result = asyncio.run(
+        runtime.execute_async(
+            ToolInvocationRequest(tool_name="dual_echo", arguments={"value": "hello"}),
+            _context(),
+        )
+    )
+
+    assert sync_result.ok is True
+    assert sync_result.output == {"value": "sync:hello"}
+    assert sync_result.logs == ["sync-path"]
+    assert async_result.ok is True
+    assert async_result.output == {"value": "async:hello"}
+    assert async_result.logs == ["async-path"]
+
+
+def test_runtime_execute_async_normalizes_missing_tool_lookup() -> None:
+    runtime = ToolRuntime(_registry())
+
+    result = asyncio.run(
+        runtime.execute_async(
+            ToolInvocationRequest(tool_name="missing_tool", arguments={}),
+            _context(),
+        )
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is ErrorCode.TOOL_NOT_FOUND
+    assert result.metadata["execution_record"]["error_code"] == "tool_not_found"
+
+
+def test_runtime_execute_async_normalizes_policy_denied() -> None:
+    runtime = ToolRuntime(
+        _registry(LocalWriteTool()),
+        policy=ToolPolicy(allowed_side_effects={SideEffectClass.NONE}),
+    )
+
+    result = asyncio.run(
+        runtime.execute_async(
+            ToolInvocationRequest(tool_name="write_file", arguments={"value": "data"}),
+            _context(),
+        )
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is ErrorCode.POLICY_DENIED
+    assert result.metadata["execution_record"]["error_code"] == "policy_denied"
+
+
+def test_runtime_execute_async_normalizes_invalid_input_execution_and_output() -> None:
+    invalid_input_runtime = ToolRuntime(_registry(EchoTool()))
+    invalid_input = asyncio.run(
+        invalid_input_runtime.execute_async(
+            ToolInvocationRequest(tool_name="echo", arguments={"value": 123}),
+            _context(),
+        )
+    )
+    assert invalid_input.ok is False
+    assert invalid_input.error is not None
+    assert invalid_input.error.code is ErrorCode.INPUT_VALIDATION_ERROR
+
+    execution_failure_runtime = ToolRuntime(_registry(FailingTool()))
+    execution_failure = asyncio.run(
+        execution_failure_runtime.execute_async(
+            ToolInvocationRequest(tool_name="failing_tool", arguments={"value": "hi"}),
+            _context(),
+        )
+    )
+    assert execution_failure.ok is False
+    assert execution_failure.error is not None
+    assert execution_failure.error.code is ErrorCode.EXECUTION_FAILED
+
+    invalid_output_runtime = ToolRuntime(_registry(InvalidOutputTool()))
+    invalid_output = asyncio.run(
+        invalid_output_runtime.execute_async(
+            ToolInvocationRequest(
+                tool_name="invalid_output", arguments={"value": "hi"}
+            ),
+            _context(),
+        )
+    )
+    assert invalid_output.ok is False
+    assert invalid_output.error is not None
+    assert invalid_output.error.code is ErrorCode.OUTPUT_VALIDATION_ERROR

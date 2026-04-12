@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from abc import ABC, abstractmethod
+from abc import ABC
 from typing import ClassVar, Generic, TypeVar
 
 from pydantic import BaseModel
@@ -68,8 +68,27 @@ class Tool(ABC, Generic[InputT, OutputT]):
                 f"Concrete tool subclass {cls.__name__} must define 'output_model' as "
                 "a BaseModel subclass."
             )
+        if not cls._has_sync_implementation() and not cls._has_async_implementation():
+            raise TypeError(
+                f"Concrete tool subclass {cls.__name__} must implement at least one "
+                "execution method: 'invoke' or 'ainvoke'."
+            )
 
-    @abstractmethod
     def invoke(self, context: ToolContext, args: InputT) -> OutputT:
         """Execute the tool using validated input and return the declared model."""
         raise NotImplementedError
+
+    async def ainvoke(self, context: ToolContext, args: InputT) -> OutputT:
+        """Asynchronously execute the tool and return the declared output model."""
+        del context, args
+        raise NotImplementedError
+
+    @classmethod
+    def _has_sync_implementation(cls) -> bool:
+        """Whether the class provides a concrete synchronous implementation."""
+        return cls.invoke is not Tool.invoke
+
+    @classmethod
+    def _has_async_implementation(cls) -> bool:
+        """Whether the class provides a concrete asynchronous implementation."""
+        return cls.ainvoke is not Tool.ainvoke

@@ -17,6 +17,7 @@ The core v0.1 foundation is implemented:
 - native-tool-calling, structured-output, and prompt-schema adapters
 - an OpenAI-compatible provider layer built on the OpenAI Python SDK
 - a thin `workflow_api` bridge for one parsed model turn
+- dual sync/async execution paths across runtime, provider, and workflow layers
 - an optional `apps` layer with a developer-facing Textual workbench
 
 ## Core Concepts
@@ -97,6 +98,7 @@ llm-tools-workbench
 - `examples/minimal_tool.py`
 - `examples/builtins_direct.py`
 - `examples/openai_wiring.py`
+- `examples/async_model_turn.py`
 - `examples/openai_live.py`
 - `examples/structured_response.py`
 - `examples/prompt_schema.py`

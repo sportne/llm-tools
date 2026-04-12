@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -70,6 +71,26 @@ class _FakeChat:
 class _FakeClient:
     def __init__(self, response: object) -> None:
         self.chat = _FakeChat(response)
+
+
+class _FakeAsyncCompletions:
+    def __init__(self, response: object) -> None:
+        self.response = response
+        self.calls: list[dict[str, Any]] = []
+
+    async def create(self, **kwargs: Any) -> _FakeResponse:
+        self.calls.append(kwargs)
+        return _FakeResponse(choices=[_FakeChoice(message=self.response)])
+
+
+class _FakeAsyncChat:
+    def __init__(self, response: object) -> None:
+        self.completions = _FakeAsyncCompletions(response)
+
+
+class _FakeAsyncClient:
+    def __init__(self, response: object) -> None:
+        self.chat = _FakeAsyncChat(response)
 
 
 class _ModelDumpMessage:
@@ -160,6 +181,85 @@ def test_provider_runs_prompt_schema_requests() -> None:
     assert "Choose exactly one" in call["messages"][0]["content"]
     assert call["messages"][1] == {"role": "user", "content": "No tool"}
     assert parsed.final_response == "done"
+
+
+def test_provider_runs_native_tool_calling_async_requests() -> None:
+    async def run() -> None:
+        fake_async_client = _FakeAsyncClient(
+            {
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "echo",
+                            "arguments": '{"value": "hello"}',
+                        },
+                    }
+                ]
+            }
+        )
+        provider = OpenAICompatibleProvider(
+            model="demo-model",
+            async_client=fake_async_client,
+            default_request_params={"temperature": 0},
+        )
+
+        parsed = await provider.run_native_tool_calling_async(
+            adapter=NativeToolCallingAdapter(),
+            messages=[{"role": "user", "content": "Say hello"}],
+            registry=_registry(),
+        )
+
+        call = fake_async_client.chat.completions.calls[0]
+        assert call["model"] == "demo-model"
+        assert call["messages"] == [{"role": "user", "content": "Say hello"}]
+        assert call["temperature"] == 0
+        assert call["tools"][0]["function"]["name"] == "echo"
+        assert parsed.invocations[0].tool_name == "echo"
+        assert parsed.invocations[0].arguments == {"value": "hello"}
+
+    asyncio.run(run())
+
+
+def test_provider_runs_structured_and_prompt_async_requests() -> None:
+    async def run() -> None:
+        structured_client = _FakeAsyncClient(
+            '{"actions":[{"tool_name":"echo","arguments":{"value":"hi"}}]}'
+        )
+        prompt_client = _FakeAsyncClient('{"final_response":"done"}')
+        structured_provider = OpenAICompatibleProvider(
+            model="demo-model",
+            async_client=structured_client,
+        )
+        prompt_provider = OpenAICompatibleProvider(
+            model="demo-model",
+            async_client=prompt_client,
+        )
+
+        structured_parsed = await structured_provider.run_structured_output_async(
+            adapter=StructuredOutputAdapter(),
+            messages=[{"role": "user", "content": "Use echo"}],
+            registry=_registry(),
+            request_params={"temperature": 0.2},
+        )
+        prompt_parsed = await prompt_provider.run_prompt_schema_async(
+            adapter=PromptSchemaAdapter(),
+            messages=[{"role": "user", "content": "No tool"}],
+            registry=_registry(),
+        )
+
+        structured_call = structured_client.chat.completions.calls[0]
+        assert structured_call["response_format"]["type"] == "json_schema"
+        assert structured_call["temperature"] == 0.2
+        assert structured_parsed.invocations[0].tool_name == "echo"
+
+        prompt_call = prompt_client.chat.completions.calls[0]
+        assert prompt_call["messages"][0]["role"] == "system"
+        assert "Choose exactly one" in prompt_call["messages"][0]["content"]
+        assert prompt_parsed.final_response == "done"
+
+    asyncio.run(run())
 
 
 def test_provider_rejects_missing_choices() -> None:

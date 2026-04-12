@@ -1210,7 +1210,14 @@ These remain intentionally bounded.
 
 ### 19.1 Sync vs async
 
-The initial design can be sync-first, but should not block a future async path.
+The library now exposes dual sync/async execution surfaces:
+
+* tools can implement `invoke`, `ainvoke`, or both
+* runtime exposes `execute` and `execute_async`
+* workflow exposes sync and async one-turn execution APIs
+* provider clients expose sync and async mode entrypoints
+
+Sync compatibility is preserved while allowing non-blocking async integration.
 
 ### 19.2 Constructor dependencies
 

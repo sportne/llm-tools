@@ -32,6 +32,7 @@ def _run_example(name: str) -> subprocess.CompletedProcess[str]:
         "minimal_tool.py",
         "builtins_direct.py",
         "openai_wiring.py",
+        "async_model_turn.py",
         "structured_response.py",
         "prompt_schema.py",
     ],

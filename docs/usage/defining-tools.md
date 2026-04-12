@@ -7,11 +7,13 @@ Every concrete tool must define:
 - `spec`: canonical metadata as a `ToolSpec`
 - `input_model`: a Pydantic model for validated input
 - `output_model`: a Pydantic model for validated output
-- `invoke(context, args) -> output_model`
+- at least one execution method:
+  - `invoke(context, args) -> output_model`
+  - `ainvoke(context, args) -> output_model`
 
-`invoke()` should return the declared output model, not a raw dict. The runtime
-will validate both the input payload and the returned output model again at the
-execution boundary.
+`invoke()` and `ainvoke()` should return the declared output model, not a raw
+dict. The runtime validates both input payloads and returned output models at
+the execution boundary.
 
 ## Minimal Example
 
@@ -78,4 +80,3 @@ See:
 
 - [Registry and Runtime](registry-and-runtime.md)
 - [Adapters](adapters.md)
-
