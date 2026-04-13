@@ -317,6 +317,8 @@ class ChatScreenController:
         return f"Current model: {self._screen._active_model_name}"
 
     def _show_available_models(self) -> None:
+        if not self.ensure_provider_ready():
+            return
         provider = self._screen._provider
         if provider is None:
             self.append_transcript(

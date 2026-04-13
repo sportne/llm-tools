@@ -233,8 +233,12 @@ def test_textual_chat_screen_widgets_and_controller_branches(tmp_path: Path) -> 
             screen._controller._show_available_models()
             screen._provider = _ProviderOk(models=[])
             screen._controller._show_available_models()
+            screen._create_provider = lambda config, api_key, model_name: _ProviderOk(
+                models=["lazy-a", "lazy-b"]
+            )
             screen._provider = None
             screen._controller._show_available_models()
+            assert "lazy-a" in screen._controller.transcript_copy_text()
 
             switched: list[str] = []
             screen._create_provider = lambda config, api_key, model_name: (
