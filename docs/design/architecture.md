@@ -108,6 +108,13 @@ A future orchestration layer for durable multi-turn execution.
 * verification coordination
 * turn budgeting and stop conditions
 
+Implemented durable contracts now include:
+
+* canonical harness session, task, turn, and state models
+* first-class verifier contracts and task-level verification expectations
+* persisted verification evidence records
+* explicit no-progress signals for stalled-session stop semantics
+
 Proposed module areas:
 
 * `models`
@@ -121,6 +128,11 @@ Proposed module areas:
 The layer will depend on lower-level typed contracts and on `workflow_api` as
 the reusable one-turn execution primitive. `workflow_api` must not depend on
 `harness_api`.
+
+Verification stays in `harness_api`, not in `workflow_api`. The one-turn
+workflow layer executes tools and captures their results; the harness layer
+decides what must be verified, stores evidence, and records no-progress stop
+context without redefining tool execution or planning contracts.
 
 ---
 

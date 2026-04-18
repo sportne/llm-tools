@@ -11,7 +11,18 @@ from llm_tools.harness_api.models import (
     TurnDecision,
     TurnDecisionAction,
     VerificationOutcome,
+)
+from llm_tools.harness_api.verification import (
+    NoProgressSignal,
+    NoProgressSignalKind,
+    VerificationEvidenceRecord,
+    VerificationExpectation,
+    VerificationFailureMode,
+    VerificationResult,
     VerificationStatus,
+    VerificationTiming,
+    VerificationTrigger,
+    Verifier,
 )
 
 __all__ = [
@@ -20,10 +31,19 @@ __all__ = [
     "HarnessState",
     "HarnessStopReason",
     "HarnessTurn",
+    "NoProgressSignal",
+    "NoProgressSignalKind",
     "TaskLifecycleStatus",
     "TaskRecord",
     "TurnDecision",
     "TurnDecisionAction",
+    "VerificationEvidenceRecord",
+    "VerificationExpectation",
+    "VerificationFailureMode",
     "VerificationOutcome",
+    "VerificationResult",
     "VerificationStatus",
+    "VerificationTiming",
+    "VerificationTrigger",
+    "Verifier",
 ]
