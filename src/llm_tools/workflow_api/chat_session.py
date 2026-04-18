@@ -6,10 +6,12 @@ import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from threading import Condition
+from typing import Any, Protocol
 from uuid import uuid4
 
-from llm_tools.llm_adapters import ActionEnvelopeAdapter
-from llm_tools.llm_providers import OpenAICompatibleProvider
+from pydantic import BaseModel
+
+from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import ToolContext, ToolResult
 from llm_tools.tool_api.redaction import RedactionConfig, RedactionTarget, Redactor
 from llm_tools.tools.filesystem._content import dump_json
@@ -38,6 +40,20 @@ from llm_tools.workflow_api.models import (
 )
 
 
+class ModelTurnProvider(Protocol):
+    """Minimal provider surface required by interactive chat orchestration."""
+
+    def run(
+        self,
+        *,
+        adapter: ActionEnvelopeAdapter,
+        messages: list[dict[str, Any]],
+        response_model: type[BaseModel],
+        request_params: dict[str, Any] | None = None,
+    ) -> ParsedModelResponse:
+        """Return one parsed model response for a workflow turn."""
+
+
 class ChatSessionTurnRunner:
     """Session-aware cancellable chat workflow for the interactive UI."""
 
@@ -47,7 +63,7 @@ class ChatSessionTurnRunner:
         user_message: str,
         session_state: ChatSessionState,
         executor: WorkflowExecutor,
-        provider: OpenAICompatibleProvider,
+        provider: ModelTurnProvider,
         system_prompt: str,
         base_context: ToolContext,
         session_config: ChatSessionConfig,
@@ -455,7 +471,7 @@ def run_interactive_chat_session_turn(
     user_message: str,
     session_state: ChatSessionState,
     executor: WorkflowExecutor,
-    provider: OpenAICompatibleProvider,
+    provider: ModelTurnProvider,
     system_prompt: str,
     base_context: ToolContext,
     session_config: ChatSessionConfig,
