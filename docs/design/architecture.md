@@ -98,7 +98,7 @@ grows a separate harness layer.
 
 #### `harness_api`
 
-A future orchestration layer for durable multi-turn execution.
+A concrete orchestration layer for durable multi-turn execution above the one-turn workflow bridge.
 
 `harness_api` will own:
 
@@ -114,6 +114,7 @@ Implemented durable contracts now include:
 * first-class verifier contracts and task-level verification expectations
 * persisted verification evidence records
 * explicit no-progress signals for stalled-session stop semantics
+* a concrete `HarnessExecutor` control loop with approval durability and retry/recovery rules
 
 Proposed module areas:
 

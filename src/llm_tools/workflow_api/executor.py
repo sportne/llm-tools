@@ -187,31 +187,13 @@ class WorkflowExecutor:
         except KeyError as exc:
             raise ValueError(f"Unknown approval id: {approval_id}") from exc
 
-        if approved:
-            outcomes = self._execute_sequence(
-                parsed_response=state.parsed_response,
-                base_context=state.base_context,
-                start_index=state.pending_index,
-                approved_indices={state.pending_index},
-            )
-            return WorkflowTurnResult(
-                parsed_response=state.parsed_response,
-                outcomes=outcomes,
-            )
-
-        denied_outcome = self._build_approval_outcome(
-            status=WorkflowInvocationStatus.APPROVAL_DENIED,
-            approval_request=state.approval_request,
-        )
-        remaining = self._execute_sequence(
+        resolution = "approve" if approved else "deny"
+        return self._resume_persisted_approval(
             parsed_response=state.parsed_response,
             base_context=state.base_context,
-            start_index=state.pending_index + 1,
-            approved_indices=set(),
-        )
-        return WorkflowTurnResult(
-            parsed_response=state.parsed_response,
-            outcomes=[denied_outcome, *remaining],
+            approval_request=state.approval_request,
+            pending_index=state.pending_index,
+            resolution=resolution,
         )
 
     async def resolve_pending_approval_async(
@@ -228,31 +210,47 @@ class WorkflowExecutor:
         except KeyError as exc:
             raise ValueError(f"Unknown approval id: {approval_id}") from exc
 
-        if approved:
-            outcomes = await self._execute_sequence_async(
-                parsed_response=state.parsed_response,
-                base_context=state.base_context,
-                start_index=state.pending_index,
-                approved_indices={state.pending_index},
-            )
-            return WorkflowTurnResult(
-                parsed_response=state.parsed_response,
-                outcomes=outcomes,
-            )
-
-        denied_outcome = self._build_approval_outcome(
-            status=WorkflowInvocationStatus.APPROVAL_DENIED,
-            approval_request=state.approval_request,
-        )
-        remaining = await self._execute_sequence_async(
+        resolution = "approve" if approved else "deny"
+        return await self._resume_persisted_approval_async(
             parsed_response=state.parsed_response,
             base_context=state.base_context,
-            start_index=state.pending_index + 1,
-            approved_indices=set(),
+            approval_request=state.approval_request,
+            pending_index=state.pending_index,
+            resolution=resolution,
         )
-        return WorkflowTurnResult(
-            parsed_response=state.parsed_response,
-            outcomes=[denied_outcome, *remaining],
+
+    def resume_persisted_approval(
+        self,
+        record: Any,
+        resolution: str,
+        *,
+        now: datetime | None = None,
+    ) -> WorkflowTurnResult:
+        """Resume execution from a durable approval record."""
+        del now
+        return self._resume_persisted_approval(
+            parsed_response=record.parsed_response,
+            base_context=record.base_context,
+            approval_request=record.approval_request,
+            pending_index=record.pending_index,
+            resolution=resolution,
+        )
+
+    async def resume_persisted_approval_async(
+        self,
+        record: Any,
+        resolution: str,
+        *,
+        now: datetime | None = None,
+    ) -> WorkflowTurnResult:
+        """Asynchronously resume execution from a durable approval record."""
+        del now
+        return await self._resume_persisted_approval_async(
+            parsed_response=record.parsed_response,
+            base_context=record.base_context,
+            approval_request=record.approval_request,
+            pending_index=record.pending_index,
+            resolution=resolution,
         )
 
     def finalize_expired_approvals(
@@ -271,20 +269,13 @@ class WorkflowExecutor:
         results: list[WorkflowTurnResult] = []
         for approval_id in expired_ids:
             state = self._pending_approvals.pop(approval_id)
-            timeout_outcome = self._build_approval_outcome(
-                status=WorkflowInvocationStatus.APPROVAL_TIMED_OUT,
-                approval_request=state.approval_request,
-            )
-            remaining = self._execute_sequence(
-                parsed_response=state.parsed_response,
-                base_context=state.base_context,
-                start_index=state.pending_index + 1,
-                approved_indices=set(),
-            )
             results.append(
-                WorkflowTurnResult(
+                self._resume_persisted_approval(
                     parsed_response=state.parsed_response,
-                    outcomes=[timeout_outcome, *remaining],
+                    base_context=state.base_context,
+                    approval_request=state.approval_request,
+                    pending_index=state.pending_index,
+                    resolution="expire",
                 )
             )
 
@@ -306,24 +297,105 @@ class WorkflowExecutor:
         results: list[WorkflowTurnResult] = []
         for approval_id in expired_ids:
             state = self._pending_approvals.pop(approval_id)
-            timeout_outcome = self._build_approval_outcome(
-                status=WorkflowInvocationStatus.APPROVAL_TIMED_OUT,
-                approval_request=state.approval_request,
-            )
-            remaining = await self._execute_sequence_async(
-                parsed_response=state.parsed_response,
-                base_context=state.base_context,
-                start_index=state.pending_index + 1,
-                approved_indices=set(),
-            )
             results.append(
-                WorkflowTurnResult(
+                await self._resume_persisted_approval_async(
                     parsed_response=state.parsed_response,
-                    outcomes=[timeout_outcome, *remaining],
+                    base_context=state.base_context,
+                    approval_request=state.approval_request,
+                    pending_index=state.pending_index,
+                    resolution="expire",
                 )
             )
 
         return results
+
+    def _resume_persisted_approval(
+        self,
+        *,
+        parsed_response: ParsedModelResponse,
+        base_context: ToolContext,
+        approval_request: ApprovalRequest,
+        pending_index: int,
+        resolution: str,
+    ) -> WorkflowTurnResult:
+        normalized = self._normalize_approval_resolution(resolution)
+        if normalized == "approve":
+            outcomes = self._execute_sequence(
+                parsed_response=parsed_response,
+                base_context=base_context,
+                start_index=pending_index,
+                approved_indices={pending_index},
+            )
+            return WorkflowTurnResult(
+                parsed_response=parsed_response, outcomes=outcomes
+            )
+
+        approval_status = (
+            WorkflowInvocationStatus.APPROVAL_TIMED_OUT
+            if normalized == "expire"
+            else WorkflowInvocationStatus.APPROVAL_DENIED
+        )
+        approval_outcome = self._build_approval_outcome(
+            status=approval_status,
+            approval_request=approval_request,
+        )
+        remaining = self._execute_sequence(
+            parsed_response=parsed_response,
+            base_context=base_context,
+            start_index=pending_index + 1,
+            approved_indices=set(),
+        )
+        return WorkflowTurnResult(
+            parsed_response=parsed_response,
+            outcomes=[approval_outcome, *remaining],
+        )
+
+    async def _resume_persisted_approval_async(
+        self,
+        *,
+        parsed_response: ParsedModelResponse,
+        base_context: ToolContext,
+        approval_request: ApprovalRequest,
+        pending_index: int,
+        resolution: str,
+    ) -> WorkflowTurnResult:
+        normalized = self._normalize_approval_resolution(resolution)
+        if normalized == "approve":
+            outcomes = await self._execute_sequence_async(
+                parsed_response=parsed_response,
+                base_context=base_context,
+                start_index=pending_index,
+                approved_indices={pending_index},
+            )
+            return WorkflowTurnResult(
+                parsed_response=parsed_response, outcomes=outcomes
+            )
+
+        approval_status = (
+            WorkflowInvocationStatus.APPROVAL_TIMED_OUT
+            if normalized == "expire"
+            else WorkflowInvocationStatus.APPROVAL_DENIED
+        )
+        approval_outcome = self._build_approval_outcome(
+            status=approval_status,
+            approval_request=approval_request,
+        )
+        remaining = await self._execute_sequence_async(
+            parsed_response=parsed_response,
+            base_context=base_context,
+            start_index=pending_index + 1,
+            approved_indices=set(),
+        )
+        return WorkflowTurnResult(
+            parsed_response=parsed_response,
+            outcomes=[approval_outcome, *remaining],
+        )
+
+    @staticmethod
+    def _normalize_approval_resolution(resolution: str) -> str:
+        if resolution not in {"approve", "deny", "cancel", "expire"}:
+            raise ValueError(f"Unsupported approval resolution: {resolution}")
+        return resolution
 
     def _execute_sequence(
         self,

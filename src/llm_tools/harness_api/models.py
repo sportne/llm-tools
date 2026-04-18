@@ -44,6 +44,9 @@ class HarnessStopReason(str, Enum):  # noqa: UP042
     BUDGET_EXHAUSTED = "budget_exhausted"
     VERIFICATION_FAILED = "verification_failed"
     NO_PROGRESS = "no_progress"
+    APPROVAL_DENIED = "approval_denied"
+    APPROVAL_EXPIRED = "approval_expired"
+    APPROVAL_CANCELED = "approval_canceled"
     CANCELED = "canceled"
     ERROR = "error"
 
@@ -114,6 +117,7 @@ class TaskRecord(BaseModel):
     started_at: str | None = None
     finished_at: str | None = None
     status_summary: str | None = None
+    retry_count: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def validate_task_record(self) -> TaskRecord:
@@ -249,6 +253,7 @@ class HarnessTurn(BaseModel):
 
     turn_index: int = Field(ge=1)
     started_at: str
+    selected_task_ids: list[str] = Field(default_factory=list)
     workflow_result: WorkflowTurnResult | None = None
     decision: TurnDecision | None = None
     no_progress_signals: list[NoProgressSignal] = Field(default_factory=list)
@@ -259,6 +264,8 @@ class HarnessTurn(BaseModel):
         """Require ended_at once a turn decision has been recorded."""
         if self.started_at.strip() == "":
             raise ValueError("started_at must not be empty.")
+        if len(set(self.selected_task_ids)) != len(self.selected_task_ids):
+            raise ValueError("selected_task_ids must be unique.")
         if self.decision is not None and (
             self.ended_at is None or self.ended_at.strip() == ""
         ):
@@ -286,6 +293,7 @@ class HarnessSession(BaseModel):
     current_turn_index: int = Field(default=0, ge=0)
     ended_at: str | None = None
     stop_reason: HarnessStopReason | None = None
+    retry_count: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def validate_session_state(self) -> HarnessSession:
@@ -384,6 +392,11 @@ def _validate_harness_turns(state: HarnessState, *, known_task_ids: set[str]) ->
         raise ValueError("HarnessState turns must have contiguous indices from 1.")
 
     for turn in state.turns:
+        for task_id in turn.selected_task_ids:
+            if task_id not in known_task_ids:
+                raise ValueError(
+                    "HarnessTurn selected_task_ids must resolve to known tasks."
+                )
         for signal in turn.no_progress_signals:
             if signal.task_id is not None and signal.task_id not in known_task_ids:
                 raise ValueError(

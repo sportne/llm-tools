@@ -256,13 +256,13 @@ rehydration and resume classification for runnable, waiting-for-approval,
 expired-approval, terminal, incompatible-schema, and corrupt persisted
 sessions. Coverage lives in `tests/harness_api/test_resume.py`.
 
-### [ ] Phase 3: Multi-turn Control Loop
+### [x] Phase 3: Multi-turn Control Loop
 
 Outcome: add a session-level executor that repeatedly builds turn context,
 calls the lower workflow layer, updates durable state, and decides whether to
 continue or stop.
 
-#### [ ] 3.1 Add `HarnessExecutor` above `workflow_api`
+#### [x] 3.1 Add `HarnessExecutor` above `workflow_api`
 
 Description: Define a `HarnessExecutor` or equivalent session-level executor
 that owns the durable control loop while delegating one-turn model/tool
@@ -280,7 +280,9 @@ Suggested deliverables:
 
 Dependencies: `1.3`, `2.3`, `2.4`
 
-#### [ ] 3.2 Define continue and stop semantics
+Status: Done. `src/llm_tools/harness_api/executor.py` now provides the concrete durable `HarnessExecutor`, sync and async entrypoints, driver/applier contracts, and the explicit composition boundary over `workflow_api.WorkflowExecutor`. Coverage lives in `tests/harness_api/test_harness_executor.py`.
+
+#### [x] 3.2 Define continue and stop semantics
 
 Description: Specify the canonical stop reasons and turn decisions that govern
 whether the harness continues, stops successfully, pauses for approval, stops
@@ -296,7 +298,9 @@ Suggested deliverables:
 
 Dependencies: `1.2`, `3.1`
 
-#### [ ] 3.3 Define retry and recovery behavior
+Status: Done. The harness executor now records canonical continue versus stop decisions, uses durable incomplete-tail turns for approval waits, surfaces approval stop reasons distinctly, and applies explicit budget stop rules before and after turn execution. Coverage lives in `tests/harness_api/test_harness_executor.py` and `tests/harness_api/test_harness_models.py`.
+
+#### [x] 3.3 Define retry and recovery behavior
 
 Description: Specify how the harness retries transient failures, recovers from
 recoverable state mismatches, and records retry attempts at the session and task
@@ -313,7 +317,9 @@ Suggested deliverables:
 
 Dependencies: `2.2`, `2.4`, `3.1`, `3.2`
 
-#### [ ] 3.4 Define per-turn state update sequencing
+Status: Done. The executor now classifies retryable provider and tool failures, persists durable session/task retry counters, replays persisted approvals safely, and retries optimistic-concurrency save conflicts without rerunning tool execution. Coverage lives in `tests/harness_api/test_harness_executor.py`.
+
+#### [x] 3.4 Define per-turn state update sequencing
 
 Description: Document the exact sequence for reading session state, selecting
 work, building context, executing a turn, applying results, persisting updates,
@@ -328,6 +334,8 @@ Suggested deliverables:
 - Failure-handling guidance for each turn phase
 
 Dependencies: `2.3`, `3.1`, `3.2`, `3.3`
+
+Status: Done. Turn sequencing is now explicit in `HarnessExecutor`: pre-turn budget checks, task selection, context construction, one-turn workflow execution, approval wait persistence, post-turn application, terminal stop stamping, and conflict-aware save commit points are all encoded in the durable executor flow and documented in `docs/design/harness_api.md`.
 
 ### [x] Phase 4: Verification Subsystem
 
@@ -528,12 +536,12 @@ Suggested deliverables:
 
 Dependencies: `2.3`, `6.1`, `6.2`
 
-### [ ] Phase 7: Approval and Policy Integration
+### [~] Phase 7: Approval and Policy Integration
 
 Outcome: make approvals and policy decisions durable session concerns rather
 than transient workflow events.
 
-#### [ ] 7.1 Persist approval state
+#### [x] 7.1 Persist approval state
 
 Description: Define how pending approvals, approval decisions, expiration, and
 related policy metadata are stored in harness state.
@@ -548,7 +556,9 @@ Suggested deliverables:
 
 Dependencies: `2.3`, `2.4`, `3.1`
 
-#### [ ] 7.2 Support approval-aware stop and resume semantics
+Status: Done. Pending approvals remain durable through `PendingApprovalRecord`, incomplete tail turns, and resume-time validation, while `WorkflowExecutor` now exposes persisted-approval replay helpers that the harness can drive directly. Coverage lives in `tests/harness_api/test_resume.py`, `tests/harness_api/test_harness_executor.py`, and `tests/workflow_api/test_executor.py`.
+
+#### [x] 7.2 Support approval-aware stop and resume semantics
 
 Description: Specify how the harness pauses for approval, exposes that stop
 reason, and resumes safely after approval, denial, timeout, or operator cancel.
@@ -562,6 +572,8 @@ Suggested deliverables:
 - Session UX requirements for surfaced approval state
 
 Dependencies: `3.2`, `7.1`
+
+Status: Done. The harness now pauses on persisted approval waits, resumes safely after approval, denial, timeout, or operator cancel, and maps those outcomes onto explicit session stop reasons without losing the underlying workflow approval outcomes. Coverage lives in `tests/harness_api/test_harness_executor.py` and `tests/harness_api/test_resume.py`.
 
 #### [ ] 7.3 Snapshot policy context into traces
 

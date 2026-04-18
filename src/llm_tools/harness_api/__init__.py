@@ -1,5 +1,13 @@
 """Harness-layer orchestration contracts for durable multi-turn execution."""
 
+from llm_tools.harness_api.executor import (
+    ApprovalResolution,
+    HarnessExecutionResult,
+    HarnessExecutor,
+    HarnessRetryPolicy,
+    HarnessTurnApplier,
+    HarnessTurnDriver,
+)
 from llm_tools.harness_api.models import (
     BudgetPolicy,
     HarnessSession,
@@ -98,6 +106,12 @@ __all__ = [
     "unblock_task",
     "UnsupportedHarnessStateVersionError",
     "VerificationEvidenceRecord",
+    "ApprovalResolution",
+    "HarnessExecutionResult",
+    "HarnessExecutor",
+    "HarnessRetryPolicy",
+    "HarnessTurnApplier",
+    "HarnessTurnDriver",
     "VerificationExpectation",
     "VerificationFailureMode",
     "VerificationOutcome",

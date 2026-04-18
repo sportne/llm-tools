@@ -94,4 +94,6 @@ def test_serialization_rejects_unsupported_schema_versions() -> None:
 
 def test_deserialize_rejects_corrupt_payloads() -> None:
     with pytest.raises(ValidationError):
-        deserialize_harness_state('{"schema_version":"2","session":{"session_id":"s"}}')
+        deserialize_harness_state(
+            f'{{"schema_version":"{CURRENT_HARNESS_STATE_SCHEMA_VERSION}","session":{{"session_id":"s"}}}}'
+        )

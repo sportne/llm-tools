@@ -13,6 +13,7 @@ from pydantic import BaseModel, ValidationError
 
 import llm_tools.tool_api.runtime as runtime_module
 import llm_tools.tools.git.tools as git_tools
+from llm_tools.harness_api import PendingApprovalRecord
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import (
     ErrorCode,
@@ -103,6 +104,35 @@ def _approval_request(index: int = 1) -> ApprovalRequest:
         policy_metadata={"tool_name": "read_file"},
         requested_at="2026-01-01T00:00:00Z",
         expires_at="2026-01-01T00:05:00Z",
+    )
+
+
+def _persisted_approval_record(tmp_path: str) -> PendingApprovalRecord:
+    parsed_response = ParsedModelResponse(
+        invocations=[
+            {"tool_name": "list_directory", "arguments": {"path": "."}},
+            {
+                "tool_name": "write_file",
+                "arguments": {"path": "resume.txt", "content": "approved"},
+            },
+        ]
+    )
+    return PendingApprovalRecord(
+        approval_request=ApprovalRequest(
+            approval_id="approval-persisted-1",
+            invocation_index=1,
+            request=parsed_response.invocations[0],
+            tool_name="list_directory",
+            tool_version="0.1.0",
+            policy_reason="approval required",
+            requested_at="2026-01-01T00:00:00Z",
+            expires_at="2026-01-01T00:05:00Z",
+        ),
+        parsed_response=parsed_response,
+        base_context=ToolContext(
+            invocation_id="persisted-approval", workspace=str(tmp_path)
+        ),
+        pending_index=1,
     )
 
 
@@ -966,3 +996,64 @@ def test_workflow_executor_async_approval_roundtrip(tmp_path: str) -> None:
         ]
 
     asyncio.run(run())
+
+
+def test_workflow_executor_can_resume_persisted_approval_records(tmp_path: str) -> None:
+    registry = ToolRegistry()
+    register_filesystem_tools(registry)
+    executor = WorkflowExecutor(
+        registry,
+        policy=ToolPolicy(
+            allowed_side_effects={
+                SideEffectClass.NONE,
+                SideEffectClass.LOCAL_READ,
+                SideEffectClass.LOCAL_WRITE,
+            },
+            require_approval_for={SideEffectClass.LOCAL_READ},
+        ),
+    )
+
+    record = _persisted_approval_record(tmp_path)
+    resumed = executor.resume_persisted_approval(record, "approve")
+
+    statuses = [outcome.status for outcome in resumed.outcomes]
+    assert statuses == [
+        WorkflowInvocationStatus.EXECUTED,
+        WorkflowInvocationStatus.EXECUTED,
+    ]
+
+
+def test_workflow_executor_can_resume_persisted_approval_denials_and_timeouts(
+    tmp_path: str,
+) -> None:
+    registry = ToolRegistry()
+    register_filesystem_tools(registry)
+    executor = WorkflowExecutor(
+        registry,
+        policy=ToolPolicy(
+            allowed_side_effects={
+                SideEffectClass.NONE,
+                SideEffectClass.LOCAL_READ,
+                SideEffectClass.LOCAL_WRITE,
+            },
+            require_approval_for={SideEffectClass.LOCAL_READ},
+        ),
+    )
+
+    denied = executor.resume_persisted_approval(
+        _persisted_approval_record(tmp_path), "deny"
+    )
+    assert denied.outcomes[0].status is WorkflowInvocationStatus.APPROVAL_DENIED
+    assert denied.outcomes[1].status is WorkflowInvocationStatus.EXECUTED
+
+    expired = executor.resume_persisted_approval(
+        _persisted_approval_record(tmp_path), "expire"
+    )
+    assert expired.outcomes[0].status is WorkflowInvocationStatus.APPROVAL_TIMED_OUT
+    assert expired.outcomes[1].status is WorkflowInvocationStatus.EXECUTED
+
+    canceled = executor.resume_persisted_approval(
+        _persisted_approval_record(tmp_path), "cancel"
+    )
+    assert canceled.outcomes[0].status is WorkflowInvocationStatus.APPROVAL_DENIED
+    assert canceled.outcomes[1].status is WorkflowInvocationStatus.EXECUTED
