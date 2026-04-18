@@ -1603,7 +1603,7 @@ def process_streamlit_chat_turn(  # pragma: no cover
     )
 
 
-def _provider_control_strip(  # pragma: no cover
+def _provider_control_strip(  # pragma: no cover  # noqa: C901
     app_state: StreamlitWorkspaceState,
     *,
     config: TextualChatConfig,
@@ -1714,17 +1714,29 @@ def _provider_control_strip(  # pragma: no cover
         key=f"recent-root:{session_id}",
         disabled=busy,
     )
+    recent_root_key = f"recent-root:{session_id}"
     if selected_recent_root != _ROOT_SENTINEL:
-        runtime.root_path = selected_recent_root
-        runtime.enabled_tools = sorted(
-            _default_enabled_tool_names(config, root_path=Path(selected_recent_root))
-            if not runtime.enabled_tools
-            else _filter_enabled_tools_for_root(
-                set(runtime.enabled_tools),
-                root_path=selected_recent_root,
+        resolved_root, error_message = _resolve_root_text(selected_recent_root)
+        st.session_state[recent_root_key] = _ROOT_SENTINEL
+        if error_message is not None:
+            _append_notice(record, role="error", text=error_message)
+        elif resolved_root is not None:
+            previous_root = runtime.root_path
+            runtime.root_path = resolved_root
+            runtime.enabled_tools = sorted(
+                _default_enabled_tool_names(config, root_path=Path(resolved_root))
+                if previous_root is None and not runtime.enabled_tools
+                else _filter_enabled_tools_for_root(
+                    set(runtime.enabled_tools),
+                    root_path=resolved_root,
+                )
             )
-        )
-        _remember_runtime_preferences(app_state.preferences, runtime)
+            _remember_runtime_preferences(app_state.preferences, runtime)
+            _append_notice(
+                record,
+                role="system",
+                text=f"Workspace root updated to {runtime.root_path}.",
+            )
         _touch_record(record)
         _save_workspace_state(app_state)
         st.rerun()

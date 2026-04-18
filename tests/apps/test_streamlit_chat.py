@@ -1272,6 +1272,57 @@ def test_streamlit_chat_provider_controls_tools_popover_and_composer(
     assert record.runtime.root_path == str(tmp_path.resolve())
     assert record.transcript[-1].text.startswith("Workspace root updated")
 
+    recent_state = _make_app_state(root_path=None)
+    recent_session = recent_state.active_session_id
+    recent_record = recent_state.sessions[recent_session]
+    recent_state.preferences.recent_roots = [str(tmp_path.resolve())]
+    fake_recent_root = _FakeStreamlit(
+        selectbox_values={f"recent-root:{recent_session}": str(tmp_path.resolve())},
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_recent_root
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app,
+        "_available_model_options",
+        lambda *args: (["gemma4:26b"], None),
+    )
+    with pytest.raises(_RerunRequestError):
+        _STREAMLIT_MODULES.app._provider_control_strip(
+            recent_state,
+            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+            session_id=recent_session,
+        )
+    assert recent_record.runtime.root_path == str(tmp_path.resolve())
+    assert recent_record.transcript[-1].text.startswith("Workspace root updated")
+    assert fake_recent_root.session_state[f"recent-root:{recent_session}"] == (
+        _STREAMLIT_MODULES.app._ROOT_SENTINEL
+    )
+
+    stale_state = _make_app_state(root_path=None)
+    stale_session = stale_state.active_session_id
+    stale_record = stale_state.sessions[stale_session]
+    missing_root = str((tmp_path / "missing-root").resolve())
+    stale_state.preferences.recent_roots = [missing_root]
+    fake_stale_root = _FakeStreamlit(
+        selectbox_values={f"recent-root:{stale_session}": missing_root},
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_stale_root
+    )
+    with pytest.raises(_RerunRequestError):
+        _STREAMLIT_MODULES.app._provider_control_strip(
+            stale_state,
+            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+            session_id=stale_session,
+        )
+    assert stale_record.runtime.root_path is None
+    assert stale_record.transcript[-1].role == "error"
+    assert "does not exist" in stale_record.transcript[-1].text
+    assert fake_stale_root.session_state[f"recent-root:{stale_session}"] == (
+        _STREAMLIT_MODULES.app._ROOT_SENTINEL
+    )
+
     fake_tools = _FakeStreamlit(
         button_values={f"tools-all:{session_id}": True},
     )
