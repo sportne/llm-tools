@@ -11,6 +11,7 @@ from types import ModuleType
 import pytest
 from pydantic import BaseModel, ValidationError
 
+import llm_tools.tool_api.runtime as runtime_module
 import llm_tools.tools.git.tools as git_tools
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import (
@@ -33,6 +34,14 @@ from llm_tools.workflow_api.models import (
     WorkflowInvocationOutcome,
     WorkflowInvocationStatus,
 )
+
+
+@pytest.fixture(autouse=True)
+def _inline_to_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _run_inline(func: object, /, *args: object, **kwargs: object) -> object:
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(runtime_module.asyncio, "to_thread", _run_inline)
 
 
 class _AsyncEchoInput(BaseModel):

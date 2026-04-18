@@ -7,14 +7,26 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.apps._imports import import_textual_workbench_modules
 
-from llm_tools.apps.textual_workbench.controller import WorkbenchController
+import llm_tools.tool_api.runtime as runtime_module
 from llm_tools.apps.textual_workbench.models import ProviderModeStrategy, ProviderPreset
 from llm_tools.llm_adapters import ParsedModelResponse
-from llm_tools.llm_providers import ProviderModeStrategy as ProviderRunMode
 from llm_tools.tool_api import SideEffectClass
 from llm_tools.workflow_api import WorkflowTurnResult
 from llm_tools.workflow_api.models import WorkflowInvocationStatus
+
+_WORKBENCH_MODULES = import_textual_workbench_modules()
+WorkbenchController = _WORKBENCH_MODULES.controller.WorkbenchController
+ProviderRunMode = _WORKBENCH_MODULES.controller.ProviderRunMode
+
+
+@pytest.fixture(autouse=True)
+def _inline_to_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _run_inline(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(runtime_module.asyncio, "to_thread", _run_inline)
 
 
 class _FakeProvider:

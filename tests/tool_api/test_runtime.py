@@ -9,6 +9,7 @@ from typing import Any, cast
 import pytest
 from pydantic import BaseModel
 
+import llm_tools.tool_api.runtime as runtime_module
 from llm_tools.tool_api import (
     ErrorCode,
     SideEffectClass,
@@ -22,6 +23,14 @@ from llm_tools.tool_api import (
     ToolSpec,
 )
 from llm_tools.tool_api.runtime import _ExecutionState
+
+
+@pytest.fixture(autouse=True)
+def _inline_to_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _run_inline(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(runtime_module.asyncio, "to_thread", _run_inline)
 
 
 class RuntimeInput(BaseModel):

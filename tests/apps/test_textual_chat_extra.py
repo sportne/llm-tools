@@ -10,20 +10,11 @@ import pytest
 
 pytest.importorskip("textual")
 
+from tests.apps._imports import import_textual_chat_modules
 from textual.containers import VerticalScroll
 from textual.widgets import Button, Input, Static
 
-from llm_tools.apps.textual_chat import __main__ as chat_main_module
-from llm_tools.apps.textual_chat.app import ChatApp, run_chat_app
 from llm_tools.apps.textual_chat.config import load_textual_chat_config
-from llm_tools.apps.textual_chat.controller import (
-    build_available_tool_specs,
-    build_chat_context,
-    build_chat_executor,
-    build_chat_policy,
-    build_chat_system_prompt_for_screen,
-    create_provider,
-)
 from llm_tools.apps.textual_chat.models import (
     ChatCredentialPromptMetadata,
     ProviderPreset,
@@ -47,6 +38,19 @@ from llm_tools.workflow_api import (
     ChatWorkflowTurnResult,
 )
 from llm_tools.workflow_api.models import ApprovalRequest
+
+_CHAT_MODULES = import_textual_chat_modules()
+chat_main_module = _CHAT_MODULES.main
+ChatApp = _CHAT_MODULES.app.ChatApp
+run_chat_app = _CHAT_MODULES.app.run_chat_app
+build_available_tool_specs = _CHAT_MODULES.controller.build_available_tool_specs
+build_chat_context = _CHAT_MODULES.controller.build_chat_context
+build_chat_executor = _CHAT_MODULES.controller.build_chat_executor
+build_chat_policy = _CHAT_MODULES.controller.build_chat_policy
+build_chat_system_prompt_for_screen = (
+    _CHAT_MODULES.controller.build_chat_system_prompt_for_screen
+)
+create_provider = _CHAT_MODULES.controller.create_provider
 
 
 class _ProviderOk:
