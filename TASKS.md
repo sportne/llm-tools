@@ -163,12 +163,12 @@ Suggested deliverables:
 
 Dependencies: `1.2`, `1.3`
 
-### [ ] Phase 2: State and Task Representation
+### [x] Phase 2: State and Task Representation
 
 Outcome: make work explicit and durable by introducing structured task records,
 task lifecycle operations, and persisted session state that can be resumed.
 
-#### [ ] 2.1 Define structured task records
+#### [x] 2.1 Define structured task records
 
 Description: Specify a canonical `TaskRecord` or equivalent harness model for
 unit-of-work tracking, including task identity, intent, status, dependencies,
@@ -185,7 +185,13 @@ Suggested deliverables:
 
 Dependencies: `1.2`
 
-#### [ ] 2.2 Define task lifecycle operations
+Status: Done. `src/llm_tools/harness_api/models.py` now defines the canonical
+Phase 2 task shape, including task intent, user-requested versus derived task
+origin, verification expectations, artifact refs, supersession metadata, and
+durable pending approval records for interrupted turns. Coverage lives in
+`tests/harness_api/test_harness_models.py`.
+
+#### [x] 2.2 Define task lifecycle operations
 
 Description: Specify the allowed task state transitions and the operations that
 move tasks through their lifecycle, such as create, start, block, complete,
@@ -202,7 +208,12 @@ Suggested deliverables:
 
 Dependencies: `2.1`
 
-#### [ ] 2.3 Add durable harness state storage abstractions
+Status: Done. `src/llm_tools/harness_api/tasks.py` now owns the explicit task
+state-machine helpers for create/start/block/unblock/complete/fail/cancel and
+supersede operations, with deterministic `InvalidTaskLifecycleError` failures.
+Coverage lives in `tests/harness_api/test_task_lifecycle.py`.
+
+#### [x] 2.3 Add durable harness state storage abstractions
 
 Description: Define storage interfaces for persisting sessions, turns, task
 records, approvals, verification evidence, and summarized projections needed
@@ -219,7 +230,12 @@ Suggested deliverables:
 
 Dependencies: `1.2`, `2.1`, `2.2`
 
-#### [ ] 2.4 Support session resume from persisted state
+Status: Done. `src/llm_tools/harness_api/store.py` now provides the canonical
+storage contract around `HarnessState`, including version gating,
+serialization helpers, optimistic-concurrency snapshots, and an in-memory
+store implementation. Coverage lives in `tests/harness_api/test_store.py`.
+
+#### [x] 2.4 Support session resume from persisted state
 
 Description: Define how a harness session is rehydrated from storage, including
 how incomplete turns, pending approvals, active tasks, and verification status
@@ -234,6 +250,11 @@ Suggested deliverables:
 - Explicit handling for corrupt, partial, or incompatible persisted state
 
 Dependencies: `2.3`
+
+Status: Done. `src/llm_tools/harness_api/resume.py` now defines typed
+rehydration and resume classification for runnable, waiting-for-approval,
+expired-approval, terminal, incompatible-schema, and corrupt persisted
+sessions. Coverage lives in `tests/harness_api/test_resume.py`.
 
 ### [ ] Phase 3: Multi-turn Control Loop
 
