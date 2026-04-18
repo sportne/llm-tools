@@ -1070,13 +1070,13 @@ Prohibited directions:
 * `tool_api` must not depend on `llm_providers`
 * `tool_api` must not depend on `tools`
 * `tool_api` must not depend on `harness_api`
-* `llm_adapters` should not depend on `harness_api`
-* `llm_providers` should not depend on `harness_api`
+* `llm_adapters` must not depend on `harness_api`
+* `llm_providers` must not depend on `harness_api`
 * `tools` should not depend on `llm_adapters`
 * `tools` should not depend on `llm_providers`
 * `tools` should not depend on `workflow_api`
-* `tools` should not depend on `harness_api`
-* `workflow_api` should not depend on `harness_api`
+* `tools` must not depend on `harness_api`
+* `workflow_api` must not depend on `harness_api`
 
 ---
 

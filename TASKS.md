@@ -622,7 +622,7 @@ Suggested deliverables:
 
 Dependencies: `3.4`, `4.3`, `5.3`, `6.2`, `7.2`, `8.1`
 
-#### [ ] 9.3 Add architecture tests for layering boundaries
+#### [x] 9.3 Add architecture tests for layering boundaries
 
 Description: Extend architecture enforcement so `harness_api` depends only on
 approved lower layers and lower layers do not import harness concerns.
