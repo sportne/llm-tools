@@ -9,11 +9,10 @@ import pytest
 
 pytest.importorskip("textual")
 
+from tests.apps._imports import import_textual_chat_modules
 from textual.containers import VerticalScroll
 from textual.widgets import Button, Static
 
-from llm_tools.apps.textual_chat import _resolve_chat_config, build_parser
-from llm_tools.apps.textual_chat.app import ChatApp, ChatScreen
 from llm_tools.apps.textual_chat.config import load_textual_chat_config
 from llm_tools.apps.textual_chat.models import TextualChatConfig
 from llm_tools.apps.textual_chat.presentation import (
@@ -30,6 +29,12 @@ from llm_tools.workflow_api import (
     ChatWorkflowResultEvent,
     ChatWorkflowTurnResult,
 )
+
+_CHAT_MODULES = import_textual_chat_modules()
+_resolve_chat_config = _CHAT_MODULES.package._resolve_chat_config
+build_parser = _CHAT_MODULES.package.build_parser
+ChatApp = _CHAT_MODULES.app.ChatApp
+ChatScreen = _CHAT_MODULES.app.ChatScreen
 
 
 class _FakeProvider:

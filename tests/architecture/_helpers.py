@@ -3,25 +3,12 @@
 from __future__ import annotations
 
 import ast
+import os
 from collections.abc import Iterator
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from typing import Any
-
-from llm_tools.tool_api import (
-    SideEffectClass,
-    Tool,
-    ToolContext,
-    ToolPolicy,
-    ToolRegistry,
-    ToolRuntime,
-)
-from llm_tools.tools import (
-    register_atlassian_tools,
-    register_filesystem_tools,
-    register_git_tools,
-    register_text_tools,
-)
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SRC_DIR = ROOT_DIR / "src"
@@ -61,12 +48,16 @@ class InvocationReference:
 
 def iter_python_files(root: Path) -> Iterator[Path]:
     """Yield repository Python files in a stable order."""
-    for path in sorted(root.rglob("*.py")):
-        if any(part in _SKIPPED_PARTS for part in path.parts):
-            continue
-        yield path
+    for directory, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(name for name in dirnames if name not in _SKIPPED_PARTS)
+        current_dir = Path(directory)
+        for filename in sorted(filenames):
+            if not filename.endswith(".py"):
+                continue
+            yield current_dir / filename
 
 
+@cache
 def parse_module(path: Path) -> ast.AST:
     """Parse one Python file into an AST."""
     return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -136,8 +127,16 @@ def is_approved_direct_invocation_path(path: Path) -> bool:
     return path in APPROVED_DIRECT_INVOCATION_PATHS or is_repo_test_path(path)
 
 
-def build_builtin_registry() -> ToolRegistry:
+def build_builtin_registry() -> Any:
     """Register the current built-in tool suites in one registry."""
+    from llm_tools.tool_api import ToolRegistry
+    from llm_tools.tools import (
+        register_atlassian_tools,
+        register_filesystem_tools,
+        register_git_tools,
+        register_text_tools,
+    )
+
     registry = ToolRegistry()
     register_filesystem_tools(registry)
     register_git_tools(registry)
@@ -146,19 +145,21 @@ def build_builtin_registry() -> ToolRegistry:
     return registry
 
 
-def builtin_tools() -> list[Tool[Any, Any]]:
+def builtin_tools() -> list[Any]:
     """Return all built-in tools registered by the repository helpers."""
     return build_builtin_registry().list_registered_tools()
 
 
 def builtin_runtime(
     *,
-    allowed_side_effects: set[SideEffectClass] | None = None,
+    allowed_side_effects: set[Any] | None = None,
     allow_filesystem: bool = True,
     allow_network: bool = True,
     allow_subprocess: bool = True,
-) -> ToolRuntime:
+) -> Any:
     """Return a runtime wired to the current built-in registry."""
+    from llm_tools.tool_api import SideEffectClass, ToolPolicy, ToolRuntime
+
     policy = ToolPolicy(
         allowed_side_effects=allowed_side_effects
         or {
@@ -179,8 +180,10 @@ def filesystem_context(
     *,
     invocation_id: str,
     metadata: dict[str, Any] | None = None,
-) -> ToolContext:
+) -> Any:
     """Build a filesystem-friendly tool context using current repo conventions."""
+    from llm_tools.tool_api import ToolContext
+
     return ToolContext(
         invocation_id=invocation_id,
         workspace=str(workspace),

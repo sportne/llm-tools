@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import runpy
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,11 +12,8 @@ import pytest
 
 pytest.importorskip("textual")
 
-import llm_tools.apps.textual_chat as chat_module
-import llm_tools.apps.textual_chat.app as app_module
-import llm_tools.apps.textual_chat.controller as controller_module
-from llm_tools.apps.textual_chat import __main__ as chat_main_module
-from llm_tools.apps.textual_chat.app import ChatApp, ChatScreen
+from tests.apps._imports import import_textual_chat_modules
+
 from llm_tools.apps.textual_chat.models import (
     ChatLLMConfig,
     ProviderPreset,
@@ -40,6 +38,14 @@ from llm_tools.workflow_api import (
     ChatWorkflowTurnResult,
 )
 from llm_tools.workflow_api.models import ApprovalRequest
+
+_CHAT_MODULES = import_textual_chat_modules()
+chat_module = _CHAT_MODULES.package
+app_module = _CHAT_MODULES.app
+controller_module = _CHAT_MODULES.controller
+chat_main_module = _CHAT_MODULES.main
+ChatApp = app_module.ChatApp
+ChatScreen = app_module.ChatScreen
 
 
 class _Provider:
@@ -126,6 +132,7 @@ llm:
 
     monkeypatch.setattr(chat_module, "main", lambda: 19)
     assert chat_main_module._main() == 19
+    sys.modules.pop("llm_tools.apps.textual_chat.__main__", None)
     with pytest.raises(SystemExit) as exc:
         runpy.run_module("llm_tools.apps.textual_chat.__main__", run_name="__main__")
     assert exc.value.code == 19

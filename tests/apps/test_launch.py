@@ -9,6 +9,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from tests.apps._imports import import_textual_workbench_modules
 
 
 def test_textual_workbench_package_imports_without_loading_textual() -> None:
@@ -89,7 +90,7 @@ def test_module_entrypoint_raises_system_exit_with_main_return_code(
 def test_app_module_run_helpers_dispatch_to_textual_app_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app_module = importlib.import_module("llm_tools.apps.textual_workbench.app")
+    app_module = import_textual_workbench_modules().app
     called: list[str] = []
 
     monkeypatch.setattr(
