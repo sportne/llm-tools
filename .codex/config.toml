@@ -1,0 +1,8 @@
+# llm-tools/.codex/config.toml
+
+model = "gpt-5.4"  # main orchestrator
+model_reasoning_effort = "high"
+
+[agents]
+max_threads = 6
+max_depth = 1
