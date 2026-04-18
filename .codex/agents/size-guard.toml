@@ -1,4 +1,5 @@
 name = "size_guard"
+thread_prefix = "[SIZE]"
 description = "Read-only reviewer focused on preventing unnecessary codebase growth, duplication, and complexity."
 model = "gpt-5.4"
 model_reasoning_effort = "medium"

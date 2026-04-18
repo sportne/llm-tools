@@ -1,4 +1,5 @@
 name = "docs_keeper"
+thread_prefix = "[DOC]"
 description = "Read-only reviewer focused on keeping documentation accurate, complete, and aligned with the current code."
 model = "gpt-5.4-mini"
 model_reasoning_effort = "medium"

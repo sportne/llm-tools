@@ -1,4 +1,5 @@
 name = "commit_message_writer"
+thread_prefix = "[CMT]"
 description = "Creates concise, accurate commit messages from staged or selected changes."
 model = "gpt-5.4-mini"
 model_reasoning_effort = "low"

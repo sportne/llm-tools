@@ -1,4 +1,5 @@
 name = "test_runner"
+thread_prefix = "[TEST]"
 description = "Execution-focused agent that runs targeted tests, explains failures and then runs all tests."
 model = "gpt-5.4-mini"
 model_reasoning_effort = "medium"

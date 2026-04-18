@@ -1,4 +1,5 @@
 name = "planner"
+thread_prefix = "[PLN]"
 description = "High-reasoning planning agent that scopes work, identifies risks, and proposes a concrete implementation plan before coding."
 model = "gpt-5.4"
 model_reasoning_effort = "high"
