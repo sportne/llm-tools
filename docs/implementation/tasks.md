@@ -293,6 +293,13 @@ Step 0 note:
 - [x] Add chat tool, workflow, and Textual regression tests
 - [x] Add repository chat usage documentation
 
+### 11.6 Streamlit repository chat app
+- [x] Add `llm_tools.apps.streamlit_chat`
+- [x] Add `llm-tools-streamlit-chat` console entrypoint
+- [x] Keep Streamlit behind an optional dependency
+- [x] Reuse the existing repository-chat config shape and grounded workflow flow
+- [x] Add focused Streamlit app-layer tests and usage documentation
+
 ---
 
 ## 12. Approval workflow outcomes
