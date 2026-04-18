@@ -22,8 +22,8 @@ The core v0.1 foundation is implemented:
 - a current `workflow_api` bridge for one parsed model turn plus an interactive
   repository-chat session runner
 - dual sync/async execution paths across runtime, provider, and workflow layers
-- an optional `apps` layer with a Textual repository chat client and
-  developer-facing workbench
+- optional app layers with Textual and Streamlit repository chat clients plus a
+  developer-facing Textual workbench
 
 ## Core Concepts
 
@@ -67,6 +67,12 @@ To install the optional Textual apps:
 
 ```bash
 ~/.venvs/llm-tools/bin/python -m pip install -e .[apps]
+```
+
+To install the optional Streamlit chat app:
+
+```bash
+.venv/bin/python -m pip install -e .[streamlit]
 ```
 
 ## Development
@@ -114,6 +120,27 @@ or:
 
 ```bash
 llm-tools-chat <directory> --config <path>
+```
+
+## Streamlit Chat App
+
+Launch the optional Streamlit repository chat app with either:
+
+```bash
+python -m llm_tools.apps.streamlit_chat <directory> --config <path>
+```
+
+or:
+
+```bash
+llm-tools-streamlit-chat <directory> --config <path>
+```
+
+The wrapper accepts only the chat app's own arguments. To pass regular
+Streamlit server flags, run Streamlit directly:
+
+```bash
+streamlit run src/llm_tools/apps/streamlit_chat/app.py -- <directory> --config <path>
 ```
 
 ## Examples
