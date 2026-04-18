@@ -1,4 +1,4 @@
-VENV := .venv
+VENV ?= $(HOME)/.venvs/llm-tools
 PYTHON := $(VENV)/bin/python
 
 SRC_DIR := src
@@ -14,8 +14,8 @@ PACKAGE := llm_tools
 
 help:
 	@echo "llm-tools Makefile targets:"
-	@echo "  make setup-venv   - Create virtual environment"
-	@echo "  make install-dev  - Install project with dev dependencies"
+	@echo "  make setup-venv   - Create shared virtual environment at $(VENV)"
+	@echo "  make install-dev  - Install current checkout with dev dependencies"
 	@echo "  make format       - Run Ruff formatting"
 	@echo "  make format-check - Check Ruff formatting"
 	@echo "  make lint         - Run Ruff linting"
@@ -27,36 +27,39 @@ help:
 	@echo "  make clean        - Remove local build and test artifacts"
 	@echo "  make ci           - Run format-check, lint, typecheck, and coverage gates"
 
-setup-venv:
-	python3 -m venv $(VENV)
+$(PYTHON):
+	mkdir -p "$(dir $(VENV))"
+	python3 -m venv "$(VENV)"
 
-install-dev:
-	$(PYTHON) -m pip install --upgrade pip
-	$(PYTHON) -m pip install -e .[dev]
+setup-venv: $(PYTHON)
+
+install-dev: $(PYTHON)
+	"$(PYTHON)" -m pip install --upgrade pip
+	"$(PYTHON)" -m pip install -e .[dev]
 
 format:
-	$(PYTHON) -m ruff format $(SRC_DIR) $(TEST_DIR)
+	"$(PYTHON)" -m ruff format $(SRC_DIR) $(TEST_DIR)
 
 format-check:
-	$(PYTHON) -m ruff format --check $(SRC_DIR) $(TEST_DIR)
+	"$(PYTHON)" -m ruff format --check $(SRC_DIR) $(TEST_DIR)
 
 lint:
-	$(PYTHON) -m ruff check $(SRC_DIR) $(TEST_DIR)
+	"$(PYTHON)" -m ruff check $(SRC_DIR) $(TEST_DIR)
 
 typecheck:
-	$(PYTHON) -m mypy $(SRC_DIR)
+	"$(PYTHON)" -m mypy $(SRC_DIR)
 
 test:
-	$(PYTHON) -m pytest
+	"$(PYTHON)" -m pytest
 
 coverage-report:
-	$(PYTHON) -m pytest --cov=$(PACKAGE) --cov-report=term-missing --cov-report=json:coverage.json
+	"$(PYTHON)" -m pytest --cov=$(PACKAGE) --cov-report=term-missing --cov-report=json:coverage.json
 
 coverage: coverage-report
-	$(PYTHON) scripts/check_coverage.py --input coverage.json --threshold 90
+	"$(PYTHON)" scripts/check_coverage.py --input coverage.json --threshold 90
 
 package:
-	$(PYTHON) -m build --no-isolation
+	"$(PYTHON)" -m build --no-isolation
 
 clean:
 	rm -rf build dist .coverage .mypy_cache .pytest_cache .ruff_cache *.egg-info src/*.egg-info coverage.json

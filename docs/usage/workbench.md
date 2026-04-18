@@ -16,8 +16,13 @@ It does not add chat memory, replanning, or an agent loop.
 Install the optional app dependencies:
 
 ```bash
-.venv/bin/python -m pip install -e .[apps]
+~/.venvs/llm-tools/bin/python -m pip install -e .[apps]
 ```
+
+The project defaults to a shared virtualenv at `~/.venvs/llm-tools`, so the
+same environment can be reused from the main checkout and any worktree. If you
+switch checkouts, re-run `make install-dev` there to refresh the editable
+install path.
 
 ## Launch
 
