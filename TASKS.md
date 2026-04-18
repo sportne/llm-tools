@@ -125,7 +125,7 @@ Dependencies: `1.1`
 
 Status: Done. Canonical harness models now live in
 `src/llm_tools/harness_api/models.py`, with direct coverage in
-`tests/harness_api/test_models.py` and persistence notes in
+`tests/harness_api/test_harness_models.py` and persistence notes in
 `docs/design/harness_api.md`.
 
 #### [x] 1.3 Define harness boundaries relative to lower layers
