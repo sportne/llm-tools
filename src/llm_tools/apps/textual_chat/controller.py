@@ -5,12 +5,20 @@ from __future__ import annotations
 from os import getenv
 from time import monotonic
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
 from textual.containers import VerticalScroll
 from textual.timer import Timer
 from textual.widgets import Button, Static
 
+from llm_tools.apps.chat_runtime import (
+    build_available_tool_specs as build_shared_available_tool_specs,
+)
+from llm_tools.apps.chat_runtime import (
+    build_chat_context as build_shared_chat_context,
+)
+from llm_tools.apps.chat_runtime import (
+    build_chat_executor as build_shared_chat_executor,
+)
 from llm_tools.apps.textual_chat.models import ChatLLMConfig, ProviderPreset
 from llm_tools.apps.textual_chat.presentation import (
     AssistantMarkdownEntry,
@@ -34,7 +42,6 @@ from llm_tools.tool_api import (
     ToolRegistry,
     ToolSpec,
 )
-from llm_tools.tools import register_filesystem_tools, register_text_tools
 from llm_tools.workflow_api import (
     ChatWorkflowApprovalEvent,
     ChatWorkflowApprovalResolvedEvent,
@@ -746,14 +753,6 @@ def create_provider(
     )
 
 
-def build_chat_registry() -> ToolRegistry:
-    """Return the full generic tool registry available to the chat app."""
-    registry = ToolRegistry()
-    register_filesystem_tools(registry)
-    register_text_tools(registry)
-    return registry
-
-
 def build_chat_policy(screen: ChatScreen) -> ToolPolicy:
     """Build the session-scoped chat policy from current UI state."""
     return ToolPolicy(
@@ -771,42 +770,24 @@ def build_chat_executor(
     screen: ChatScreen | None = None,
 ) -> tuple[ToolRegistry, WorkflowExecutor]:
     """Return the chat registry and policy-aware executor for one turn."""
-    registry = build_chat_registry()
     if screen is None:
-        policy = ToolPolicy(
-            allowed_side_effects={SideEffectClass.NONE, SideEffectClass.LOCAL_READ},
-            allow_network=False,
-            allow_filesystem=True,
-            allow_subprocess=False,
-        )
+        return build_shared_chat_executor()
     else:
         policy = build_chat_policy(screen)
-    return registry, WorkflowExecutor(registry=registry, policy=policy)
+    return build_shared_chat_executor(policy=policy)
 
 
 def build_available_tool_specs() -> dict[str, ToolSpec]:
     """Return all chat-visible tool specs keyed by tool name."""
-    registry = build_chat_registry()
-    return {tool.spec.name: tool.spec for tool in registry.list_registered_tools()}
+    return build_shared_available_tool_specs()
 
 
 def build_chat_context(screen: ChatScreen) -> ToolContext:
     """Build the tool context passed into chat workflow execution."""
-    effective_read_limit = (
-        screen._config.tool_limits.max_read_file_chars
-        if screen._config.tool_limits.max_read_file_chars is not None
-        else max(1, screen._config.session.max_context_tokens * 4)
-    )
-    effective_tool_limits = screen._config.tool_limits.model_copy(
-        update={"max_read_file_chars": effective_read_limit}
-    )
-    return ToolContext(
-        invocation_id=f"textual-chat-{uuid4()}",
-        workspace=str(screen._root_path),
-        metadata={
-            "source_filters": screen._config.source_filters.model_dump(mode="json"),
-            "tool_limits": effective_tool_limits.model_dump(mode="json"),
-        },
+    return build_shared_chat_context(
+        root_path=screen._root_path,
+        config=screen._config,
+        app_name="textual-chat",
     )
 
 
