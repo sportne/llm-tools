@@ -58,10 +58,15 @@ make setup-venv
 make install-dev
 ```
 
+The default development environment is shared across the main checkout and any
+git worktrees at `~/.venvs/llm-tools`. Re-run `make install-dev` from the
+checkout you are actively using so the shared environment's editable install
+points at that tree.
+
 To install the optional Textual apps:
 
 ```bash
-.venv/bin/python -m pip install -e .[apps]
+~/.venvs/llm-tools/bin/python -m pip install -e .[apps]
 ```
 
 ## Development

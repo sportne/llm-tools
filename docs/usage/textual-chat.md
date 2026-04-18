@@ -22,8 +22,12 @@ The first port targets OpenAI-compatible providers only:
 ## Install
 
 ```bash
-.venv/bin/python -m pip install -e .[apps]
+~/.venvs/llm-tools/bin/python -m pip install -e .[apps]
 ```
+
+The default development environment is shared at `~/.venvs/llm-tools` across
+the main checkout and any git worktrees. Re-run `make install-dev` from the
+checkout you want the shared environment to point at before launching the app.
 
 ## Launch
 
