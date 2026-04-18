@@ -148,16 +148,18 @@ class _FakeStreamlit:
         self.chat_input_calls = 0
         self.rerun_called = False
         self.page_config_calls = 0
+        self.page_config_kwargs: list[dict[str, object]] = []
         self.title_messages: list[str] = []
         self.button_calls = 0
         self.button_labels: list[str] = []
         self.text_area_values: dict[str, str] = {}
         self.download_calls: list[tuple[str, str, str | None]] = []
         self.checkbox_calls: list[str] = []
+        self.toggle_calls: list[str] = []
 
     def set_page_config(self, **kwargs: object) -> None:
-        del kwargs
         self.page_config_calls += 1
+        self.page_config_kwargs.append(kwargs)
 
     def title(self, text: str) -> None:
         self.title_messages.append(text)
@@ -166,7 +168,8 @@ class _FakeStreamlit:
     def subheader(self, text: str) -> None:
         self.markdown_messages.append(text)
 
-    def markdown(self, text: str) -> None:
+    def markdown(self, text: str, unsafe_allow_html: bool = False) -> None:
+        del unsafe_allow_html
         self.markdown_messages.append(text)
 
     def caption(self, text: str) -> None:
@@ -205,6 +208,17 @@ class _FakeStreamlit:
     ) -> bool:
         token = key or label
         self.checkbox_calls.append(token)
+        return self.checkbox_values.get(token, value)
+
+    def toggle(
+        self,
+        label: str,
+        *,
+        value: bool = False,
+        key: str | None = None,
+    ) -> bool:
+        token = key or label
+        self.toggle_calls.append(token)
         return self.checkbox_values.get(token, value)
 
     def text_area(
@@ -680,6 +694,17 @@ def test_streamlit_chat_app_requires_api_key_before_chat(
     _STREAMLIT_MODULES.app.run_streamlit_chat_app(root_path=tmp_path, config=config)
 
     assert fake_st.page_config_calls == 1
+    assert fake_st.page_config_kwargs == [
+        {
+            "page_title": "llm-tools Streamlit Chat",
+            "layout": "wide",
+            "menu_items": {
+                "Get help": None,
+                "Report a bug": None,
+                "About": None,
+            },
+        }
+    ]
     assert fake_st.title_messages == ["llm-tools Streamlit Chat"]
     assert fake_st.info_messages == [
         "Set OPENAI_API_KEY or enter it in the sidebar to start chatting."
@@ -955,6 +980,9 @@ def test_streamlit_chat_state_and_api_key_helpers_cover_session_branches(
         fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_EXPORT_STATE_SLOT]
         is False
     )
+    assert (
+        fake_st.session_state[_STREAMLIT_MODULES.app._THEME_MODE_STATE_SLOT] == "dark"
+    )
 
     transcript_entry = _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(
         role="assistant",
@@ -974,6 +1002,9 @@ def test_streamlit_chat_state_and_api_key_helpers_cover_session_branches(
     )
     _STREAMLIT_MODULES.app._reset_session_state(tmp_path, config)
     assert runner.cancelled is True
+    assert (
+        fake_st.session_state[_STREAMLIT_MODULES.app._THEME_MODE_STATE_SLOT] == "dark"
+    )
 
     api_key = _STREAMLIT_MODULES.app._resolve_api_key(config)
     assert api_key == "typed-secret"
@@ -1439,6 +1470,7 @@ def test_streamlit_chat_additional_helper_and_command_branches(
             "show_inspector": False,
             "transcript_export": False,
             "approvals:local_read": False,
+            "appearance:dark_mode": False,
         },
     )
     monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
@@ -1475,6 +1507,30 @@ def test_streamlit_chat_additional_helper_and_command_branches(
 
     monkeypatch.setitem(sys.modules, "streamlit", fake_st)
     assert _STREAMLIT_MODULES.app._streamlit_module() is fake_st
+
+    _STREAMLIT_MODULES.app._render_sidebar_appearance_controls()
+    assert fake_st.toggle_calls == ["appearance:dark_mode"]
+    assert (
+        fake_st.session_state[_STREAMLIT_MODULES.app._THEME_MODE_STATE_SLOT] == "light"
+    )
+    _STREAMLIT_MODULES.app._render_streamlit_theme()
+    assert any("color-scheme: light;" in text for text in fake_st.markdown_messages)
+    assert any(
+        "--llm-tools-page-background:" in text
+        and "--llm-tools-composer-shell-background:" in text
+        and '[data-testid="stChatInput"]' in text
+        and '[data-testid="stBottomBlockContainer"]' in text
+        and '[data-testid="collapsedControl"]' in text
+        and 'button[data-testid="stBaseButton-headerNoPadding"]' in text
+        and "-webkit-text-fill-color: var(--llm-tools-text-color);" in text
+        and "caret-color: var(--llm-tools-text-color);" in text
+        and "background: var(--llm-tools-page-background);" in text
+        and "border-width: 0;" in text
+        and "box-shadow: none;" in text
+        and "box-shadow:" in text
+        and "backdrop-filter: blur(10px);" in text
+        for text in fake_st.markdown_messages
+    )
 
     fake_st.session_state[_STREAMLIT_MODULES.app._API_SECRET_STATE_SLOT] = (
         "cached-secret"
@@ -1690,7 +1746,10 @@ def test_streamlit_chat_run_app_and_reducer_extra_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    fake_st = _FakeStreamlit(chat_input="/help")
+    fake_st = _FakeStreamlit(
+        chat_input="/help",
+        checkbox_values={"appearance:dark_mode": False},
+    )
     monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
     monkeypatch.setattr(_STREAMLIT_MODULES.app.os, "getenv", lambda name: "env-secret")
 
@@ -1730,6 +1789,10 @@ def test_streamlit_chat_run_app_and_reducer_extra_paths(
     assert not any(
         "Use /help for controls" in text for text in fake_st.caption_messages
     )
+    assert (
+        fake_st.session_state[_STREAMLIT_MODULES.app._THEME_MODE_STATE_SLOT] == "light"
+    )
+    assert any("color-scheme: light;" in text for text in fake_st.markdown_messages)
     transcript = fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_STATE_SLOT]
     assert transcript[-1].text == "help"
 
@@ -1985,6 +2048,11 @@ def test_streamlit_chat_launch_and_script_helpers(
         "run",
         str(Path(_STREAMLIT_MODULES.app.__file__).resolve()),
     ]
+    assert captured[3:5] == [
+        "--browser.gatherUsageStats=false",
+        "--client.toolbarMode=minimal",
+    ]
+    assert captured[5] == "--"
 
     config_path = tmp_path / "chat.yaml"
     config_path.write_text("llm:\n  provider: ollama\n", encoding="utf-8")

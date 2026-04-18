@@ -70,8 +70,12 @@ _TURN_STATE_SLOT = "llm_tools_streamlit_chat_turn_state"  # noqa: S105
 _INSPECTOR_STATE_SLOT = "llm_tools_streamlit_chat_inspector_state"  # noqa: S105
 _ACTIVE_TURN_STATE_SLOT = "llm_tools_streamlit_chat_active_turn"  # noqa: S105
 _TRANSCRIPT_EXPORT_STATE_SLOT = "llm_tools_streamlit_chat_transcript_export"  # noqa: S105
+_THEME_MODE_STATE_SLOT = "llm_tools_streamlit_chat_theme_mode"  # noqa: S105
 
 _POLL_INTERVAL_SECONDS = 0.05
+_DEFAULT_THEME_MODE: Literal["dark", "light"] = "dark"
+_STREAMLIT_BROWSER_USAGE_STATS_FLAG = "--browser.gatherUsageStats=false"
+_STREAMLIT_TOOLBAR_MODE_FLAG = "--client.toolbarMode=minimal"
 
 
 @dataclass(slots=True)
@@ -162,6 +166,30 @@ class StreamlitTurnOutcome:
     token_usage: ChatTokenUsage | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class StreamlitThemeTokens:
+    """Semantic colors and surfaces for Streamlit chat chrome."""
+
+    mode: Literal["dark", "light"]
+    page_background: str
+    sidebar_background: str
+    surface_background: str
+    surface_elevated_background: str
+    widget_background: str
+    widget_background_hover: str
+    widget_border: str
+    widget_border_focus: str
+    text_color: str
+    muted_text_color: str
+    accent_color: str
+    accent_color_hover: str
+    icon_color: str
+    icon_muted_color: str
+    composer_shell_background: str
+    composer_input_background: str
+    shadow_color: str
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI parser shared by the bootstrap and script entrypoints."""
     parser = argparse.ArgumentParser(
@@ -241,6 +269,311 @@ def _streamlit_module() -> Any:
     return streamlit
 
 
+def _streamlit_page_config() -> dict[str, object]:
+    return {
+        "page_title": "llm-tools Streamlit Chat",
+        "layout": "wide",
+        "menu_items": {
+            "Get help": None,
+            "Report a bug": None,
+            "About": None,
+        },
+    }
+
+
+def _streamlit_theme_mode() -> Literal["dark", "light"]:
+    st = _streamlit_module()
+    if st.session_state.get(_THEME_MODE_STATE_SLOT) == "light":
+        return "light"
+    return "dark"
+
+
+def _streamlit_theme_tokens(
+    theme_mode: Literal["dark", "light"],
+) -> StreamlitThemeTokens:
+    if theme_mode == "light":
+        return StreamlitThemeTokens(
+            mode="light",
+            page_background="#f3f6fb",
+            sidebar_background="#e8edf5",
+            surface_background="#ffffff",
+            surface_elevated_background="#ffffff",
+            widget_background="#ffffff",
+            widget_background_hover="#eef4ff",
+            widget_border="#cbd5e1",
+            widget_border_focus="#1d4ed8",
+            text_color="#0f172a",
+            muted_text_color="#475569",
+            accent_color="#1d4ed8",
+            accent_color_hover="#1e40af",
+            icon_color="#0f172a",
+            icon_muted_color="#64748b",
+            composer_shell_background="rgba(255, 255, 255, 0.96)",
+            composer_input_background="#ffffff",
+            shadow_color="rgba(15, 23, 42, 0.16)",
+        )
+    return StreamlitThemeTokens(
+        mode="dark",
+        page_background="#0f172a",
+        sidebar_background="#020617",
+        surface_background="#111827",
+        surface_elevated_background="#162033",
+        widget_background="#111827",
+        widget_background_hover="#172033",
+        widget_border="#334155",
+        widget_border_focus="#60a5fa",
+        text_color="#e2e8f0",
+        muted_text_color="#94a3b8",
+        accent_color="#60a5fa",
+        accent_color_hover="#93c5fd",
+        icon_color="#e2e8f0",
+        icon_muted_color="#94a3b8",
+        composer_shell_background="rgba(8, 15, 30, 0.94)",
+        composer_input_background="#0b1220",
+        shadow_color="rgba(2, 6, 23, 0.52)",
+    )
+
+
+def _streamlit_theme_css_variables(tokens: StreamlitThemeTokens) -> str:
+    return "\n".join(
+        (
+            f"    --llm-tools-page-background: {tokens.page_background};",
+            f"    --llm-tools-sidebar-background: {tokens.sidebar_background};",
+            f"    --llm-tools-surface-background: {tokens.surface_background};",
+            (
+                "    --llm-tools-surface-elevated-background: "
+                f"{tokens.surface_elevated_background};"
+            ),
+            f"    --llm-tools-widget-background: {tokens.widget_background};",
+            (
+                "    --llm-tools-widget-background-hover: "
+                f"{tokens.widget_background_hover};"
+            ),
+            f"    --llm-tools-widget-border: {tokens.widget_border};",
+            (f"    --llm-tools-widget-border-focus: {tokens.widget_border_focus};"),
+            f"    --llm-tools-text-color: {tokens.text_color};",
+            f"    --llm-tools-muted-text-color: {tokens.muted_text_color};",
+            f"    --llm-tools-accent-color: {tokens.accent_color};",
+            f"    --llm-tools-accent-color-hover: {tokens.accent_color_hover};",
+            f"    --llm-tools-icon-color: {tokens.icon_color};",
+            f"    --llm-tools-icon-muted-color: {tokens.icon_muted_color};",
+            (
+                "    --llm-tools-composer-shell-background: "
+                f"{tokens.composer_shell_background};"
+            ),
+            (
+                "    --llm-tools-composer-input-background: "
+                f"{tokens.composer_input_background};"
+            ),
+            f"    --llm-tools-shadow-color: {tokens.shadow_color};",
+        )
+    )
+
+
+def _streamlit_theme_css(theme_mode: Literal["dark", "light"]) -> str:
+    tokens = _streamlit_theme_tokens(theme_mode)
+    css_variables = _streamlit_theme_css_variables(tokens)
+    return f"""
+<style>
+:root {{
+    color-scheme: {tokens.mode};
+{css_variables}
+}}
+.stApp,
+[data-testid="stAppViewContainer"],
+[data-testid="stHeader"] {{
+    background: var(--llm-tools-page-background);
+    color: var(--llm-tools-text-color);
+}}
+[data-testid="stHeader"] {{
+    border-bottom: 1px solid transparent;
+}}
+section[data-testid="stSidebar"],
+[data-testid="stSidebar"] > div:first-child {{
+    background: var(--llm-tools-sidebar-background);
+    color: var(--llm-tools-text-color);
+}}
+.stApp p,
+.stApp label,
+.stApp .stMarkdown,
+.stApp .stCaption {{
+    color: var(--llm-tools-text-color);
+}}
+[data-testid="stSidebar"] .stCaption,
+[data-testid="stSidebar"] p {{
+    color: var(--llm-tools-muted-text-color);
+}}
+.stApp a {{
+    color: var(--llm-tools-accent-color);
+}}
+.stApp a:hover {{
+    color: var(--llm-tools-accent-color-hover);
+}}
+[data-testid="stChatMessage"] {{
+    background: var(--llm-tools-surface-background);
+    border: 1px solid var(--llm-tools-widget-border);
+    border-radius: 0.75rem;
+    padding: 0.75rem 1rem;
+}}
+.stApp pre,
+.stApp code,
+.stApp [data-testid="stCodeBlock"],
+.stApp [data-testid="stCode"] {{
+    background: var(--llm-tools-surface-elevated-background);
+    color: var(--llm-tools-text-color);
+    border-color: var(--llm-tools-widget-border);
+}}
+div[data-baseweb="input"] > div,
+div[data-baseweb="base-input"] > div,
+div[data-baseweb="textarea"] > div,
+.stApp textarea,
+.stApp input,
+div[data-baseweb="input"] input,
+div[data-baseweb="base-input"] input,
+div[data-baseweb="textarea"] textarea,
+div[data-baseweb="input"] [data-testid="stWidgetLabel"],
+div[data-baseweb="base-input"] [data-testid="stWidgetLabel"] {{
+    background: var(--llm-tools-widget-background);
+    color: var(--llm-tools-text-color);
+    border: 1px solid var(--llm-tools-widget-border);
+    -webkit-text-fill-color: var(--llm-tools-text-color);
+    caret-color: var(--llm-tools-text-color);
+}}
+.stApp input::placeholder,
+.stApp textarea::placeholder,
+div[data-baseweb="input"] input::placeholder,
+div[data-baseweb="base-input"] input::placeholder {{
+    color: var(--llm-tools-muted-text-color);
+    opacity: 1;
+}}
+div[data-baseweb="input"] > div:hover,
+div[data-baseweb="base-input"] > div:hover,
+div[data-baseweb="textarea"] > div:hover {{
+    background: var(--llm-tools-widget-background-hover);
+}}
+div[data-baseweb="input"] > div:focus-within,
+div[data-baseweb="base-input"] > div:focus-within,
+div[data-baseweb="textarea"] > div:focus-within {{
+    border-color: var(--llm-tools-widget-border-focus);
+    box-shadow: 0 0 0 1px var(--llm-tools-widget-border-focus);
+}}
+.stApp button[kind],
+.stApp button[data-testid^="stBaseButton"] {{
+    background: var(--llm-tools-widget-background);
+    color: var(--llm-tools-text-color);
+    border: 1px solid var(--llm-tools-widget-border);
+}}
+.stApp button[kind]:hover,
+.stApp button[data-testid^="stBaseButton"]:hover {{
+    background: var(--llm-tools-widget-background-hover);
+    color: var(--llm-tools-accent-color);
+    border-color: var(--llm-tools-widget-border-focus);
+}}
+.stApp button[kind]:focus-visible,
+.stApp button[data-testid^="stBaseButton"]:focus-visible {{
+    box-shadow: 0 0 0 1px var(--llm-tools-widget-border-focus);
+    outline: none;
+}}
+[data-testid="stBottomBlockContainer"] {{
+    background: var(--llm-tools-page-background);
+}}
+[data-testid="stChatInput"] {{
+    background: var(--llm-tools-composer-shell-background);
+    border: 1px solid var(--llm-tools-widget-border);
+    border-radius: 1rem;
+    box-shadow: 0 18px 40px var(--llm-tools-shadow-color);
+    padding: 0.35rem;
+    backdrop-filter: blur(10px);
+}}
+[data-testid="stChatInput"] > div {{
+    background: transparent;
+}}
+[data-testid="stChatInput"] textarea,
+[data-testid="stChatInput"] input,
+[data-testid="stChatInput"] [data-baseweb="textarea"] > div,
+[data-testid="stChatInput"] [data-baseweb="input"] > div {{
+    background: var(--llm-tools-composer-input-background);
+    color: var(--llm-tools-text-color);
+    border-color: transparent;
+    border-width: 0;
+    box-shadow: none;
+    -webkit-text-fill-color: var(--llm-tools-text-color);
+    caret-color: var(--llm-tools-text-color);
+}}
+[data-testid="stChatInput"] [data-baseweb="textarea"] > div {{
+    border-radius: 0.85rem;
+}}
+[data-testid="stChatInput"] [data-baseweb="textarea"] > div:focus-within {{
+    border-color: transparent;
+    box-shadow: none;
+}}
+[data-testid="stChatInput"] textarea::placeholder,
+[data-testid="stChatInput"] input::placeholder {{
+    color: var(--llm-tools-muted-text-color);
+    opacity: 1;
+}}
+[data-testid="stChatInput"] button {{
+    background: var(--llm-tools-widget-background);
+    color: var(--llm-tools-accent-color);
+    border: 1px solid var(--llm-tools-widget-border);
+}}
+[data-testid="stChatInput"] button:hover {{
+    background: var(--llm-tools-widget-background-hover);
+    color: var(--llm-tools-accent-color-hover);
+    border-color: var(--llm-tools-widget-border-focus);
+}}
+[data-testid="collapsedControl"],
+[data-testid="stSidebarCollapsedControl"] {{
+    background: transparent;
+}}
+[data-testid="collapsedControl"] button,
+[data-testid="stSidebarCollapsedControl"] button,
+[data-testid="stSidebarCollapseButton"] button,
+button[data-testid="stBaseButton-headerNoPadding"] {{
+    background: var(--llm-tools-surface-elevated-background);
+    color: var(--llm-tools-icon-color);
+    border: 1px solid var(--llm-tools-widget-border);
+    border-radius: 0.85rem;
+    box-shadow: 0 10px 24px var(--llm-tools-shadow-color);
+}}
+[data-testid="collapsedControl"] button:hover,
+[data-testid="stSidebarCollapsedControl"] button:hover,
+[data-testid="stSidebarCollapseButton"] button:hover,
+button[data-testid="stBaseButton-headerNoPadding"]:hover {{
+    background: var(--llm-tools-widget-background-hover);
+    color: var(--llm-tools-accent-color);
+    border-color: var(--llm-tools-widget-border-focus);
+}}
+[data-testid="collapsedControl"] button svg,
+[data-testid="stSidebarCollapsedControl"] button svg,
+[data-testid="stSidebarCollapseButton"] button svg,
+button[data-testid="stBaseButton-headerNoPadding"] svg {{
+    color: currentColor;
+    fill: currentColor;
+    stroke: currentColor;
+}}
+div[data-baseweb="switch"] > div {{
+    background: var(--llm-tools-icon-muted-color);
+    transition: background-color 180ms ease;
+}}
+div[data-baseweb="switch"] input:checked + div {{
+    background: var(--llm-tools-accent-color);
+}}
+div[data-baseweb="switch"] div[aria-hidden="true"] {{
+    background: var(--llm-tools-surface-background);
+}}
+</style>
+"""
+
+
+def _render_streamlit_theme() -> None:
+    st = _streamlit_module()
+    st.markdown(
+        _streamlit_theme_css(_streamlit_theme_mode()),
+        unsafe_allow_html=True,
+    )
+
+
 def _exit_notice() -> str:
     return "Streamlit chat keeps running. Use Clear chat or close the browser tab to leave."
 
@@ -308,6 +641,7 @@ def _ensure_session_state(root_path: Path, config: TextualChatConfig) -> None:
     st.session_state.setdefault(_TRANSCRIPT_EXPORT_STATE_SLOT, False)
     st.session_state.setdefault(_API_KEY_STATE_SLOT, "")
     st.session_state.setdefault(_API_SECRET_STATE_SLOT, "")
+    st.session_state.setdefault(_THEME_MODE_STATE_SLOT, _DEFAULT_THEME_MODE)
 
 
 def _reset_session_state(root_path: Path, config: TextualChatConfig) -> None:
@@ -1070,6 +1404,17 @@ def _render_sidebar_session(
         st.rerun()
 
 
+def _render_sidebar_appearance_controls() -> None:
+    st = _streamlit_module()
+    st.subheader("Appearance")
+    use_dark_mode = st.toggle(
+        "Dark mode",
+        value=_streamlit_theme_mode() == "dark",
+        key="appearance:dark_mode",
+    )
+    st.session_state[_THEME_MODE_STATE_SLOT] = "dark" if use_dark_mode else "light"
+
+
 def _render_sidebar_model_controls(
     *,
     config: TextualChatConfig,
@@ -1223,6 +1568,7 @@ def _render_sidebar(root_path: Path, config: TextualChatConfig) -> None:
             control_state=control_state,
             turn_state=turn_state,
         )
+        _render_sidebar_appearance_controls()
         _render_sidebar_model_controls(
             config=config,
             control_state=control_state,
@@ -1242,12 +1588,13 @@ def _render_sidebar(root_path: Path, config: TextualChatConfig) -> None:
 def run_streamlit_chat_app(*, root_path: Path, config: TextualChatConfig) -> None:
     """Render the Streamlit repository chat UI."""
     st = _streamlit_module()
-    st.set_page_config(page_title="llm-tools Streamlit Chat", layout="wide")
+    st.set_page_config(**_streamlit_page_config())
     st.title("llm-tools Streamlit Chat")
     _ensure_session_state(root_path, config)
 
     pending_prompt = _drain_active_turn_events()
     _render_sidebar(root_path, config)
+    _render_streamlit_theme()
 
     api_key = _resolve_api_key(config)
     if config.llm.credential_prompt_metadata().expects_api_key and api_key is None:
@@ -1298,6 +1645,8 @@ def _launch_streamlit_app(script_args: Sequence[str]) -> int:
             "streamlit",
             "run",
             str(Path(__file__).resolve()),
+            _STREAMLIT_BROWSER_USAGE_STATS_FLAG,
+            _STREAMLIT_TOOLBAR_MODE_FLAG,
             "--",
             *list(script_args),
         ]
