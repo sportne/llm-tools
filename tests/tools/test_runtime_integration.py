@@ -21,6 +21,7 @@ from llm_tools.tool_api import (
 from llm_tools.tools.atlassian import register_atlassian_tools
 from llm_tools.tools.filesystem import register_filesystem_tools
 from llm_tools.tools.git import register_git_tools
+from llm_tools.tools.gitlab import register_gitlab_tools
 from llm_tools.tools.text import register_text_tools
 
 
@@ -213,3 +214,107 @@ def test_runtime_executes_jira_builtins_with_mocked_client(
 
     assert result.ok is True
     assert result.output["issues"][0]["key"] == "DEMO-1"
+
+
+def test_runtime_executes_gitlab_builtins_with_mocked_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeFile:
+        def decode(self) -> str:
+            return "hello from gitlab"
+
+    class FakeFiles:
+        def get(self, *, file_path: str, ref: str) -> FakeFile:
+            assert file_path == "README.md"
+            assert ref == "main"
+            return FakeFile()
+
+    class FakeProject:
+        path_with_namespace = "group/repo"
+        default_branch = "main"
+        files = FakeFiles()
+
+    class FakeProjects:
+        def get(self, project: str) -> FakeProject:
+            assert project == "group/repo"
+            return FakeProject()
+
+    class FakeGitlab:
+        def __init__(self, url: str, *, private_token: str) -> None:
+            assert url == "https://gitlab.example.com"
+            assert private_token != ""
+            self.projects = FakeProjects()
+
+    fake_module = ModuleType("gitlab")
+    fake_module.Gitlab = FakeGitlab
+    monkeypatch.setitem(sys.modules, "gitlab", fake_module)
+
+    registry = ToolRegistry()
+    register_gitlab_tools(registry)
+    runtime = _runtime(registry)
+    context = ToolContext(
+        invocation_id="inv-8",
+        env={
+            "GITLAB_BASE_URL": "https://gitlab.example.com",
+            "GITLAB_API_TOKEN": "token",
+        },
+    )
+
+    result = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="read_gitlab_file",
+            arguments={"project": "group/repo", "file_path": "README.md"},
+        ),
+        context,
+    )
+
+    assert result.ok is True
+    assert result.output == {
+        "project": "group/repo",
+        "ref": "main",
+        "requested_path": "README.md",
+        "resolved_path": "group/repo@main:README.md",
+        "read_kind": "text",
+        "status": "ok",
+        "content": "hello from gitlab",
+        "truncated": False,
+        "content_char_count": 17,
+        "character_count": 17,
+        "start_char": 0,
+        "end_char": 17,
+        "file_size_bytes": 17,
+        "max_file_size_characters": 262144,
+        "full_read_char_limit": 4000,
+        "estimated_token_count": 3,
+        "error_message": None,
+    }
+
+
+def test_runtime_denies_gitlab_tool_when_network_is_disabled() -> None:
+    registry = ToolRegistry()
+    register_gitlab_tools(registry)
+    runtime = ToolRuntime(
+        registry,
+        policy=ToolPolicy(
+            allowed_side_effects={SideEffectClass.NONE, SideEffectClass.EXTERNAL_READ},
+            allow_network=False,
+        ),
+    )
+
+    result = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="search_gitlab_code",
+            arguments={"project": "group/repo", "query": "needle"},
+        ),
+        ToolContext(
+            invocation_id="inv-9",
+            env={
+                "GITLAB_BASE_URL": "https://gitlab.example.com",
+                "GITLAB_API_TOKEN": "token",
+            },
+        ),
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is ErrorCode.POLICY_DENIED

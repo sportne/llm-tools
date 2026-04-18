@@ -1,0 +1,486 @@
+"""GitLab built-in tool implementations."""
+
+from __future__ import annotations
+
+import base64
+from pathlib import Path
+from typing import Any, cast
+
+from pydantic import BaseModel, Field
+
+from llm_tools.tool_api import (
+    SideEffectClass,
+    Tool,
+    ToolContext,
+    ToolRegistry,
+    ToolSpec,
+)
+from llm_tools.tools.filesystem._content import (
+    effective_full_read_char_limit,
+    estimate_token_count,
+    is_within_character_limit,
+    normalize_range,
+)
+from llm_tools.tools.filesystem.models import FileReadResult, ToolLimits
+
+_GITLAB_ENV_KEYS = ("GITLAB_BASE_URL", "GITLAB_API_TOKEN")
+
+
+def _get_required_env(context: ToolContext, key: str) -> str:
+    value = context.env.get(key)
+    if value is None or value == "":
+        raise ValueError(f"Missing required GitLab credential '{key}'.")
+    return value
+
+
+def _build_gitlab_client(context: ToolContext) -> Any:
+    base_url = _get_required_env(context, "GITLAB_BASE_URL")
+    api_token = _get_required_env(context, "GITLAB_API_TOKEN")
+
+    import gitlab
+
+    return gitlab.Gitlab(base_url, private_token=api_token)
+
+
+def _get_tool_limits(context: ToolContext) -> ToolLimits:
+    return ToolLimits.model_validate(context.metadata.get("tool_limits", {}))
+
+
+def _get_value(payload: object, key: str, default: Any = None) -> Any:
+    if isinstance(payload, dict):
+        return payload.get(key, default)
+    return getattr(payload, key, default)
+
+
+def _get_gitlab_project(client: Any, project: str) -> Any:
+    projects = getattr(client, "projects", None)
+    if projects is None or not hasattr(projects, "get"):
+        raise RuntimeError("Configured GitLab client does not support project reads.")
+    return projects.get(project)
+
+
+def _search_project_code(
+    project: Any,
+    query: str,
+    *,
+    ref: str | None,
+    limit: int,
+) -> list[Any]:
+    search = getattr(project, "search", None)
+    if search is None:
+        raise RuntimeError("Configured GitLab project does not support code search.")
+
+    kwargs: dict[str, Any] = {"per_page": limit}
+    if ref is not None:
+        kwargs["ref"] = ref
+
+    try:
+        results = search("blobs", query, **kwargs)
+    except TypeError:
+        try:
+            results = search(scope="blobs", search=query, **kwargs)
+        except TypeError as exc:
+            raise RuntimeError(
+                "Configured GitLab project does not support code search."
+            ) from exc
+    return list(cast(list[Any], results))[:limit]
+
+
+def _get_project_file(project: Any, file_path: str, *, ref: str) -> Any:
+    files = getattr(project, "files", None)
+    if files is None or not hasattr(files, "get"):
+        raise RuntimeError("Configured GitLab project does not support file reads.")
+    return files.get(file_path=file_path, ref=ref)
+
+
+def _get_merge_request(project: Any, merge_request_iid: int) -> Any:
+    merge_requests = getattr(project, "mergerequests", None)
+    if merge_requests is None or not hasattr(merge_requests, "get"):
+        raise RuntimeError(
+            "Configured GitLab project does not support merge request reads."
+        )
+    return merge_requests.get(merge_request_iid)
+
+
+def _get_merge_request_commits(merge_request: Any) -> list[Any]:
+    commits = getattr(merge_request, "commits", None)
+    if commits is None:
+        return []
+    if callable(commits):
+        return list(cast(list[Any], commits()))
+    if hasattr(commits, "list"):
+        return list(cast(list[Any], commits.list()))
+    return []
+
+
+def _get_merge_request_changes(merge_request: Any) -> list[Any]:
+    changes = getattr(merge_request, "changes", None)
+    if changes is None:
+        return []
+    if callable(changes):
+        payload = changes()
+        if isinstance(payload, dict):
+            return list(cast(list[Any], payload.get("changes", [])))
+        return []
+    if isinstance(changes, dict):
+        return list(cast(list[Any], changes.get("changes", [])))
+    return []
+
+
+def _decode_gitlab_file_content(file_obj: Any) -> tuple[str | None, int, str | None]:
+    decoded = getattr(file_obj, "decode", None)
+    if callable(decoded):
+        payload = decoded()
+        if isinstance(payload, str):
+            if "\x00" in payload:
+                return None, len(payload.encode("utf-8")), "Remote file is binary."
+            return payload, len(payload.encode("utf-8")), None
+        if isinstance(payload, bytes):
+            try:
+                text = payload.decode("utf-8")
+            except UnicodeDecodeError:
+                return None, len(payload), "Remote file is not UTF-8 text."
+            if "\x00" in text:
+                return None, len(payload), "Remote file is binary."
+            return text, len(payload), None
+
+    raw_content = _get_value(file_obj, "content")
+    encoding = _get_value(file_obj, "encoding")
+    if isinstance(raw_content, bytes):
+        raw_bytes = raw_content
+    elif isinstance(raw_content, str) and str(encoding).lower() == "base64":
+        raw_bytes = base64.b64decode(raw_content)
+    elif isinstance(raw_content, str):
+        if "\x00" in raw_content:
+            return None, len(raw_content.encode("utf-8")), "Remote file is binary."
+        return raw_content, len(raw_content.encode("utf-8")), None
+    else:
+        return None, 0, "GitLab file payload did not include readable content."
+
+    try:
+        text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, len(raw_bytes), "Remote file is not UTF-8 text."
+    if "\x00" in text:
+        return None, len(raw_bytes), "Remote file is binary."
+    return text, len(raw_bytes), None
+
+
+def _normalize_project_name(project: Any, requested_project: str) -> str:
+    return str(
+        _get_value(project, "path_with_namespace")
+        or _get_value(project, "path")
+        or requested_project
+    )
+
+
+class SearchGitLabCodeInput(BaseModel):
+    project: str
+    query: str
+    ref: str | None = None
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class GitLabCodeSearchMatch(BaseModel):
+    project: str
+    path: str
+    name: str
+    ref: str | None = None
+    start_line: int | None = None
+    snippet: str | None = None
+
+
+class SearchGitLabCodeOutput(BaseModel):
+    project: str
+    query: str
+    ref: str | None = None
+    matches: list[GitLabCodeSearchMatch] = Field(default_factory=list)
+
+
+class SearchGitLabCodeTool(Tool[SearchGitLabCodeInput, SearchGitLabCodeOutput]):
+    spec = ToolSpec(
+        name="search_gitlab_code",
+        description="Search one GitLab project for code matches.",
+        tags=["gitlab", "search", "read", "code"],
+        side_effects=SideEffectClass.EXTERNAL_READ,
+        requires_network=True,
+        required_secrets=list(_GITLAB_ENV_KEYS),
+    )
+    input_model = SearchGitLabCodeInput
+    output_model = SearchGitLabCodeOutput
+
+    def invoke(
+        self, context: ToolContext, args: SearchGitLabCodeInput
+    ) -> SearchGitLabCodeOutput:
+        client = _build_gitlab_client(context)
+        project = _get_gitlab_project(client, args.project)
+        project_name = _normalize_project_name(project, args.project)
+        matches = [
+            GitLabCodeSearchMatch(
+                project=project_name,
+                path=str(
+                    _get_value(raw, "path")
+                    or _get_value(raw, "filename")
+                    or _get_value(raw, "file_path")
+                    or ""
+                ),
+                name=Path(
+                    str(
+                        _get_value(raw, "path")
+                        or _get_value(raw, "filename")
+                        or _get_value(raw, "file_path")
+                        or ""
+                    )
+                ).name,
+                ref=cast(str | None, _get_value(raw, "ref", args.ref)),
+                start_line=cast(
+                    int | None,
+                    _get_value(raw, "startline", _get_value(raw, "start_line")),
+                ),
+                snippet=cast(
+                    str | None,
+                    _get_value(raw, "data", _get_value(raw, "snippet")),
+                ),
+            )
+            for raw in _search_project_code(
+                project,
+                args.query,
+                ref=args.ref,
+                limit=args.limit,
+            )
+        ]
+        context.logs.append(
+            f"Ran GitLab code search for '{args.query}' in project '{args.project}'."
+        )
+        return SearchGitLabCodeOutput(
+            project=project_name,
+            query=args.query,
+            ref=args.ref,
+            matches=matches,
+        )
+
+
+class ReadGitLabFileInput(BaseModel):
+    project: str
+    file_path: str
+    ref: str | None = None
+    start_char: int | None = Field(default=None, ge=0)
+    end_char: int | None = Field(default=None, ge=0)
+
+
+class ReadGitLabFileOutput(FileReadResult):
+    project: str
+    ref: str
+
+
+class ReadGitLabFileTool(Tool[ReadGitLabFileInput, ReadGitLabFileOutput]):
+    spec = ToolSpec(
+        name="read_gitlab_file",
+        description="Read one UTF-8 text file from a GitLab project.",
+        tags=["gitlab", "read", "file"],
+        side_effects=SideEffectClass.EXTERNAL_READ,
+        requires_network=True,
+        required_secrets=list(_GITLAB_ENV_KEYS),
+    )
+    input_model = ReadGitLabFileInput
+    output_model = ReadGitLabFileOutput
+
+    def invoke(
+        self, context: ToolContext, args: ReadGitLabFileInput
+    ) -> ReadGitLabFileOutput:
+        client = _build_gitlab_client(context)
+        project = _get_gitlab_project(client, args.project)
+        project_name = _normalize_project_name(project, args.project)
+        tool_limits = _get_tool_limits(context)
+        effective_ref = (
+            args.ref
+            or cast(str | None, _get_value(project, "default_branch"))
+            or "HEAD"
+        )
+        full_read_char_limit = effective_full_read_char_limit(tool_limits)
+        file_obj = _get_project_file(project, args.file_path, ref=effective_ref)
+        content, file_size_bytes, error_message = _decode_gitlab_file_content(file_obj)
+        resolved_path = f"{project_name}@{effective_ref}:{args.file_path}"
+
+        if content is None:
+            return ReadGitLabFileOutput(
+                project=project_name,
+                ref=effective_ref,
+                requested_path=args.file_path,
+                resolved_path=resolved_path,
+                read_kind="unsupported",
+                status="unsupported",
+                content=None,
+                file_size_bytes=file_size_bytes,
+                max_file_size_characters=tool_limits.max_file_size_characters,
+                full_read_char_limit=full_read_char_limit,
+                error_message=error_message,
+            )
+
+        character_count = len(content)
+        if not is_within_character_limit(content, tool_limits=tool_limits):
+            return ReadGitLabFileOutput(
+                project=project_name,
+                ref=effective_ref,
+                requested_path=args.file_path,
+                resolved_path=resolved_path,
+                read_kind="text",
+                status="too_large",
+                content=None,
+                character_count=character_count,
+                file_size_bytes=file_size_bytes,
+                max_file_size_characters=tool_limits.max_file_size_characters,
+                full_read_char_limit=full_read_char_limit,
+                estimated_token_count=estimate_token_count(content),
+                error_message="File exceeds the configured readable character limit",
+            )
+
+        normalized_start, normalized_end = normalize_range(
+            start_char=args.start_char,
+            end_char=args.end_char,
+            character_count=character_count,
+        )
+        truncated_end = min(normalized_end, normalized_start + full_read_char_limit)
+        content_slice = content[normalized_start:truncated_end]
+        truncated = truncated_end < character_count or truncated_end < normalized_end
+
+        context.logs.append(
+            f"Read GitLab file '{args.file_path}' from project '{args.project}'."
+        )
+        context.artifacts.append(resolved_path)
+        return ReadGitLabFileOutput(
+            project=project_name,
+            ref=effective_ref,
+            requested_path=args.file_path,
+            resolved_path=resolved_path,
+            read_kind="text",
+            status="ok",
+            content=content_slice,
+            truncated=truncated,
+            content_char_count=len(content_slice),
+            character_count=character_count,
+            start_char=normalized_start,
+            end_char=truncated_end,
+            file_size_bytes=file_size_bytes,
+            max_file_size_characters=tool_limits.max_file_size_characters,
+            full_read_char_limit=full_read_char_limit,
+            estimated_token_count=estimate_token_count(content_slice),
+        )
+
+
+class ReadGitLabMergeRequestInput(BaseModel):
+    project: str
+    merge_request_iid: int = Field(ge=1)
+
+
+class GitLabMergeRequestCommit(BaseModel):
+    id: str | None = None
+    short_id: str | None = None
+    title: str | None = None
+    author_name: str | None = None
+
+
+class GitLabMergeRequestChange(BaseModel):
+    old_path: str | None = None
+    new_path: str | None = None
+    new_file: bool = False
+    renamed_file: bool = False
+    deleted_file: bool = False
+    diff_excerpt: str | None = None
+
+
+class ReadGitLabMergeRequestOutput(BaseModel):
+    project: str
+    merge_request_iid: int
+    title: str | None = None
+    description: str | None = None
+    state: str | None = None
+    author: str | None = None
+    source_branch: str | None = None
+    target_branch: str | None = None
+    web_url: str | None = None
+    commits: list[GitLabMergeRequestCommit] = Field(default_factory=list)
+    changed_files: list[GitLabMergeRequestChange] = Field(default_factory=list)
+
+
+class ReadGitLabMergeRequestTool(
+    Tool[ReadGitLabMergeRequestInput, ReadGitLabMergeRequestOutput]
+):
+    spec = ToolSpec(
+        name="read_gitlab_merge_request",
+        description="Read one GitLab merge request by IID.",
+        tags=["gitlab", "read", "merge_request"],
+        side_effects=SideEffectClass.EXTERNAL_READ,
+        requires_network=True,
+        required_secrets=list(_GITLAB_ENV_KEYS),
+    )
+    input_model = ReadGitLabMergeRequestInput
+    output_model = ReadGitLabMergeRequestOutput
+
+    def invoke(
+        self, context: ToolContext, args: ReadGitLabMergeRequestInput
+    ) -> ReadGitLabMergeRequestOutput:
+        client = _build_gitlab_client(context)
+        project = _get_gitlab_project(client, args.project)
+        project_name = _normalize_project_name(project, args.project)
+        merge_request = _get_merge_request(project, args.merge_request_iid)
+
+        commits = [
+            GitLabMergeRequestCommit(
+                id=cast(str | None, _get_value(commit, "id")),
+                short_id=cast(str | None, _get_value(commit, "short_id")),
+                title=cast(
+                    str | None,
+                    _get_value(commit, "title", _get_value(commit, "message")),
+                ),
+                author_name=cast(str | None, _get_value(commit, "author_name")),
+            )
+            for commit in _get_merge_request_commits(merge_request)
+        ]
+        changed_files = [
+            GitLabMergeRequestChange(
+                old_path=cast(str | None, _get_value(change, "old_path")),
+                new_path=cast(str | None, _get_value(change, "new_path")),
+                new_file=bool(_get_value(change, "new_file", False)),
+                renamed_file=bool(_get_value(change, "renamed_file", False)),
+                deleted_file=bool(_get_value(change, "deleted_file", False)),
+                diff_excerpt=(cast(str | None, _get_value(change, "diff")) or "")[:400]
+                or None,
+            )
+            for change in _get_merge_request_changes(merge_request)
+        ]
+
+        context.logs.append(
+            "Read GitLab merge request "
+            f"'{args.merge_request_iid}' from project '{args.project}'."
+        )
+        return ReadGitLabMergeRequestOutput(
+            project=project_name,
+            merge_request_iid=args.merge_request_iid,
+            title=cast(str | None, _get_value(merge_request, "title")),
+            description=cast(str | None, _get_value(merge_request, "description")),
+            state=cast(str | None, _get_value(merge_request, "state")),
+            author=cast(
+                str | None,
+                _get_value(
+                    _get_value(merge_request, "author", {}),
+                    "name",
+                    _get_value(
+                        _get_value(merge_request, "author", {}),
+                        "username",
+                    ),
+                ),
+            ),
+            source_branch=cast(str | None, _get_value(merge_request, "source_branch")),
+            target_branch=cast(str | None, _get_value(merge_request, "target_branch")),
+            web_url=cast(str | None, _get_value(merge_request, "web_url")),
+            commits=commits,
+            changed_files=changed_files,
+        )
+
+
+def register_gitlab_tools(registry: ToolRegistry) -> None:
+    """Register the built-in GitLab tool set."""
+    registry.register(SearchGitLabCodeTool())
+    registry.register(ReadGitLabFileTool())
+    registry.register(ReadGitLabMergeRequestTool())

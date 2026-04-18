@@ -15,7 +15,7 @@ The core v0.1 foundation is implemented:
 
 - canonical tool and runtime models
 - registry, runtime, policy, and observability
-- built-in filesystem, git, Atlassian, and text tools
+- built-in filesystem, git, GitLab, Atlassian, and text tools
 - built-in read-only repository chat tools
 - one canonical structured-action adapter (`ActionEnvelopeAdapter`)
 - an Instructor-backed OpenAI-compatible provider layer

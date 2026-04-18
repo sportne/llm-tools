@@ -49,6 +49,7 @@ machinery into the base runtime.
 Examples:
 
 - Jira tools require `JIRA_BASE_URL`, `JIRA_USERNAME`, and `JIRA_API_TOKEN`
+- GitLab tools require `GITLAB_BASE_URL` and `GITLAB_API_TOKEN`
 - tools that set `requires_network=True` are denied if `allow_network=False`
 - tools that set `requires_filesystem=True` are denied if
   `allow_filesystem=False`

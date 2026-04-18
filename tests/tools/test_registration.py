@@ -9,6 +9,7 @@ from llm_tools.tools import (
     register_atlassian_tools,
     register_filesystem_tools,
     register_git_tools,
+    register_gitlab_tools,
     register_text_tools,
 )
 
@@ -29,6 +30,14 @@ from llm_tools.tools import (
         (
             register_git_tools,
             {"run_git_status", "run_git_diff", "run_git_log"},
+        ),
+        (
+            register_gitlab_tools,
+            {
+                "search_gitlab_code",
+                "read_gitlab_file",
+                "read_gitlab_merge_request",
+            },
         ),
         (
             register_atlassian_tools,
@@ -55,6 +64,7 @@ def test_register_helpers_add_expected_tools(
     [
         register_filesystem_tools,
         register_git_tools,
+        register_gitlab_tools,
         register_atlassian_tools,
         register_text_tools,
     ],
