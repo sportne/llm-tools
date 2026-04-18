@@ -76,6 +76,8 @@ def test_stub_verifier_smoke_test() -> None:
     task = TaskRecord(
         task_id="task-1",
         title="Implement verification",
+        intent="Verify completion state.",
+        origin="user_requested",
         verification_expectations=[
             VerificationExpectation(
                 expectation_id="expectation-1",
