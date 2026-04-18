@@ -4,7 +4,7 @@ model = "gpt-5.4-mini"
 model_reasoning_effort = "medium"
 sandbox_mode = "read-only"
 developer_instructions = """
-Analyze lint and static-analysis results.
+Analyze lint (make lint), type checking (make typecheck) and static-analysis results.
 Cluster findings into:
 1. must fix now
 2. likely true positives but lower priority
