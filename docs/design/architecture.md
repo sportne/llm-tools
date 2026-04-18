@@ -11,20 +11,21 @@ should now be treated as valid architectural expansion areas rather than
 categorically excluded concerns.
 
 The first implemented subsystem is `tool_api`. Additional layers such as
-`llm_adapters`, `llm_providers`, built-in `tools`, and later `workflow_api` are
-built on top of that substrate.
+`llm_adapters`, `llm_providers`, built-in `tools`, `workflow_api`, and later
+`harness_api` are built on top of that substrate.
 
 ---
 
 ## 2. Architectural overview
 
-The system is organized into five primary layers:
+The system is organized into six primary layers:
 
 1. `tool_api`
 2. `llm_adapters`
 3. `llm_providers`
 4. `tools`
 5. `workflow_api`
+6. `harness_api`
 
 Relationship:
 
@@ -92,7 +93,34 @@ Examples:
 A composition layer for higher-level execution above the base tool abstraction.
 In v0.1 it provides a thin one-turn bridge that takes a parsed adapter result
 and executes the returned invocations sequentially without any replanning or
-follow-up model calls.
+follow-up model calls. It remains the one-turn bridge even as the repository
+grows a separate harness layer.
+
+#### `harness_api`
+
+A future orchestration layer for durable multi-turn execution.
+
+`harness_api` will own:
+
+* session lifecycle management
+* persisted state and replay
+* task decomposition and tracking
+* verification coordination
+* turn budgeting and stop conditions
+
+Proposed module areas:
+
+* `models`
+* `executor`
+* `store`
+* `verification`
+* `planning`
+* `context`
+* `replay`
+
+The layer will depend on lower-level typed contracts and on `workflow_api` as
+the reusable one-turn execution primitive. `workflow_api` must not depend on
+`harness_api`.
 
 ---
 
@@ -301,12 +329,15 @@ project/
         __init__.py
         models.py
         executor.py
+      harness_api/
+        __init__.py
 
   tests/
 ```
 
-Step 0 scaffolds these packages and repository tooling only. The concrete
-interfaces and behavior described below begin in later implementation steps.
+Step 0 scaffolds these package boundaries and repository tooling only. The
+concrete interfaces and behavior described below begin in later
+implementation steps.
 
 ### 6.1 Naming rationale
 
@@ -1015,6 +1046,7 @@ For v0.1:
 
 * workflow architecture may be described
 * implementation may be deferred
+* durable multi-turn orchestration is reserved for `harness_api`
 
 ---
 
@@ -1028,6 +1060,7 @@ llm_adapters    ← depends on tool_api
 llm_providers   ← depends on llm_adapters
 tools           ← depends on tool_api
 workflow_api    ← depends on tool_api
+harness_api     ← depends on tool_api, llm_adapters, llm_providers, workflow_api
 applications    ← compose everything
 ```
 
@@ -1036,9 +1069,14 @@ Prohibited directions:
 * `tool_api` must not depend on `llm_adapters`
 * `tool_api` must not depend on `llm_providers`
 * `tool_api` must not depend on `tools`
+* `tool_api` must not depend on `harness_api`
+* `llm_adapters` should not depend on `harness_api`
+* `llm_providers` should not depend on `harness_api`
 * `tools` should not depend on `llm_adapters`
 * `tools` should not depend on `llm_providers`
 * `tools` should not depend on `workflow_api`
+* `tools` should not depend on `harness_api`
+* `workflow_api` should not depend on `harness_api`
 
 ---
 

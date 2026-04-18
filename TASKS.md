@@ -97,6 +97,8 @@ Suggested deliverables:
 
 Dependencies: None
 
+Status: Done.
+
 #### 1.2 Define canonical harness models
 
 Description: Specify the canonical Pydantic models that the harness will own,

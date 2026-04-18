@@ -103,7 +103,9 @@ def iter_import_references(path: Path) -> Iterator[ImportReference]:
             resolved = _resolve_from_import(path, node)
             if resolved is None:
                 continue
-            yield ImportReference(path=path, lineno=node.lineno, module=resolved)
+            for alias in node.names:
+                module = resolved if alias.name == "*" else f"{resolved}.{alias.name}"
+                yield ImportReference(path=path, lineno=node.lineno, module=module)
 
 
 def iter_direct_invocations(root: Path = ROOT_DIR) -> Iterator[InvocationReference]:

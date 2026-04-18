@@ -1,4 +1,4 @@
-"""Smoke tests for the Step 0 package scaffold."""
+"""Smoke tests for the package scaffold."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ def test_scaffolded_subpackages_are_importable() -> None:
         "llm_tools.llm_providers",
         "llm_tools.tools",
         "llm_tools.workflow_api",
+        "llm_tools.harness_api",
     ):
         module = importlib.import_module(module_name)
         assert module.__name__ == module_name
@@ -34,4 +35,5 @@ def test_expected_subpackages_exist_under_llm_tools() -> None:
         "tool_api",
         "tools",
         "workflow_api",
+        "harness_api",
     } <= discovered
