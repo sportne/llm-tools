@@ -263,6 +263,74 @@ Resume validation checks include:
 This keeps resume semantics grounded in persisted typed state instead of hidden
 in-memory executor state.
 
+## Durable executor contract
+
+`harness_api.executor` now provides the concrete multi-turn control loop above
+`workflow_api`:
+
+- `HarnessExecutor`: durable sync and async session runner over a
+  `HarnessStateStore`
+- `HarnessTurnDriver`: task-selection, context-building, and parsed-response
+  production for one turn
+- `HarnessTurnApplier`: post-turn state application that returns canonical
+  `TurnDecision` values
+- `HarnessRetryPolicy`: explicit retry budgets for provider, retryable-tool,
+  and optimistic-concurrency recovery
+- `HarnessExecutionResult`: final stored snapshot plus the post-run resume
+  classification
+
+`HarnessExecutor` keeps `workflow_api` as the one-turn layer. It never asks the
+workflow layer to own persisted session state, task lifecycles, approval stop
+semantics, or retry accounting.
+
+## Turn sequencing and commit points
+
+The durable control loop is intentionally explicit and uses one persisted
+commit point per durable outcome:
+
+1. Load or save the current `HarnessState` snapshot.
+2. Classify it through `resume_session(...)`.
+3. If the session is waiting on approval, require an explicit approval
+   resolution before work can continue.
+4. Before starting a new turn, enforce `BudgetPolicy.max_turns` and
+   `BudgetPolicy.max_elapsed_seconds`.
+5. Select task ids deterministically, build a `ToolContext`, and obtain one
+   `ParsedModelResponse` from the driver.
+6. Execute that parsed response through `WorkflowExecutor`.
+7. If the turn ends in `approval_requested`, persist exactly one incomplete tail
+   `HarnessTurn` plus one matching `PendingApprovalRecord`, then stop.
+8. Otherwise, apply the completed turn, evaluate the post-turn budget check for
+   `max_tool_invocations`, stamp `ended_at`, and persist the completed turn.
+9. Continue only for `TurnDecisionAction.CONTINUE` and
+   `TurnDecisionAction.SELECT_TASKS`; terminal stops stamp
+   `session.ended_at` and `session.stop_reason`.
+
+If the process crashes before the post-turn save, the last durable snapshot
+remains authoritative and the turn is recomputed from that snapshot on resume.
+Approval waits are the only intentionally persisted incomplete turns.
+
+## Retry and approval durability rules
+
+Retry and recovery are explicit rather than inferred from UI state:
+
+- provider or driver exceptions retry up to `max_provider_retries`
+- completed workflow turns with any executed `ToolResult.error.retryable=True`
+  retry up to `max_retryable_tool_retries`
+- approval waits, approval denials, approval expirations, validation failures,
+  and non-retryable tool errors do not auto-retry
+- every actual retry attempt increments `HarnessSession.retry_count` and the
+  selected tasks' `TaskRecord.retry_count`
+- optimistic-concurrency save conflicts reload the latest snapshot and retry
+  only when the canonical pre-turn state is unchanged
+
+Unresolved approvals remain durable through the combination of an incomplete
+tail `HarnessTurn` and a `PendingApprovalRecord`. Resolved approvals reuse the
+persisted `WorkflowTurnResult` outcome list as the durable history surface, so
+approval approval, denial, timeout, and operator cancel can be replayed without
+adding a second approval-history model in Phase 7. Session-level stop reasons
+now distinguish `approval_denied`, `approval_expired`, and
+`approval_canceled`.
+
 The implemented evidence shape is intentionally minimal and additive:
 
 - `VerificationEvidenceRecord.evidence_id`: stable record id

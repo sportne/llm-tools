@@ -8,7 +8,7 @@ from pydantic import BaseModel, ValidationError, model_validator
 
 from llm_tools.harness_api.models import HarnessState
 
-CURRENT_HARNESS_STATE_SCHEMA_VERSION = "2"
+CURRENT_HARNESS_STATE_SCHEMA_VERSION = "3"
 SUPPORTED_HARNESS_STATE_SCHEMA_VERSIONS = frozenset(
     {CURRENT_HARNESS_STATE_SCHEMA_VERSION}
 )

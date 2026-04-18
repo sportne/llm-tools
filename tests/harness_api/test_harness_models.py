@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from llm_tools.harness_api import (
+    CURRENT_HARNESS_STATE_SCHEMA_VERSION,
     BudgetPolicy,
     HarnessSession,
     HarnessState,
@@ -96,6 +97,9 @@ def test_enum_values_are_stable() -> None:
         "budget_exhausted",
         "verification_failed",
         "no_progress",
+        "approval_denied",
+        "approval_expired",
+        "approval_canceled",
         "canceled",
         "error",
     ]
@@ -417,6 +421,28 @@ def test_harness_turn_requires_end_time_once_decided() -> None:
         )
 
 
+def test_harness_turn_rejects_duplicate_selected_task_ids() -> None:
+    with pytest.raises(ValidationError, match="selected_task_ids must be unique"):
+        HarnessTurn(
+            turn_index=1,
+            started_at="2026-01-01T00:00:00Z",
+            selected_task_ids=["task-1", "task-1"],
+        )
+
+
+def test_retry_counters_default_to_zero() -> None:
+    task = _root_task()
+    session = HarnessSession(
+        session_id="session-1",
+        root_task_id="task-1",
+        budget_policy=BudgetPolicy(max_turns=3),
+        started_at="2026-01-01T00:00:01Z",
+    )
+
+    assert task.retry_count == 0
+    assert session.retry_count == 0
+
+
 def test_harness_turn_no_progress_stop_requires_signal() -> None:
     with pytest.raises(ValidationError, match="must include at least one"):
         HarnessTurn(
@@ -506,11 +532,15 @@ def test_harness_state_rejects_bad_cross_record_references() -> None:
         )
 
     with pytest.raises(ValidationError, match="task ids must be unique"):
-        HarnessState(schema_version="2", session=session, tasks=[root_task, root_task])
+        HarnessState(
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
+            session=session,
+            tasks=[root_task, root_task],
+        )
 
     with pytest.raises(ValidationError, match="depends_on_task_ids must resolve"):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=HarnessSession(
                 session_id="session-1",
                 root_task_id="task-1",
@@ -532,7 +562,7 @@ def test_harness_state_rejects_bad_cross_record_references() -> None:
 
     with pytest.raises(ValidationError, match="root user_requested task"):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=session,
             tasks=[
                 root_task,
@@ -553,7 +583,7 @@ def test_harness_state_rejects_bad_cross_record_references() -> None:
 
     with pytest.raises(ValidationError, match="contiguous indices from 1"):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=session,
             tasks=[root_task],
             turns=[HarnessTurn(turn_index=2, started_at="2026-01-01T00:00:00Z")],
@@ -561,7 +591,7 @@ def test_harness_state_rejects_bad_cross_record_references() -> None:
 
     with pytest.raises(ValidationError, match="dependency graph must be acyclic"):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=session,
             tasks=[
                 root_task,
@@ -589,7 +619,7 @@ def test_harness_state_rejects_bad_cross_record_references() -> None:
         ValidationError, match="superseded_by_task_id graph must be acyclic"
     ):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=session,
             tasks=[
                 TaskRecord(
@@ -615,7 +645,7 @@ def test_harness_state_rejects_bad_cross_record_references() -> None:
 
     with pytest.raises(ValidationError, match="parent_task_id graph must be acyclic"):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=session,
             tasks=[
                 TaskRecord(
@@ -644,7 +674,7 @@ def test_harness_state_rejects_bad_cross_record_references() -> None:
 
     with pytest.raises(ValidationError, match="selected_task_ids must resolve"):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=session,
             tasks=[root_task],
             turns=[
@@ -664,7 +694,7 @@ def test_harness_state_rejects_bad_cross_record_references() -> None:
         ValidationError, match="incomplete turn is only allowed at the tail"
     ):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=session,
             tasks=[root_task],
             turns=[
@@ -682,7 +712,7 @@ def test_harness_state_rejects_bad_cross_record_references() -> None:
         ValidationError, match="current_turn_index must equal len\\(turns\\)"
     ):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=HarnessSession(
                 session_id="session-1",
                 root_task_id="task-1",
@@ -697,7 +727,7 @@ def test_harness_state_rejects_bad_cross_record_references() -> None:
         ValidationError, match="Ended sessions must not retain incomplete turns"
     ):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=HarnessSession(
                 session_id="session-1",
                 root_task_id="task-1",
@@ -713,7 +743,7 @@ def test_harness_state_rejects_bad_cross_record_references() -> None:
 
     with pytest.raises(ValidationError, match="evidence_refs must resolve"):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=HarnessSession(
                 session_id="session-1",
                 root_task_id="task-1",
@@ -733,7 +763,7 @@ def test_harness_state_rejects_bad_cross_record_references() -> None:
 
     with pytest.raises(ValidationError, match="evidence task ids must resolve"):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=HarnessSession(
                 session_id="session-1",
                 root_task_id="task-1",
@@ -751,7 +781,7 @@ def test_harness_state_rejects_bad_cross_record_references() -> None:
 
     with pytest.raises(ValidationError, match="owned by a different task"):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=HarnessSession(
                 session_id="session-1",
                 root_task_id="task-1",
@@ -784,7 +814,7 @@ def test_harness_state_rejects_bad_cross_record_references() -> None:
 
     with pytest.raises(ValidationError, match="signal task ids must resolve"):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=HarnessSession(
                 session_id="session-1",
                 root_task_id="task-1",
@@ -825,7 +855,7 @@ def test_harness_state_validates_additional_cross_record_integrity() -> None:
         ValidationError, match="root_task_id must resolve to a known task"
     ):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=session.model_copy(update={"root_task_id": "missing"}),
             tasks=[root_task],
             turns=[HarnessTurn(turn_index=1, started_at="2026-01-01T00:00:00Z")],
@@ -836,7 +866,7 @@ def test_harness_state_validates_additional_cross_record_integrity() -> None:
         match="root_task_id must resolve to the root user_requested task",
     ):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=session.model_copy(update={"root_task_id": "task-2"}),
             tasks=[
                 root_task,
@@ -855,7 +885,7 @@ def test_harness_state_validates_additional_cross_record_integrity() -> None:
         ValidationError, match="parent_task_id must resolve to a known task"
     ):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=session,
             tasks=[
                 root_task,
@@ -874,7 +904,7 @@ def test_harness_state_validates_additional_cross_record_integrity() -> None:
         ValidationError, match="superseded_by_task_id must resolve to a known task"
     ):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=session,
             tasks=[
                 TaskRecord(
@@ -893,7 +923,7 @@ def test_harness_state_validates_additional_cross_record_integrity() -> None:
         ValidationError, match="may contain at most one incomplete turn"
     ):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=session.model_copy(update={"current_turn_index": 2}),
             tasks=[root_task],
             turns=[
@@ -905,7 +935,7 @@ def test_harness_state_validates_additional_cross_record_integrity() -> None:
     approval = _pending_approval_record()
     with pytest.raises(ValidationError, match="pending approval ids must be unique"):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=session,
             tasks=[root_task],
             turns=[HarnessTurn(turn_index=1, started_at="2026-01-01T00:00:00Z")],
@@ -914,7 +944,7 @@ def test_harness_state_validates_additional_cross_record_integrity() -> None:
 
     with pytest.raises(ValidationError, match="at most one pending approval"):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=session,
             tasks=[root_task],
             turns=[HarnessTurn(turn_index=1, started_at="2026-01-01T00:00:00Z")],
@@ -934,7 +964,7 @@ def test_harness_state_validates_additional_cross_record_integrity() -> None:
         ValidationError, match="Ended sessions must not retain pending approvals"
     ):
         HarnessState(
-            schema_version="2",
+            schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session=session.model_copy(
                 update={
                     "ended_at": "2026-01-01T00:00:10Z",
@@ -956,7 +986,7 @@ def test_harness_state_validates_additional_cross_record_integrity() -> None:
 
 def test_harness_state_round_trips_with_richer_task_state() -> None:
     state = HarnessState(
-        schema_version="2",
+        schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
         session=HarnessSession(
             session_id="session-1",
             root_task_id="task-1",
