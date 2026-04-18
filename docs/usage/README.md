@@ -7,6 +7,7 @@ These guides explain how to use the implemented public APIs in `llm-tools`.
 - [Policy](policy.md)
 - [Adapters](adapters.md)
 - [Providers](providers.md)
+- [Harness Sessions](harness-sessions.md)
 - [Textual Chat](textual-chat.md)
 - [Streamlit Chat](streamlit-chat.md)
 - [Workbench](workbench.md)

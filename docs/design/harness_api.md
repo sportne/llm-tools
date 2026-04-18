@@ -481,3 +481,53 @@ that would produce those signals.
 The architectural boundary is deliberate: `workflow_api` is a reusable
 composition primitive, while `harness_api` is the durable session orchestrator
 that will build on it.
+
+
+## Persisted traces, summaries, and replay
+
+`harness_api.replay` now owns the stable derived artifact contracts that sit
+alongside canonical `HarnessState` in storage rather than inside it:
+
+- `HarnessPolicySnapshot` for redacted policy decisions per invocation
+- `HarnessInvocationTrace` and `HarnessTurnTrace` for durable turn observability
+- `HarnessSessionTrace` and `HarnessSessionSummary` for aggregated inspection
+- `HarnessReplayStep` and `HarnessReplayResult` for deterministic replay
+
+These artifacts are persisted through `StoredHarnessState.artifacts` and
+`StoredHarnessState.saved_at`. Canonical state serialization remains unchanged:
+`serialize_harness_state(...)` still owns only the durable harness state model.
+The stored artifacts intentionally persist redacted policy metadata and
+execution-record summaries, not raw environment state or unredacted payloads.
+
+## Public session surface
+
+`harness_api.session` now exposes the public session-level contracts for:
+
+- `create_session(...)`
+- `run_session(...)`
+- `resume_session(...)`
+- `inspect_session(...)`
+- `list_sessions(...)`
+- `stop_session(...)`
+
+The public surface stays injectable around `HarnessExecutor`, but the package
+now also ships a narrow built-in runner for simple root-task sessions:
+
+- `DefaultHarnessTurnDriver` composes the deterministic planner, context
+  builder, and model-turn provider callback
+- `MinimalHarnessTurnApplier` provides the smallest approval-aware completion
+  policy suitable for tests, replay, and the CLI
+- richer task decomposition and app-specific progression remain outside this
+  built-in path
+
+## Minimal CLI and app integration plan
+
+The `llm_tools.apps.harness_cli` entrypoint is a thin client over the public
+session API. It exists to keep persisted session inspection, replay, and manual
+approval handling available without binding those flows to the existing apps.
+
+The current repository scope stops at shared seams plus the documented
+integration plan in `docs/implementation/harness-app-integration-plan.md`.
+Textual chat, Streamlit chat, and the Textual workbench should consume the
+public session service and stored artifacts rather than reimplementing harness
+orchestration or trace models in app code.

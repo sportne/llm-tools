@@ -1,0 +1,134 @@
+"""Golden trace and replay regression tests."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from llm_tools.apps.chat_runtime import build_chat_executor
+from llm_tools.harness_api import (
+    ApprovalResolution,
+    BudgetPolicy,
+    HarnessSessionCreateRequest,
+    HarnessSessionResumeRequest,
+    HarnessSessionRunRequest,
+    HarnessSessionService,
+    InMemoryHarnessStateStore,
+    ScriptedParsedResponseProvider,
+    replay_session,
+)
+from llm_tools.llm_adapters import ParsedModelResponse
+from llm_tools.tool_api import SideEffectClass, ToolPolicy
+
+_GOLDEN_DIR = Path(__file__).with_name("golden")
+
+
+def test_success_trace_matches_golden_fixture() -> None:
+    _, workflow_executor = build_chat_executor()
+    service = HarnessSessionService(
+        store=InMemoryHarnessStateStore(),
+        workflow_executor=workflow_executor,
+        provider=ScriptedParsedResponseProvider(
+            [ParsedModelResponse(final_response="done")]
+        ),
+        workspace=".",
+    )
+    created = service.create_session(
+        HarnessSessionCreateRequest(
+            title="Root task",
+            intent="Complete",
+            budget_policy=BudgetPolicy(max_turns=3),
+            session_id="golden-success",
+            started_at="2026-01-01T00:00:00Z",
+        )
+    )
+    result = service.run_session(
+        HarnessSessionRunRequest(session_id=created.session_id)
+    )
+
+    payload = {
+        "trace": _normalize(result.snapshot.artifacts.trace.model_dump(mode="json")),
+        "replay": _normalize(replay_session(result.snapshot).model_dump(mode="json")),
+    }
+
+    assert payload == _load_golden("success_trace.json")
+
+
+def test_approval_trace_matches_golden_fixture() -> None:
+    _, workflow_executor = build_chat_executor(
+        policy=ToolPolicy(
+            allowed_side_effects={SideEffectClass.NONE, SideEffectClass.LOCAL_READ},
+            require_approval_for={SideEffectClass.LOCAL_READ},
+            allow_network=False,
+            allow_filesystem=True,
+            allow_subprocess=False,
+        )
+    )
+    service = HarnessSessionService(
+        store=InMemoryHarnessStateStore(),
+        workflow_executor=workflow_executor,
+        provider=ScriptedParsedResponseProvider(
+            [
+                ParsedModelResponse(
+                    invocations=[
+                        {"tool_name": "list_directory", "arguments": {"path": "."}}
+                    ]
+                )
+            ]
+        ),
+        workspace=".",
+    )
+    created = service.create_session(
+        HarnessSessionCreateRequest(
+            title="Approval task",
+            intent="Need approval",
+            budget_policy=BudgetPolicy(max_turns=3),
+            session_id="golden-approval",
+            started_at="2026-01-01T00:00:00Z",
+        )
+    )
+    waiting = service.run_session(
+        HarnessSessionRunRequest(session_id=created.session_id)
+    )
+    approved = service.resume_session(
+        HarnessSessionResumeRequest(
+            session_id=waiting.snapshot.session_id,
+            approval_resolution=ApprovalResolution.APPROVE,
+        )
+    )
+
+    payload = {
+        "trace": _normalize(approved.snapshot.artifacts.trace.model_dump(mode="json")),
+        "replay": _normalize(replay_session(approved.snapshot).model_dump(mode="json")),
+    }
+
+    assert payload == _load_golden("approval_trace.json")
+
+
+def _load_golden(filename: str) -> dict[str, Any]:
+    return json.loads((_GOLDEN_DIR / filename).read_text(encoding="utf-8"))
+
+
+def _normalize(value: Any) -> Any:
+    if isinstance(value, dict):
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in {
+                "saved_at",
+                "started_at",
+                "ended_at",
+                "requested_at",
+                "expires_at",
+                "recorded_at",
+                "checked_at",
+            }:
+                normalized[key] = f"<{key}>"
+            elif key in {"approval_id", "pending_approval_id"}:
+                normalized[key] = "<approval_id>" if item is not None else None
+            else:
+                normalized[key] = _normalize(item)
+        return normalized
+    if isinstance(value, list):
+        return [_normalize(item) for item in value]
+    return value

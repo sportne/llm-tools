@@ -1,0 +1,95 @@
+{
+  "trace": {
+    "final_stop_reason": "completed",
+    "session_id": "golden-success",
+    "turns": [
+      {
+        "context_projection": {
+          "context_budget": {
+            "budget_exhausted": false,
+            "configured": {
+              "max_chars_per_text_field": 400,
+              "max_related_tasks": 6,
+              "max_recent_turns": 5,
+              "max_selected_tasks": 1,
+              "max_total_chars": 6000
+            },
+            "omitted_recent_turn_count": 0,
+            "omitted_related_task_count": 0,
+            "omitted_selected_task_count": 0,
+            "remaining_total_chars": 5983,
+            "truncated_field_count": 0
+          },
+          "current_turn_index": 0,
+          "recent_turns": [],
+          "related_tasks": [],
+          "root_task_id": "task-1",
+          "selected_tasks": [
+            {
+              "artifact_refs": [],
+              "depends_on_task_ids": [],
+              "intent": "Complete",
+              "is_actionable": true,
+              "is_selected": true,
+              "parent_task_id": null,
+              "retry_count": 0,
+              "status": "pending",
+              "status_summary": null,
+              "task_id": "task-1",
+              "title": "Root task",
+              "truncated_fields": [],
+              "verification_status": "not_run"
+            }
+          ],
+          "session_budget_policy": {
+            "max_elapsed_seconds": null,
+            "max_tool_invocations": null,
+            "max_turns": 3
+          },
+          "session_id": "golden-success",
+          "session_retry_count": 0,
+          "session_started_at": "2026-01-01T00:00:00Z",
+          "turn_index": 1
+        },
+        "decision_action": "stop",
+        "decision_stop_reason": "completed",
+        "decision_summary": "Model returned a final response.",
+        "ended_at": "<ended_at>",
+        "invocation_traces": [],
+        "no_progress_signals": [],
+        "pending_approval_id": null,
+        "planner_selected_task_ids": [
+          "task-1"
+        ],
+        "replanning_triggers": [],
+        "selected_task_ids": [
+          "task-1"
+        ],
+        "started_at": "<started_at>",
+        "turn_index": 1,
+        "verification_status_by_task_id": {
+          "task-1": "not_run"
+        },
+        "workflow_outcome_statuses": []
+      }
+    ]
+  },
+  "replay": {
+    "final_stop_reason": "completed",
+    "limitations": [],
+    "mode": "trace",
+    "session_id": "golden-success",
+    "steps": [
+      {
+        "decision_action": "stop",
+        "decision_stop_reason": "completed",
+        "decision_summary": "Model returned a final response.",
+        "selected_task_ids": [
+          "task-1"
+        ],
+        "turn_index": 1,
+        "workflow_outcome_statuses": []
+      }
+    ]
+  }
+}
