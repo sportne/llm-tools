@@ -45,13 +45,14 @@ llm-tools-chat <directory> --config <path>
 
 ## Config Shape
 
-The YAML config keeps the same five top-level sections used by the original
+The YAML config keeps the same top-level sections used by the current chat
 client:
 
 - `llm`
 - `source_filters`
 - `session`
 - `tool_limits`
+- `policy`
 - `ui`
 
 Minimal Ollama example:
@@ -99,3 +100,7 @@ The app exposes a fixed read-only repository tool set:
 
 Those tools run through the standard `ToolRuntime` and `WorkflowExecutor`
 layers, while model output is parsed through `ActionEnvelopeAdapter`.
+
+The same config file is accepted by the Streamlit repository chat frontend,
+which reuses the runtime, provider, adapter, workflow, and read-only tool flow
+and ignores any Textual-only `ui` details it does not need.

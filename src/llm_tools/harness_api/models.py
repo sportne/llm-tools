@@ -7,6 +7,12 @@ from enum import Enum
 
 from pydantic import BaseModel, Field, model_validator
 
+from llm_tools.harness_api.verification import (
+    NoProgressSignal,
+    VerificationEvidenceRecord,
+    VerificationExpectation,
+    VerificationStatus,
+)
 from llm_tools.llm_adapters import ParsedModelResponse
 from llm_tools.tool_api import ToolContext
 from llm_tools.workflow_api.models import ApprovalRequest, WorkflowTurnResult
@@ -29,15 +35,6 @@ class TaskOrigin(str, Enum):  # noqa: UP042
 
     USER_REQUESTED = "user_requested"
     DERIVED = "derived"
-
-
-class VerificationStatus(str, Enum):  # noqa: UP042
-    """Verification status recorded against a task."""
-
-    NOT_RUN = "not_run"
-    PASSED = "passed"
-    FAILED = "failed"
-    INCONCLUSIVE = "inconclusive"
 
 
 class HarnessStopReason(str, Enum):  # noqa: UP042
@@ -98,20 +95,6 @@ class VerificationOutcome(BaseModel):
         return self
 
 
-class VerificationExpectation(BaseModel):
-    """A lightweight durable expectation for later task verification."""
-
-    description: str = Field(min_length=1)
-    required: bool = True
-
-    @model_validator(mode="after")
-    def validate_expectation(self) -> VerificationExpectation:
-        """Require expectation text to remain non-empty after trimming."""
-        if self.description.strip() == "":
-            raise ValueError("VerificationExpectation description must not be empty.")
-        return self
-
-
 class TaskRecord(BaseModel):
     """Durable task record tracked by the harness."""
 
@@ -137,6 +120,7 @@ class TaskRecord(BaseModel):
         """Require canonical task identity and dependency hygiene."""
         _validate_task_identity(self)
         _validate_task_relationships(self)
+        _validate_task_verification(self)
         _validate_task_artifacts(self)
         _validate_task_supersession(self)
         _validate_task_timestamps(self)
@@ -165,6 +149,26 @@ def _validate_task_relationships(task: TaskRecord) -> None:
         raise ValueError("derived tasks must set parent_task_id.")
     if task.parent_task_id is not None and task.parent_task_id.strip() == "":
         raise ValueError("parent_task_id must not be empty when provided.")
+
+
+def _validate_task_verification(task: TaskRecord) -> None:
+    expectation_ids = [
+        expectation.expectation_id for expectation in task.verification_expectations
+    ]
+    if len(set(expectation_ids)) != len(expectation_ids):
+        raise ValueError("TaskRecord verification expectation ids must be unique.")
+    if (
+        task.status is TaskLifecycleStatus.COMPLETED
+        and any(
+            expectation.required_for_completion
+            for expectation in task.verification_expectations
+        )
+        and task.verification.status is not VerificationStatus.PASSED
+    ):
+        raise ValueError(
+            "Completed tasks with required verification expectations must "
+            "have verification.status=passed."
+        )
 
 
 def _validate_task_artifacts(task: TaskRecord) -> None:
@@ -247,6 +251,7 @@ class HarnessTurn(BaseModel):
     started_at: str
     workflow_result: WorkflowTurnResult | None = None
     decision: TurnDecision | None = None
+    no_progress_signals: list[NoProgressSignal] = Field(default_factory=list)
     ended_at: str | None = None
 
     @model_validator(mode="after")
@@ -258,6 +263,16 @@ class HarnessTurn(BaseModel):
             self.ended_at is None or self.ended_at.strip() == ""
         ):
             raise ValueError("ended_at is required once decision exists.")
+        if (
+            self.decision is not None
+            and self.decision.action is TurnDecisionAction.STOP
+            and self.decision.stop_reason is HarnessStopReason.NO_PROGRESS
+            and len(self.no_progress_signals) == 0
+        ):
+            raise ValueError(
+                "HarnessTurn stopping for no_progress must include at least one "
+                "no_progress_signal."
+            )
         return self
 
 
@@ -292,6 +307,9 @@ class HarnessState(BaseModel):
     schema_version: str = Field(min_length=1)
     session: HarnessSession
     tasks: list[TaskRecord] = Field(default_factory=list)
+    verification_evidence: list[VerificationEvidenceRecord] = Field(
+        default_factory=list
+    )
     turns: list[HarnessTurn] = Field(default_factory=list)
     pending_approvals: list[PendingApprovalRecord] = Field(default_factory=list)
 
@@ -299,6 +317,7 @@ class HarnessState(BaseModel):
     def validate_state_integrity(self) -> HarnessState:
         """Require cross-record references and turn ordering to be consistent."""
         task_map = _validate_harness_tasks(self)
+        _validate_harness_verification_evidence(self, known_task_ids=set(task_map))
         _validate_harness_turns(self, known_task_ids=set(task_map))
         _validate_harness_session_shape(self)
         _validate_harness_pending_approvals(self)
@@ -365,6 +384,11 @@ def _validate_harness_turns(state: HarnessState, *, known_task_ids: set[str]) ->
         raise ValueError("HarnessState turns must have contiguous indices from 1.")
 
     for turn in state.turns:
+        for signal in turn.no_progress_signals:
+            if signal.task_id is not None and signal.task_id not in known_task_ids:
+                raise ValueError(
+                    "No-progress signal task ids must resolve to known tasks."
+                )
         if turn.decision is None:
             continue
         for task_id in turn.decision.selected_task_ids:
@@ -387,6 +411,37 @@ def _validate_harness_turns(state: HarnessState, *, known_task_ids: set[str]) ->
 def _validate_harness_session_shape(state: HarnessState) -> None:
     if state.session.current_turn_index != len(state.turns):
         raise ValueError("session.current_turn_index must equal len(turns).")
+
+
+def _validate_harness_verification_evidence(
+    state: HarnessState,
+    *,
+    known_task_ids: set[str],
+) -> None:
+    evidence_by_id: dict[str, VerificationEvidenceRecord] = {}
+    for evidence in state.verification_evidence:
+        if evidence.evidence_id in evidence_by_id:
+            raise ValueError("HarnessState verification evidence ids must be unique.")
+        if evidence.task_id is not None and evidence.task_id not in known_task_ids:
+            raise ValueError(
+                "Verification evidence task ids must resolve to known tasks."
+            )
+        evidence_by_id[evidence.evidence_id] = evidence
+
+    for task in state.tasks:
+        for evidence_ref in task.verification.evidence_refs:
+            referenced_evidence = evidence_by_id.get(evidence_ref)
+            if referenced_evidence is None:
+                raise ValueError(
+                    "VerificationOutcome evidence_refs must resolve to known "
+                    "verification evidence."
+                )
+            owner_task_id = referenced_evidence.task_id
+            if owner_task_id is not None and owner_task_id != task.task_id:
+                raise ValueError(
+                    "VerificationOutcome evidence_refs must not reference "
+                    "evidence owned by a different task."
+                )
 
 
 def _validate_harness_pending_approvals(state: HarnessState) -> None:

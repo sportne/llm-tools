@@ -13,8 +13,8 @@ from llm_tools.harness_api.models import (
     TaskLifecycleStatus,
     TaskOrigin,
     TaskRecord,
-    VerificationExpectation,
 )
+from llm_tools.harness_api.verification import VerificationExpectation
 
 _TERMINAL_TASK_STATUSES = frozenset(
     {

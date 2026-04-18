@@ -43,9 +43,15 @@ Proposed modules:
 - `context` for derived turn-context construction
 - `replay` for trace reconstruction and debugging support
 
-The package boundary is now scaffolded with `harness_api.models` as the first
-concrete harness submodule. The remaining modules above stay planned and can be
-added incrementally as the implementation lands.
+The package boundary now has two concrete harness submodules:
+
+- `harness_api.models` for canonical persisted session, task, turn, and state
+  records
+- `harness_api.verification` for verifier contracts, task-level expectations,
+  evidence records, and no-progress signals
+
+The remaining modules above stay planned and can be added incrementally as the
+implementation lands.
 
 ## Canonical model inventory
 
@@ -78,12 +84,31 @@ session execution:
   blocked `ApprovalRequest`, the parsed model response, the base `ToolContext`,
   and the pending invocation index needed to continue the interrupted turn.
 - `HarnessTurn`: one persisted harness turn, including the turn index, durable
-  timestamps, optional `WorkflowTurnResult`, and optional `TurnDecision`.
+  timestamps, optional `WorkflowTurnResult`, optional `TurnDecision`, and any
+  no-progress signals detected for the turn.
 - `HarnessSession`: session-level metadata including session id, root task id,
   budget policy, current turn index, start time, and terminal stop metadata.
 - `HarnessState`: top-level persisted envelope containing `schema_version`,
-  `HarnessSession`, all `TaskRecord` entries, all `HarnessTurn` entries, and
-  any durable pending approvals required for resume.
+  `HarnessSession`, all `TaskRecord` entries, all persisted verification
+  evidence records, all `HarnessTurn` entries, and any durable pending
+  approvals required for resume.
+
+`harness_api.verification` now defines the canonical verification contracts:
+
+- `Verifier`: protocol for verification implementations that inspect durable
+  task and session state and return a structured `VerificationResult`.
+- `VerificationExpectation`: task-level declaration of what must be verified,
+  whether it blocks completion, and when it should run.
+- `VerificationResult`: first-class verifier output with task id, status,
+  checked timestamp, expectation coverage, evidence, and optional failure mode.
+- `VerificationEvidenceRecord`: persisted evidence record stored once at the
+  `HarnessState` level and referenced from `VerificationOutcome.evidence_refs`.
+- `VerificationFailureMode`: stable taxonomy for failed or inconclusive
+  verification outcomes.
+- `NoProgressSignal`: persisted structured signal describing stalled or
+  repetitive session behavior.
+- Supporting enums: `VerificationTrigger`, `VerificationTiming`, and
+  `NoProgressSignalKind`.
 
 These contracts are intentionally not UI-shaped. They do not store chat
 transcripts, prompt text, provider payloads, or presentation-specific state.
@@ -106,20 +131,29 @@ The canonical models enforce the following invariants:
   `evidence_refs` must be unique.
 - `TaskRecord` requires non-empty `task_id`, `title`, and `intent`; tracks
   whether the task is user-requested or derived; forbids self dependency; and
-  requires unique dependency ids and artifact refs.
+  requires unique dependency ids, verification expectation ids, and artifact
+  refs.
+- `TaskRecord` requires `verification.status == passed` when the task is
+  `completed` and any attached expectation has
+  `required_for_completion=True`.
 - `TaskRecord` uses `superseded_by_task_id` only for `SUPERSEDED` tasks.
 - `TurnDecision` requires `stop_reason` only for stop decisions and requires
   unique `selected_task_ids`.
 - `PendingApprovalRecord` requires its `pending_index` to match the persisted
   approval request and reference an invocation in the stored parsed response.
-- `HarnessTurn` requires `ended_at` once a decision has been recorded.
+- `HarnessTurn` requires `ended_at` once a decision has been recorded, and a
+  turn that stops with `HarnessStopReason.NO_PROGRESS` must carry at least one
+  `NoProgressSignal`.
 - `HarnessSession` requires `current_turn_index >= 0`, requires non-empty
   `session_id`, `root_task_id`, and `started_at`, and requires `stop_reason`
   whenever `ended_at` is set.
 - `HarnessState` requires unique task ids, root-task consistency, acyclic
-  dependency/parent/supersession graphs, contiguous ascending turn indices
-  starting at `1`, selected task ids that resolve to known tasks, at most one
-  incomplete tail turn, unique pending approval ids, and
+  dependency/parent/supersession graphs, verification evidence ids, evidence
+  refs that resolve without borrowing evidence owned by another task,
+  no-progress signal task ids that resolve to known tasks, contiguous
+  ascending turn indices starting at `1`, selected task ids that resolve to
+  known tasks, at most one incomplete tail turn, unique pending approval ids,
+  and
   `session.current_turn_index == len(turns)`.
 
 The invariant split is deliberate. Per-record rules live on the individual
@@ -175,6 +209,11 @@ contract is:
   rehydration on explicit migration logic
 - preserve embedded `WorkflowTurnResult` payloads as part of the canonical
   turn record so replay can reconstruct exact workflow outcomes
+- persist verification evidence records at the `HarnessState` level and keep
+  task-level `VerificationOutcome.evidence_refs` as stable references into that
+  shared evidence list, with optional task ownership on each evidence record
+- persist no-progress signals on `HarnessTurn` records so a no-progress stop
+  can carry canonical signal data rather than relying on free-form summaries
 - round-trip via `model_dump(mode="json")` and `model_validate_json(...)`
 - derive prompt context, summaries, and operator views from canonical state
   instead of persisting those projections as the primary record
@@ -224,6 +263,15 @@ Resume validation checks include:
 This keeps resume semantics grounded in persisted typed state instead of hidden
 in-memory executor state.
 
+The implemented evidence shape is intentionally minimal and additive:
+
+- `VerificationEvidenceRecord.evidence_id`: stable record id
+- `task_id`: optional owning task reference
+- `recorded_at`: optional durable timestamp
+- `summary`: optional human-readable description
+- `artifact_ref`: optional pointer to an external artifact, file, or report
+- `verifier_name`: optional verifier identifier
+
 ## Dependency direction
 
 `harness_api` sits above the lower layers and may depend on:
@@ -256,6 +304,8 @@ tool execution.
 
 - durable session state
 - multi-turn progress decisions
+- verification expectations, structured verifier results, persisted evidence,
+  and no-progress signals
 - resume and recovery semantics
 - persisted history and replay artifacts
 
@@ -264,6 +314,14 @@ tool execution.
 - model interaction preparation for a single turn
 - execution of parsed invocations from that turn
 - one-turn result normalization
+
+Verification is deliberately separate from both tool invocation and planning.
+Tools may produce artifacts that verifiers later inspect, and planners may
+propose or reorder tasks, but verifier contracts and persisted evidence live in
+`harness_api` so completion can be earned through explicit checks rather than
+free-form summaries. The current model layer records no-progress signals and
+stop-shape invariants, but not the detection heuristics or policy thresholds
+that would produce those signals.
 
 The architectural boundary is deliberate: `workflow_api` is a reusable
 composition primitive, while `harness_api` is the durable session orchestrator

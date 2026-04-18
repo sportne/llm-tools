@@ -329,12 +329,12 @@ Suggested deliverables:
 
 Dependencies: `2.3`, `3.1`, `3.2`, `3.3`
 
-### [ ] Phase 4: Verification Subsystem
+### [x] Phase 4: Verification Subsystem
 
 Outcome: make verification a first-class harness concern with durable evidence,
 task-level expectations, and detection of sessions that are not making progress.
 
-#### [ ] 4.1 Add first-class verifier abstractions
+#### [x] 4.1 Add first-class verifier abstractions
 
 Description: Define typed verifier contracts that can evaluate task outcomes,
 inspect artifacts, and emit structured verification results separate from tool
@@ -351,7 +351,13 @@ Suggested deliverables:
 
 Dependencies: `1.2`, `1.3`
 
-#### [ ] 4.2 Attach verification expectations to tasks
+Status: Done. `src/llm_tools/harness_api/verification.py` now defines the
+first-class verification surface, including `Verifier`,
+`VerificationExpectation`, `VerificationResult`,
+`VerificationEvidenceRecord`, `VerificationFailureMode`,
+`NoProgressSignal`, and the minimal trigger, timing, and signal-kind enums.
+
+#### [x] 4.2 Attach verification expectations to tasks
 
 Description: Define how tasks declare what must be verified, when verification
 is required, and whether verification is blocking for completion.
@@ -366,7 +372,12 @@ Suggested deliverables:
 
 Dependencies: `2.1`, `2.2`, `4.1`
 
-#### [ ] 4.3 Persist verification evidence and outcomes
+Status: Done. `TaskRecord` now carries additive
+`verification_expectations`, enforces unique expectation ids per task, and
+requires aggregate `verification.status == passed` when a completed task has
+any `required_for_completion=True` expectations.
+
+#### [x] 4.3 Persist verification evidence and outcomes
 
 Description: Specify how verification evidence, verifier inputs, verifier
 outputs, and final verification outcomes are stored in durable session state.
@@ -381,7 +392,12 @@ Suggested deliverables:
 
 Dependencies: `2.3`, `4.1`, `4.2`
 
-#### [ ] 4.4 Add no-progress detection
+Status: Done. `HarnessState` now persists `verification_evidence`, task
+`VerificationOutcome.evidence_refs` resolve against that shared evidence list,
+cannot borrow evidence owned by another task, and the design docs describe the
+minimal evidence-record shape.
+
+#### [x] 4.4 Add no-progress detection
 
 Description: Define heuristics and explicit signals for detecting stalled
 sessions, repeated ineffective turns, or repeated retries that are not moving
@@ -396,6 +412,12 @@ Suggested deliverables:
 - Stop or escalation semantics when no-progress is detected
 
 Dependencies: `3.2`, `3.3`, `4.2`, `4.3`
+
+Status: Done. `HarnessTurn` now persists additive `no_progress_signals`,
+signal task ids resolve to known tasks, and a turn that stops with
+`HarnessStopReason.NO_PROGRESS` must carry at least one signal. Threshold and
+policy tuning remain future harness policy work rather than Phase 4 model
+scope.
 
 ### [ ] Phase 5: Planning and Decision Policy
 

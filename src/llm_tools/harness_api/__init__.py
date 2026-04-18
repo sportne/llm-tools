@@ -12,9 +12,7 @@ from llm_tools.harness_api.models import (
     TaskRecord,
     TurnDecision,
     TurnDecisionAction,
-    VerificationExpectation,
     VerificationOutcome,
-    VerificationStatus,
 )
 from llm_tools.harness_api.resume import (
     ResumedHarnessSession,
@@ -47,6 +45,18 @@ from llm_tools.harness_api.tasks import (
     supersede_task,
     unblock_task,
 )
+from llm_tools.harness_api.verification import (
+    NoProgressSignal,
+    NoProgressSignalKind,
+    VerificationEvidenceRecord,
+    VerificationExpectation,
+    VerificationFailureMode,
+    VerificationResult,
+    VerificationStatus,
+    VerificationTiming,
+    VerificationTrigger,
+    Verifier,
+)
 
 __all__ = [
     "block_task",
@@ -68,6 +78,8 @@ __all__ = [
     "InMemoryHarnessStateStore",
     "InvalidTaskLifecycleError",
     "load_resumed_session",
+    "NoProgressSignal",
+    "NoProgressSignalKind",
     "PendingApprovalRecord",
     "ResumeDisposition",
     "ResumeIssue",
@@ -85,7 +97,13 @@ __all__ = [
     "TurnDecisionAction",
     "unblock_task",
     "UnsupportedHarnessStateVersionError",
+    "VerificationEvidenceRecord",
     "VerificationExpectation",
+    "VerificationFailureMode",
     "VerificationOutcome",
+    "VerificationResult",
     "VerificationStatus",
+    "VerificationTiming",
+    "VerificationTrigger",
+    "Verifier",
 ]

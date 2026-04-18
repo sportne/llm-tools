@@ -13,12 +13,15 @@ from llm_tools.harness_api import (
     HarnessState,
     HarnessStopReason,
     HarnessTurn,
+    NoProgressSignal,
+    NoProgressSignalKind,
     PendingApprovalRecord,
     TaskLifecycleStatus,
     TaskOrigin,
     TaskRecord,
     TurnDecision,
     TurnDecisionAction,
+    VerificationEvidenceRecord,
     VerificationExpectation,
     VerificationOutcome,
     VerificationStatus,
@@ -119,7 +122,72 @@ def test_verification_models_validate_expected_shape() -> None:
         VerificationOutcome(evidence_refs=["artifact-1", "artifact-1"])
 
     with pytest.raises(ValidationError, match="description must not be empty"):
-        VerificationExpectation(description=" ")
+        VerificationExpectation(expectation_id="expectation-1", description=" ")
+
+
+def test_task_record_validates_verification_expectations_and_completion_rule() -> None:
+    with pytest.raises(
+        ValidationError, match="verification expectation ids must be unique"
+    ):
+        TaskRecord(
+            task_id="task-1",
+            title="Task",
+            intent="Do work",
+            origin=TaskOrigin.USER_REQUESTED,
+            verification_expectations=[
+                VerificationExpectation(
+                    expectation_id="expectation-1",
+                    description="Check output",
+                ),
+                VerificationExpectation(
+                    expectation_id="expectation-1",
+                    description="Check logs",
+                ),
+            ],
+        )
+
+    with pytest.raises(
+        ValidationError, match="required verification expectations must have"
+    ):
+        TaskRecord(
+            task_id="task-1",
+            title="Task",
+            intent="Do work",
+            origin=TaskOrigin.USER_REQUESTED,
+            status=TaskLifecycleStatus.COMPLETED,
+            verification_expectations=[
+                VerificationExpectation(
+                    expectation_id="expectation-1",
+                    description="Run tests",
+                    required_for_completion=True,
+                )
+            ],
+            verification=VerificationOutcome(
+                status=VerificationStatus.FAILED,
+                checked_at="2026-01-01T00:00:10Z",
+            ),
+        )
+
+    completed = TaskRecord(
+        task_id="task-1",
+        title="Task",
+        intent="Do work",
+        origin=TaskOrigin.USER_REQUESTED,
+        status=TaskLifecycleStatus.COMPLETED,
+        verification_expectations=[
+            VerificationExpectation(
+                expectation_id="expectation-1",
+                description="Run tests",
+                required_for_completion=True,
+            )
+        ],
+        verification=VerificationOutcome(
+            status=VerificationStatus.PASSED,
+            checked_at="2026-01-01T00:00:10Z",
+        ),
+    )
+
+    assert completed.verification.status is VerificationStatus.PASSED
 
 
 @pytest.mark.parametrize(
@@ -347,6 +415,38 @@ def test_harness_turn_requires_end_time_once_decided() -> None:
                 stop_reason=HarnessStopReason.ERROR,
             ),
         )
+
+
+def test_harness_turn_no_progress_stop_requires_signal() -> None:
+    with pytest.raises(ValidationError, match="must include at least one"):
+        HarnessTurn(
+            turn_index=1,
+            started_at="2026-01-01T00:00:00Z",
+            decision=TurnDecision(
+                action=TurnDecisionAction.STOP,
+                stop_reason=HarnessStopReason.NO_PROGRESS,
+            ),
+            ended_at="2026-01-01T00:00:05Z",
+        )
+
+    turn = HarnessTurn(
+        turn_index=1,
+        started_at="2026-01-01T00:00:00Z",
+        decision=TurnDecision(
+            action=TurnDecisionAction.STOP,
+            stop_reason=HarnessStopReason.NO_PROGRESS,
+        ),
+        no_progress_signals=[
+            NoProgressSignal(
+                signal_id="signal-1",
+                kind=NoProgressSignalKind.STALLED_TASK,
+                task_id="task-1",
+            )
+        ],
+        ended_at="2026-01-01T00:00:05Z",
+    )
+
+    assert turn.no_progress_signals[0].kind is NoProgressSignalKind.STALLED_TASK
 
 
 def test_harness_session_rejects_invalid_terminal_shape() -> None:
@@ -611,6 +711,105 @@ def test_harness_state_rejects_bad_cross_record_references() -> None:
             turns=[HarnessTurn(turn_index=1, started_at="2026-01-01T00:00:00Z")],
         )
 
+    with pytest.raises(ValidationError, match="evidence_refs must resolve"):
+        HarnessState(
+            schema_version="2",
+            session=HarnessSession(
+                session_id="session-1",
+                root_task_id="task-1",
+                budget_policy=BudgetPolicy(max_turns=3),
+                started_at="2026-01-01T00:00:00Z",
+            ),
+            tasks=[
+                TaskRecord(
+                    task_id="task-1",
+                    title="Root task",
+                    intent="Complete the root request.",
+                    origin=TaskOrigin.USER_REQUESTED,
+                    verification=VerificationOutcome(evidence_refs=["evidence-1"]),
+                )
+            ],
+        )
+
+    with pytest.raises(ValidationError, match="evidence task ids must resolve"):
+        HarnessState(
+            schema_version="2",
+            session=HarnessSession(
+                session_id="session-1",
+                root_task_id="task-1",
+                budget_policy=BudgetPolicy(max_turns=3),
+                started_at="2026-01-01T00:00:00Z",
+            ),
+            tasks=[root_task],
+            verification_evidence=[
+                VerificationEvidenceRecord(
+                    evidence_id="evidence-1",
+                    task_id="task-2",
+                )
+            ],
+        )
+
+    with pytest.raises(ValidationError, match="owned by a different task"):
+        HarnessState(
+            schema_version="2",
+            session=HarnessSession(
+                session_id="session-1",
+                root_task_id="task-1",
+                budget_policy=BudgetPolicy(max_turns=3),
+                started_at="2026-01-01T00:00:00Z",
+            ),
+            tasks=[
+                TaskRecord(
+                    task_id="task-1",
+                    title="Root task",
+                    intent="Complete the root request.",
+                    origin=TaskOrigin.USER_REQUESTED,
+                    verification=VerificationOutcome(evidence_refs=["evidence-1"]),
+                ),
+                TaskRecord(
+                    task_id="task-2",
+                    title="Sibling task",
+                    intent="Sibling work",
+                    origin=TaskOrigin.DERIVED,
+                    parent_task_id="task-1",
+                ),
+            ],
+            verification_evidence=[
+                VerificationEvidenceRecord(
+                    evidence_id="evidence-1",
+                    task_id="task-2",
+                )
+            ],
+        )
+
+    with pytest.raises(ValidationError, match="signal task ids must resolve"):
+        HarnessState(
+            schema_version="2",
+            session=HarnessSession(
+                session_id="session-1",
+                root_task_id="task-1",
+                budget_policy=BudgetPolicy(max_turns=3),
+                started_at="2026-01-01T00:00:00Z",
+                current_turn_index=1,
+            ),
+            tasks=[root_task],
+            turns=[
+                HarnessTurn(
+                    turn_index=1,
+                    started_at="2026-01-01T00:00:00Z",
+                    decision=TurnDecision(action=TurnDecisionAction.CONTINUE),
+                    no_progress_signals=[
+                        NoProgressSignal(
+                            signal_id="signal-1",
+                            kind=NoProgressSignalKind.REPEATED_RETRY,
+                            task_id="task-2",
+                        )
+                    ],
+                    ended_at="2026-01-01T00:00:05Z",
+                )
+            ],
+        )
+
 
 def test_harness_state_validates_additional_cross_record_integrity() -> None:
     session = HarnessSession(
@@ -775,7 +974,10 @@ def test_harness_state_round_trips_with_richer_task_state() -> None:
                 parent_task_id="task-1",
                 depends_on_task_ids=["task-1"],
                 verification_expectations=[
-                    VerificationExpectation(description="Run targeted tests.")
+                    VerificationExpectation(
+                        expectation_id="expectation-1",
+                        description="Run targeted tests.",
+                    )
                 ],
                 artifact_refs=["artifacts/log.txt"],
                 status=TaskLifecycleStatus.BLOCKED,
