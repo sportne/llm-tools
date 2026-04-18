@@ -21,6 +21,8 @@ def test_scaffolded_subpackages_are_importable() -> None:
         "llm_tools.tools",
         "llm_tools.workflow_api",
         "llm_tools.harness_api",
+        "llm_tools.harness_api.context",
+        "llm_tools.harness_api.planning",
         "llm_tools.harness_api.verification",
     ):
         module = importlib.import_module(module_name)
@@ -31,6 +33,14 @@ def test_verification_submodule_imports_directly() -> None:
     module = importlib.import_module("llm_tools.harness_api.verification")
 
     assert module.__name__ == "llm_tools.harness_api.verification"
+
+
+def test_context_and_planning_submodules_import_directly() -> None:
+    context_module = importlib.import_module("llm_tools.harness_api.context")
+    planning_module = importlib.import_module("llm_tools.harness_api.planning")
+
+    assert context_module.__name__ == "llm_tools.harness_api.context"
+    assert planning_module.__name__ == "llm_tools.harness_api.planning"
 
 
 def test_expected_subpackages_exist_under_llm_tools() -> None:

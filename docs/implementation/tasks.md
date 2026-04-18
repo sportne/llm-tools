@@ -362,3 +362,21 @@ Step 0 note:
 - [-] Rich redaction framework
 - [-] Workflow engine implementation
 - [-] Version-aware multi-registration
+
+
+---
+
+## Harness planning and context construction
+
+This section tracks additive `harness_api` work without renumbering the
+repository-wide runtime, observability, or adapter phases above.
+
+### Phase 5. Planner
+- [x] 5.1 Add a minimal planner abstraction with typed inputs and outputs
+- [x] 5.2 Add deterministic one-task selection rules over canonical task state
+- [x] 5.3 Add explicit derived replanning triggers without mutating state
+
+### Phase 6. Turn context
+- [x] 6.1 Add provider-neutral turn-context projection models
+- [x] 6.2 Add explicit count-and-character budget handling for derived context
+- [x] 6.3 Add canonical-vs-derived projection rules, exports, tests, and docs

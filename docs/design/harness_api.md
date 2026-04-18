@@ -53,6 +53,13 @@ The package boundary now has two concrete harness submodules:
 The remaining modules above stay planned and can be added incrementally as the
 implementation lands.
 
+Two additional harness submodules are now concrete:
+
+- `harness_api.planning` for deterministic task selection and explicit
+  replanning-trigger derivation
+- `harness_api.context` for provider-neutral turn-context projection and
+  budgeted context construction
+
 ## Canonical model inventory
 
 `harness_api.models` now defines the canonical persisted contracts for durable
@@ -282,6 +289,86 @@ in-memory executor state.
 `HarnessExecutor` keeps `workflow_api` as the one-turn layer. It never asks the
 workflow layer to own persisted session state, task lifecycles, approval stop
 semantics, or retry accounting.
+
+## Planning and replanning
+
+`harness_api.planning` adds the first minimal planner abstraction without
+changing canonical persisted state:
+
+- `HarnessPlanner`: protocol for deterministic task selection and
+  replanning-trigger detection
+- `TaskSelection`: provider-neutral selected task ids plus stable diagnostic
+  blocked reasons
+- `ReplanningTrigger`: explicit derived reasons to revisit task selection
+- `DeterministicHarnessPlanner`: the minimal concrete planner
+
+The implemented deterministic selection rules are:
+
+- select exactly one task per turn
+- a task is actionable only when its status is `pending` or `in_progress` and
+  all dependencies are already `completed`
+- blocked and terminal tasks are never selected
+- actionable `in_progress` tasks win before actionable `pending` tasks
+- durable `HarnessState.tasks` order is the only tie-breaker
+- no actionable task returns an empty selection rather than synthesizing new
+  work
+
+The implemented replanning triggers are derived, pure signals:
+
+- `select_tasks_requested` when a turn decision asks to select tasks again
+- `selected_task_blocked` when previously selected work is now blocked
+- `selected_task_terminal` when previously selected work reached a terminal
+  lifecycle state
+- `new_derived_task_created` when new derived tasks appear in canonical state
+- `no_actionable_tasks_remaining` when non-terminal work remains but nothing is
+  currently actionable
+
+These triggers do not mutate `HarnessState`, synthesize prompt text, or create
+replacement tasks. They are a reusable policy surface for future harness
+drivers and appliers.
+
+## Turn-context construction
+
+`harness_api.context` adds a provider-neutral derived-context builder that
+projects canonical session state into one bounded turn-context payload:
+
+- `TurnContextBudget`: explicit count and character limits
+- `TaskContextProjection`, `TurnContextProjection`, and
+  `BudgetContextProjection`: structured derived views
+- `HarnessTurnContext`: the composed provider-neutral turn context
+- `TurnContextBundle`: the built `ToolContext` plus its structured projection
+- `HarnessContextBuilder` and `DefaultHarnessContextBuilder`: the public
+  context-builder contract and the minimal implementation
+
+Canonical vs derived rules are explicit:
+
+- canonical persisted fields stay on `HarnessState`, `TaskRecord`, and
+  `HarnessTurn`
+- only approved canonical fields are copied into projections
+- copied task fields are limited to task identity, title, intent, lifecycle
+  state, parent/dependency links, status summary, retry count, verification
+  status, and artifact refs
+- copied session fields are limited to session identity, root task id, current
+  turn index, session start time, retry count, and configured `BudgetPolicy`
+- copied turn fields are limited to turn index, selected task ids, decision
+  action, decision stop reason, decision summary, and workflow outcome statuses
+- derived fields such as selected/actionable flags, omission counts,
+  truncation flags, and remaining budget are kept separate from copied
+  canonical data
+- prompt text, provider payloads, token estimates, and formatted instructions
+  are not stored in canonical state and are not emitted by this builder
+
+The default budget policy is explicit and provider-neutral:
+
+- selected tasks are projected first
+- additional actionable tasks are projected second in durable task order
+- completed turns are projected third in newest-first order
+- each copied text field is capped by `max_chars_per_text_field`
+- total copied text across projected fields is capped by `max_total_chars`
+- once the total text budget is exhausted, lower-priority optional projections
+  are omitted and omission metadata is recorded
+- the projection is serialized into `ToolContext.metadata["harness_turn_context"]`
+  without writing anything back into canonical harness state
 
 ## Turn sequencing and commit points
 
