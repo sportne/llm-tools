@@ -6,6 +6,8 @@ This document defines the concrete engineering backlog required to evolve
 `llm-tools` from its current typed tool and one-turn workflow foundation into a
 true harness.
 
+The root `TASKS.md` is the canonical backlog for this repository.
+
 The repository is not starting from zero. The existing `tool_api`,
 `llm_adapters`, `llm_providers`, built-in `tools`, policy/runtime,
 observability, and `workflow_api` layers are the foundation. The work below
@@ -80,7 +82,7 @@ It does not propose self-optimizing or meta-harness behavior.
 
 ## Phased Task Plan
 
-### [~] Phase 1: Harness Contract and Architecture
+### [x] Phase 1: Harness Contract and Architecture
 
 Outcome: define the new top-level harness contract, the canonical harness
 models, and the architectural boundary between one-turn workflow execution and
@@ -427,12 +429,12 @@ signal task ids resolve to known tasks, and a turn that stops with
 policy tuning remain future harness policy work rather than Phase 4 model
 scope.
 
-### [ ] Phase 5: Planning and Decision Policy
+### [x] Phase 5: Planning and Decision Policy
 
 Outcome: separate planning from execution with a minimal planner and
 deterministic rules for task selection and replanning.
 
-#### [ ] 5.1 Add a minimal planner abstraction
+#### [x] 5.1 Add a minimal planner abstraction
 
 Description: Define a planner contract that can inspect canonical harness state
 and propose task additions, ordering, decomposition, or completion updates.
@@ -449,7 +451,11 @@ Suggested deliverables:
 
 Dependencies: `2.1`, `2.2`, `3.1`
 
-#### [ ] 5.2 Add deterministic task selection rules
+Status: Done. `src/llm_tools/harness_api/planning.py` now defines the planner
+protocol, typed selection model, and the minimal deterministic planner.
+Coverage lives in `tests/harness_api/test_planning.py`.
+
+#### [x] 5.2 Add deterministic task selection rules
 
 Description: Specify how the harness picks the next actionable task from
 canonical state, including tie-breaking, blocked-task handling, and budget-aware
@@ -465,7 +471,12 @@ Suggested deliverables:
 
 Dependencies: `2.2`, `3.2`, `5.1`
 
-#### [ ] 5.3 Define replanning triggers
+Status: Done. The deterministic planner now selects actionable work in stable
+state order, prefers `in_progress` work before `pending` work, and reports
+blocked reasons when no actionable work remains. Coverage lives in
+`tests/harness_api/test_planning.py`.
+
+#### [x] 5.3 Define replanning triggers
 
 Description: Specify when the harness must re-enter planning, such as after
 task completion, verification failure, approval denial, no-progress detection,
@@ -482,12 +493,18 @@ Suggested deliverables:
 
 Dependencies: `3.2`, `4.4`, `5.1`, `5.2`
 
-### [ ] Phase 6: Context Construction
+Status: Done. `src/llm_tools/harness_api/planning.py` now exposes stable
+derived replanning triggers, and the built-in session driver records them in
+planning metadata for replay and inspection. Coverage lives in
+`tests/harness_api/test_planning.py` and
+`tests/harness_api/test_session_additional_coverage.py`.
+
+### [x] Phase 6: Context Construction
 
 Outcome: create a turn-context subsystem that builds prompt-ready projections
 from canonical state while enforcing explicit budget and projection rules.
 
-#### [ ] 6.1 Add a turn-context builder
+#### [x] 6.1 Add a turn-context builder
 
 Description: Define a component that projects canonical harness state into the
 turn-specific context needed by providers, adapters, and the one-turn workflow
@@ -503,7 +520,12 @@ Suggested deliverables:
 
 Dependencies: `2.3`, `3.1`, `5.2`
 
-#### [ ] 6.2 Define context-budget policies
+Status: Done. `src/llm_tools/harness_api/context.py` now defines the
+turn-context builder contract, typed projection models, and the default
+provider-neutral builder. Coverage lives in
+`tests/harness_api/test_context.py`.
+
+#### [x] 6.2 Define context-budget policies
 
 Description: Specify how the harness budgets prompt context across task state,
 turn history, verification evidence, tool results, summaries, and policy
@@ -519,7 +541,11 @@ Suggested deliverables:
 
 Dependencies: `1.2`, `6.1`
 
-#### [ ] 6.3 Keep canonical state separate from prompt projections
+Status: Done. The default context builder now enforces explicit count and
+character budgets, deterministic projection priority, and omission/truncation
+accounting. Coverage lives in `tests/harness_api/test_context.py`.
+
+#### [x] 6.3 Keep canonical state separate from prompt projections
 
 Description: Define projection rules that make it explicit which data is
 canonical persisted state and which data is prompt-only text or model-facing
@@ -536,7 +562,12 @@ Suggested deliverables:
 
 Dependencies: `2.3`, `6.1`, `6.2`
 
-### [~] Phase 7: Approval and Policy Integration
+Status: Done. The context projection models now keep copied canonical fields
+separate from derived budget and selection metadata, and the tests assert that
+provider prompt fields do not leak into canonical state or derived turn
+context. Coverage lives in `tests/harness_api/test_context.py`.
+
+### [x] Phase 7: Approval and Policy Integration
 
 Outcome: make approvals and policy decisions durable session concerns rather
 than transient workflow events.
@@ -575,7 +606,7 @@ Dependencies: `3.2`, `7.1`
 
 Status: Done. The harness now pauses on persisted approval waits, resumes safely after approval, denial, timeout, or operator cancel, and maps those outcomes onto explicit session stop reasons without losing the underlying workflow approval outcomes. Coverage lives in `tests/harness_api/test_harness_executor.py` and `tests/harness_api/test_resume.py`.
 
-#### [ ] 7.3 Snapshot policy context into traces
+#### [x] 7.3 Snapshot policy context into traces
 
 Description: Define how policy inputs, `PolicyDecision` summaries, approval
 requirements, and related runtime context are recorded in harness traces.
@@ -590,12 +621,19 @@ Suggested deliverables:
 
 Dependencies: `3.4`, `7.1`, `7.2`
 
-### [ ] Phase 8: Observability and Replay
+Status: Done. `src/llm_tools/harness_api/replay.py` now persists redacted
+policy snapshots per invocation in durable trace artifacts, and the approval
+and replay test suites assert those snapshots are stored and replayable.
+Coverage lives in `tests/harness_api/test_session_api.py`,
+`tests/harness_api/test_harness_executor.py`, and
+`tests/harness_api/test_replay_golden.py`.
+
+### [x] Phase 8: Observability and Replay
 
 Outcome: provide harness-level tracing, summaries, and replay support that make
 multi-turn execution explainable after the fact.
 
-#### [ ] 8.1 Add structured harness turn traces
+#### [x] 8.1 Add structured harness turn traces
 
 Description: Define a harness trace model that records each turn’s selected
 task, projected context summary, planner input/output, workflow result,
@@ -613,7 +651,12 @@ Suggested deliverables:
 
 Dependencies: `3.4`, `4.3`, `5.3`, `6.1`, `7.3`
 
-#### [ ] 8.2 Add session summary artifacts
+Status: Done. `src/llm_tools/harness_api/replay.py` now defines structured
+invocation, turn, and session trace models with policy snapshots, context
+projection summaries, planner metadata, verification summaries, and turn
+decision data.
+
+#### [x] 8.2 Add session summary artifacts
 
 Description: Define durable summary artifacts that describe session status,
 completed work, open tasks, pending approvals, verification status, and final
@@ -630,7 +673,12 @@ Suggested deliverables:
 
 Dependencies: `2.3`, `4.3`, `8.1`
 
-#### [ ] 8.3 Add replay and debug support
+Status: Done. Stored harness snapshots now carry derived session summaries,
+including session status, completed and active tasks, pending approvals,
+verification counts, and the latest decision summary. Coverage lives in
+`tests/harness_api/test_store.py` and `tests/harness_api/test_session_api.py`.
+
+#### [x] 8.3 Add replay and debug support
 
 Description: Define a practical replay path that can reconstruct session
 progress from persisted state and traces for debugging, audit, and regression
@@ -646,12 +694,17 @@ Suggested deliverables:
 
 Dependencies: `2.4`, `8.1`, `8.2`
 
-### [ ] Phase 9: Testing and Architectural Enforcement
+Status: Done. `replay_session(...)` now reconstructs deterministic replay steps
+from stored artifacts, and the session service exposes replay inspection on
+stored snapshots. Coverage lives in `tests/harness_api/test_replay_golden.py`
+and `tests/harness_api/test_session_api.py`.
+
+### [x] Phase 9: Testing and Architectural Enforcement
 
 Outcome: make the harness trustworthy through explicit state-machine coverage,
 end-to-end tests, trace fixtures, and architecture constraints.
 
-#### [ ] 9.1 Add harness state-machine tests
+#### [x] 9.1 Add harness state-machine tests
 
 Description: Design tests that validate session, task, approval, and
 verification state transitions independently of any UI.
@@ -666,7 +719,14 @@ Suggested deliverables:
 
 Dependencies: `2.2`, `3.2`, `4.4`, `7.2`
 
-#### [ ] 9.2 Add end-to-end harness tests
+Status: Done. The harness model, task lifecycle, resume, and executor suites
+now exercise explicit valid and invalid state transitions for tasks, approval
+waits, retries, and stop semantics. Coverage lives across
+`tests/harness_api/test_harness_models.py`,
+`tests/harness_api/test_task_lifecycle.py`, `tests/harness_api/test_resume.py`,
+and `tests/harness_api/test_harness_executor.py`.
+
+#### [x] 9.2 Add end-to-end harness tests
 
 Description: Define end-to-end tests that run representative multi-turn
 sessions through planning, context building, workflow execution, verification,
@@ -681,6 +741,13 @@ Suggested deliverables:
 - Guidance for deterministic provider and tool stubbing
 
 Dependencies: `3.4`, `4.3`, `5.3`, `6.2`, `7.2`, `8.1`
+
+Status: Done. The public session API, built-in session runner, approval flows,
+retry behavior, replay inspection, and CLI entrypoints are covered with
+scripted end-to-end session tests. Coverage lives in
+`tests/harness_api/test_session_api.py`,
+`tests/harness_api/test_session_additional_coverage.py`, and
+`tests/apps/test_harness_cli.py`.
 
 #### [x] 9.3 Add architecture tests for layering boundaries
 
@@ -697,7 +764,7 @@ Suggested deliverables:
 
 Dependencies: `1.3`
 
-#### [ ] 9.4 Add golden trace and replay tests
+#### [x] 9.4 Add golden trace and replay tests
 
 Description: Define golden artifacts that capture representative harness traces
 and replay outcomes for regression testing.
@@ -713,13 +780,17 @@ Suggested deliverables:
 
 Dependencies: `8.1`, `8.2`, `8.3`, `9.2`
 
-### [ ] Phase 10: User-facing Session Interfaces
+Status: Done. Golden trace fixtures now live under `tests/harness_api/golden/`,
+with regression coverage in `tests/harness_api/test_replay_golden.py` for both
+success and approval-resume session histories.
+
+### [x] Phase 10: User-facing Session Interfaces
 
 Outcome: expose the harness through stable session-level interfaces that make
 starting, inspecting, and resuming sessions practical for maintainers and other
 applications.
 
-#### [ ] 10.1 Add a Python session API
+#### [x] 10.1 Add a Python session API
 
 Description: Define a Python API for creating, running, stopping, inspecting,
 and resuming harness sessions without requiring the Textual apps.
@@ -734,7 +805,13 @@ Suggested deliverables:
 
 Dependencies: `3.1`, `2.4`, `8.2`, `9.2`
 
-#### [ ] 10.2 Add a minimal harness CLI
+Status: Done. `src/llm_tools/harness_api/session.py` now exposes the typed
+session service, request/response models, injectable driver/applier surfaces,
+and inspection/listing helpers. Usage is documented in
+`docs/usage/harness-sessions.md`, with coverage in
+`tests/harness_api/test_session_api.py`.
+
+#### [x] 10.2 Add a minimal harness CLI
 
 Description: Define a minimal CLI for starting a session, resuming a session,
 inspecting current state, and reviewing recent session summaries or pending
@@ -750,7 +827,11 @@ Suggested deliverables:
 
 Dependencies: `10.1`
 
-#### [ ] 10.3 Integrate session state into existing apps where useful
+Status: Done. `src/llm_tools/apps/harness_cli.py` now provides the minimal
+persisted-session CLI for start, run, resume, inspect, list, and stop flows,
+with coverage in `tests/apps/test_harness_cli.py`.
+
+#### [x] 10.3 Integrate session state into existing apps where useful
 
 Description: Evaluate how the existing Textual chat app or workbench can expose
 harness-backed sessions without forcing the harness to depend on those apps.
@@ -766,9 +847,14 @@ Suggested deliverables:
 
 Dependencies: `10.1`, `10.2`
 
+Status: Done. The repository now carries the documented app integration plan in
+`docs/implementation/harness-app-integration-plan.md`, which keeps existing
+apps as clients of the public session service rather than new owners of
+harness contracts.
+
 ## Milestones
 
-### [ ] Milestone A: The Loop Exists
+### [x] Milestone A: The Loop Exists
 
 Goal: the repository has a real harness loop rather than only a one-turn
 workflow bridge.
@@ -784,7 +870,7 @@ Exit criteria:
 - durable session state can be persisted and reloaded
 - `HarnessExecutor` can resume a session and produce explicit stop reasons
 
-### [ ] Milestone B: The Harness Is Trustworthy
+### [x] Milestone B: The Harness Is Trustworthy
 
 Goal: the harness can justify its decisions, preserve evidence, and be tested as
 a durable state machine.
@@ -806,7 +892,7 @@ Exit criteria:
 - structured replay and golden trace coverage exist
 - state-machine, end-to-end, and architecture tests cover the harness
 
-### [ ] Milestone C: The Harness Is Usable
+### [x] Milestone C: The Harness Is Usable
 
 Goal: maintainers and downstream applications can operate the harness through
 stable session-level interfaces.

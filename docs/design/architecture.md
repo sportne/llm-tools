@@ -100,7 +100,7 @@ grows a separate harness layer.
 
 A concrete orchestration layer for durable multi-turn execution above the one-turn workflow bridge.
 
-`harness_api` will own:
+`harness_api` owns:
 
 * session lifecycle management
 * persisted state and replay
@@ -115,8 +115,11 @@ Implemented durable contracts now include:
 * persisted verification evidence records
 * explicit no-progress signals for stalled-session stop semantics
 * a concrete `HarnessExecutor` control loop with approval durability and retry/recovery rules
+* deterministic planning and provider-neutral context construction contracts
+* persisted traces, session summaries, and replay artifacts
+* a public Python session API and a minimal persisted-session CLI
 
-Proposed module areas:
+Implemented module areas include:
 
 * `models`
 * `executor`
@@ -125,6 +128,7 @@ Proposed module areas:
 * `planning`
 * `context`
 * `replay`
+* `session`
 
 The layer will depend on lower-level typed contracts and on `workflow_api` as
 the reusable one-turn execution primitive. `workflow_api` must not depend on
