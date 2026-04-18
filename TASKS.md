@@ -17,6 +17,13 @@ This plan is intentionally implementation-oriented. It focuses on typed
 contracts, layering, persistence, verification, replay, and session usability.
 It does not propose self-optimizing or meta-harness behavior.
 
+## Status conventions
+
+- `[ ]` Not started
+- `[~]` In progress
+- `[x]` Done
+- `[-]` Deferred
+
 ## Definition of Done
 
 `llm-tools` qualifies as a harness when all of the following are true:
@@ -73,13 +80,13 @@ It does not propose self-optimizing or meta-harness behavior.
 
 ## Phased Task Plan
 
-### Phase 1: Harness Contract and Architecture
+### [~] Phase 1: Harness Contract and Architecture
 
 Outcome: define the new top-level harness contract, the canonical harness
 models, and the architectural boundary between one-turn workflow execution and
 multi-turn session orchestration.
 
-#### 1.1 Introduce the `harness_api` layer
+#### [x] 1.1 Introduce the `harness_api` layer
 
 Description: Propose and document a first-class `src/llm_tools/harness_api/`
 package as the home for session-level harness contracts and orchestration.
@@ -99,7 +106,7 @@ Dependencies: None
 
 Status: Done.
 
-#### 1.2 Define canonical harness models
+#### [ ] 1.2 Define canonical harness models
 
 Description: Specify the canonical Pydantic models that the harness will own,
 including session, turn, harness state, task record, verification outcome, stop
@@ -116,7 +123,7 @@ Suggested deliverables:
 
 Dependencies: `1.1`
 
-#### 1.3 Define harness boundaries relative to lower layers
+#### [x] 1.3 Define harness boundaries relative to lower layers
 
 Description: Document which responsibilities remain in `tool_api`,
 `llm_adapters`, `llm_providers`, `tools`, and `workflow_api`, and which move
@@ -133,7 +140,7 @@ Suggested deliverables:
 
 Dependencies: `1.1`, `1.2`
 
-#### 1.4 Define harness acceptance criteria
+#### [x] 1.4 Define harness acceptance criteria
 
 Description: Translate the high-level goal of becoming a harness into concrete
 acceptance criteria aligned with the repository’s architecture style and test
@@ -151,12 +158,12 @@ Suggested deliverables:
 
 Dependencies: `1.2`, `1.3`
 
-### Phase 2: State and Task Representation
+### [ ] Phase 2: State and Task Representation
 
 Outcome: make work explicit and durable by introducing structured task records,
 task lifecycle operations, and persisted session state that can be resumed.
 
-#### 2.1 Define structured task records
+#### [ ] 2.1 Define structured task records
 
 Description: Specify a canonical `TaskRecord` or equivalent harness model for
 unit-of-work tracking, including task identity, intent, status, dependencies,
@@ -173,7 +180,7 @@ Suggested deliverables:
 
 Dependencies: `1.2`
 
-#### 2.2 Define task lifecycle operations
+#### [ ] 2.2 Define task lifecycle operations
 
 Description: Specify the allowed task state transitions and the operations that
 move tasks through their lifecycle, such as create, start, block, complete,
@@ -190,7 +197,7 @@ Suggested deliverables:
 
 Dependencies: `2.1`
 
-#### 2.3 Add durable harness state storage abstractions
+#### [ ] 2.3 Add durable harness state storage abstractions
 
 Description: Define storage interfaces for persisting sessions, turns, task
 records, approvals, verification evidence, and summarized projections needed
@@ -207,7 +214,7 @@ Suggested deliverables:
 
 Dependencies: `1.2`, `2.1`, `2.2`
 
-#### 2.4 Support session resume from persisted state
+#### [ ] 2.4 Support session resume from persisted state
 
 Description: Define how a harness session is rehydrated from storage, including
 how incomplete turns, pending approvals, active tasks, and verification status
@@ -223,13 +230,13 @@ Suggested deliverables:
 
 Dependencies: `2.3`
 
-### Phase 3: Multi-turn Control Loop
+### [ ] Phase 3: Multi-turn Control Loop
 
 Outcome: add a session-level executor that repeatedly builds turn context,
 calls the lower workflow layer, updates durable state, and decides whether to
 continue or stop.
 
-#### 3.1 Add `HarnessExecutor` above `workflow_api`
+#### [ ] 3.1 Add `HarnessExecutor` above `workflow_api`
 
 Description: Define a `HarnessExecutor` or equivalent session-level executor
 that owns the durable control loop while delegating one-turn model/tool
@@ -247,7 +254,7 @@ Suggested deliverables:
 
 Dependencies: `1.3`, `2.3`, `2.4`
 
-#### 3.2 Define continue and stop semantics
+#### [ ] 3.2 Define continue and stop semantics
 
 Description: Specify the canonical stop reasons and turn decisions that govern
 whether the harness continues, stops successfully, pauses for approval, stops
@@ -263,7 +270,7 @@ Suggested deliverables:
 
 Dependencies: `1.2`, `3.1`
 
-#### 3.3 Define retry and recovery behavior
+#### [ ] 3.3 Define retry and recovery behavior
 
 Description: Specify how the harness retries transient failures, recovers from
 recoverable state mismatches, and records retry attempts at the session and task
@@ -280,7 +287,7 @@ Suggested deliverables:
 
 Dependencies: `2.2`, `2.4`, `3.1`, `3.2`
 
-#### 3.4 Define per-turn state update sequencing
+#### [ ] 3.4 Define per-turn state update sequencing
 
 Description: Document the exact sequence for reading session state, selecting
 work, building context, executing a turn, applying results, persisting updates,
@@ -296,12 +303,12 @@ Suggested deliverables:
 
 Dependencies: `2.3`, `3.1`, `3.2`, `3.3`
 
-### Phase 4: Verification Subsystem
+### [ ] Phase 4: Verification Subsystem
 
 Outcome: make verification a first-class harness concern with durable evidence,
 task-level expectations, and detection of sessions that are not making progress.
 
-#### 4.1 Add first-class verifier abstractions
+#### [ ] 4.1 Add first-class verifier abstractions
 
 Description: Define typed verifier contracts that can evaluate task outcomes,
 inspect artifacts, and emit structured verification results separate from tool
@@ -318,7 +325,7 @@ Suggested deliverables:
 
 Dependencies: `1.2`, `1.3`
 
-#### 4.2 Attach verification expectations to tasks
+#### [ ] 4.2 Attach verification expectations to tasks
 
 Description: Define how tasks declare what must be verified, when verification
 is required, and whether verification is blocking for completion.
@@ -333,7 +340,7 @@ Suggested deliverables:
 
 Dependencies: `2.1`, `2.2`, `4.1`
 
-#### 4.3 Persist verification evidence and outcomes
+#### [ ] 4.3 Persist verification evidence and outcomes
 
 Description: Specify how verification evidence, verifier inputs, verifier
 outputs, and final verification outcomes are stored in durable session state.
@@ -348,7 +355,7 @@ Suggested deliverables:
 
 Dependencies: `2.3`, `4.1`, `4.2`
 
-#### 4.4 Add no-progress detection
+#### [ ] 4.4 Add no-progress detection
 
 Description: Define heuristics and explicit signals for detecting stalled
 sessions, repeated ineffective turns, or repeated retries that are not moving
@@ -364,12 +371,12 @@ Suggested deliverables:
 
 Dependencies: `3.2`, `3.3`, `4.2`, `4.3`
 
-### Phase 5: Planning and Decision Policy
+### [ ] Phase 5: Planning and Decision Policy
 
 Outcome: separate planning from execution with a minimal planner and
 deterministic rules for task selection and replanning.
 
-#### 5.1 Add a minimal planner abstraction
+#### [ ] 5.1 Add a minimal planner abstraction
 
 Description: Define a planner contract that can inspect canonical harness state
 and propose task additions, ordering, decomposition, or completion updates.
@@ -386,7 +393,7 @@ Suggested deliverables:
 
 Dependencies: `2.1`, `2.2`, `3.1`
 
-#### 5.2 Add deterministic task selection rules
+#### [ ] 5.2 Add deterministic task selection rules
 
 Description: Specify how the harness picks the next actionable task from
 canonical state, including tie-breaking, blocked-task handling, and budget-aware
@@ -402,7 +409,7 @@ Suggested deliverables:
 
 Dependencies: `2.2`, `3.2`, `5.1`
 
-#### 5.3 Define replanning triggers
+#### [ ] 5.3 Define replanning triggers
 
 Description: Specify when the harness must re-enter planning, such as after
 task completion, verification failure, approval denial, no-progress detection,
@@ -419,12 +426,12 @@ Suggested deliverables:
 
 Dependencies: `3.2`, `4.4`, `5.1`, `5.2`
 
-### Phase 6: Context Construction
+### [ ] Phase 6: Context Construction
 
 Outcome: create a turn-context subsystem that builds prompt-ready projections
 from canonical state while enforcing explicit budget and projection rules.
 
-#### 6.1 Add a turn-context builder
+#### [ ] 6.1 Add a turn-context builder
 
 Description: Define a component that projects canonical harness state into the
 turn-specific context needed by providers, adapters, and the one-turn workflow
@@ -440,7 +447,7 @@ Suggested deliverables:
 
 Dependencies: `2.3`, `3.1`, `5.2`
 
-#### 6.2 Define context-budget policies
+#### [ ] 6.2 Define context-budget policies
 
 Description: Specify how the harness budgets prompt context across task state,
 turn history, verification evidence, tool results, summaries, and policy
@@ -456,7 +463,7 @@ Suggested deliverables:
 
 Dependencies: `1.2`, `6.1`
 
-#### 6.3 Keep canonical state separate from prompt projections
+#### [ ] 6.3 Keep canonical state separate from prompt projections
 
 Description: Define projection rules that make it explicit which data is
 canonical persisted state and which data is prompt-only text or model-facing
@@ -473,12 +480,12 @@ Suggested deliverables:
 
 Dependencies: `2.3`, `6.1`, `6.2`
 
-### Phase 7: Approval and Policy Integration
+### [ ] Phase 7: Approval and Policy Integration
 
 Outcome: make approvals and policy decisions durable session concerns rather
 than transient workflow events.
 
-#### 7.1 Persist approval state
+#### [ ] 7.1 Persist approval state
 
 Description: Define how pending approvals, approval decisions, expiration, and
 related policy metadata are stored in harness state.
@@ -493,7 +500,7 @@ Suggested deliverables:
 
 Dependencies: `2.3`, `2.4`, `3.1`
 
-#### 7.2 Support approval-aware stop and resume semantics
+#### [ ] 7.2 Support approval-aware stop and resume semantics
 
 Description: Specify how the harness pauses for approval, exposes that stop
 reason, and resumes safely after approval, denial, timeout, or operator cancel.
@@ -508,7 +515,7 @@ Suggested deliverables:
 
 Dependencies: `3.2`, `7.1`
 
-#### 7.3 Snapshot policy context into traces
+#### [ ] 7.3 Snapshot policy context into traces
 
 Description: Define how policy inputs, `PolicyDecision` summaries, approval
 requirements, and related runtime context are recorded in harness traces.
@@ -523,12 +530,12 @@ Suggested deliverables:
 
 Dependencies: `3.4`, `7.1`, `7.2`
 
-### Phase 8: Observability and Replay
+### [ ] Phase 8: Observability and Replay
 
 Outcome: provide harness-level tracing, summaries, and replay support that make
 multi-turn execution explainable after the fact.
 
-#### 8.1 Add structured harness turn traces
+#### [ ] 8.1 Add structured harness turn traces
 
 Description: Define a harness trace model that records each turn’s selected
 task, projected context summary, planner input/output, workflow result,
@@ -546,7 +553,7 @@ Suggested deliverables:
 
 Dependencies: `3.4`, `4.3`, `5.3`, `6.1`, `7.3`
 
-#### 8.2 Add session summary artifacts
+#### [ ] 8.2 Add session summary artifacts
 
 Description: Define durable summary artifacts that describe session status,
 completed work, open tasks, pending approvals, verification status, and final
@@ -563,7 +570,7 @@ Suggested deliverables:
 
 Dependencies: `2.3`, `4.3`, `8.1`
 
-#### 8.3 Add replay and debug support
+#### [ ] 8.3 Add replay and debug support
 
 Description: Define a practical replay path that can reconstruct session
 progress from persisted state and traces for debugging, audit, and regression
@@ -579,12 +586,12 @@ Suggested deliverables:
 
 Dependencies: `2.4`, `8.1`, `8.2`
 
-### Phase 9: Testing and Architectural Enforcement
+### [ ] Phase 9: Testing and Architectural Enforcement
 
 Outcome: make the harness trustworthy through explicit state-machine coverage,
 end-to-end tests, trace fixtures, and architecture constraints.
 
-#### 9.1 Add harness state-machine tests
+#### [ ] 9.1 Add harness state-machine tests
 
 Description: Design tests that validate session, task, approval, and
 verification state transitions independently of any UI.
@@ -599,7 +606,7 @@ Suggested deliverables:
 
 Dependencies: `2.2`, `3.2`, `4.4`, `7.2`
 
-#### 9.2 Add end-to-end harness tests
+#### [ ] 9.2 Add end-to-end harness tests
 
 Description: Define end-to-end tests that run representative multi-turn
 sessions through planning, context building, workflow execution, verification,
@@ -615,7 +622,7 @@ Suggested deliverables:
 
 Dependencies: `3.4`, `4.3`, `5.3`, `6.2`, `7.2`, `8.1`
 
-#### 9.3 Add architecture tests for layering boundaries
+#### [ ] 9.3 Add architecture tests for layering boundaries
 
 Description: Extend architecture enforcement so `harness_api` depends only on
 approved lower layers and lower layers do not import harness concerns.
@@ -630,7 +637,7 @@ Suggested deliverables:
 
 Dependencies: `1.3`
 
-#### 9.4 Add golden trace and replay tests
+#### [ ] 9.4 Add golden trace and replay tests
 
 Description: Define golden artifacts that capture representative harness traces
 and replay outcomes for regression testing.
@@ -646,13 +653,13 @@ Suggested deliverables:
 
 Dependencies: `8.1`, `8.2`, `8.3`, `9.2`
 
-### Phase 10: User-facing Session Interfaces
+### [ ] Phase 10: User-facing Session Interfaces
 
 Outcome: expose the harness through stable session-level interfaces that make
 starting, inspecting, and resuming sessions practical for maintainers and other
 applications.
 
-#### 10.1 Add a Python session API
+#### [ ] 10.1 Add a Python session API
 
 Description: Define a Python API for creating, running, stopping, inspecting,
 and resuming harness sessions without requiring the Textual apps.
@@ -667,7 +674,7 @@ Suggested deliverables:
 
 Dependencies: `3.1`, `2.4`, `8.2`, `9.2`
 
-#### 10.2 Add a minimal harness CLI
+#### [ ] 10.2 Add a minimal harness CLI
 
 Description: Define a minimal CLI for starting a session, resuming a session,
 inspecting current state, and reviewing recent session summaries or pending
@@ -683,7 +690,7 @@ Suggested deliverables:
 
 Dependencies: `10.1`
 
-#### 10.3 Integrate session state into existing apps where useful
+#### [ ] 10.3 Integrate session state into existing apps where useful
 
 Description: Evaluate how the existing Textual chat app or workbench can expose
 harness-backed sessions without forcing the harness to depend on those apps.
@@ -701,7 +708,7 @@ Dependencies: `10.1`, `10.2`
 
 ## Milestones
 
-### Milestone A: The Loop Exists
+### [ ] Milestone A: The Loop Exists
 
 Goal: the repository has a real harness loop rather than only a one-turn
 workflow bridge.
@@ -717,7 +724,7 @@ Exit criteria:
 - durable session state can be persisted and reloaded
 - `HarnessExecutor` can resume a session and produce explicit stop reasons
 
-### Milestone B: The Harness Is Trustworthy
+### [ ] Milestone B: The Harness Is Trustworthy
 
 Goal: the harness can justify its decisions, preserve evidence, and be tested as
 a durable state machine.
@@ -739,7 +746,7 @@ Exit criteria:
 - structured replay and golden trace coverage exist
 - state-machine, end-to-end, and architecture tests cover the harness
 
-### Milestone C: The Harness Is Usable
+### [ ] Milestone C: The Harness Is Usable
 
 Goal: maintainers and downstream applications can operate the harness through
 stable session-level interfaces.
