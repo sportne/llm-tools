@@ -11,6 +11,7 @@ from llm_tools.apps.chat_presentation import (
     format_citation,
     format_final_response,
     format_final_response_metadata,
+    format_transcript_text,
     pretty_json,
 )
 
@@ -20,6 +21,7 @@ __all__ = [
     "format_citation",
     "format_final_response",
     "format_final_response_metadata",
+    "format_transcript_text",
     "pretty_json",
 ]
 
@@ -38,7 +40,7 @@ class AssistantMarkdownEntry(Static):
 
     @property
     def transcript_text(self) -> str:
-        parts = [f"{self.label_text}\n{self.markdown_text}".rstrip()]
+        parts = [format_transcript_text("assistant", self.markdown_text)]
         if self.metadata_text:
             parts.append(self.metadata_text)
         return "\n\n".join(parts).rstrip()
@@ -94,12 +96,8 @@ class TranscriptEntry(Static):
         text: str,
         assistant_completion_state: str,
     ) -> str:
-        if role == "assistant":
-            if assistant_completion_state == "interrupted":
-                return f"Assistant (interrupted):\n{text}".rstrip()
-            return f"Assistant:\n{text}"
-        if role == "user":
-            return f"You:\n{text}"
-        if role == "error":
-            return f"Error: {text}"
-        return f"System:\n{text}"
+        return format_transcript_text(
+            role,
+            text,
+            assistant_completion_state=assistant_completion_state,
+        )

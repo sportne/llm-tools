@@ -5,10 +5,17 @@ client built on top of the existing `llm-tools` runtime, adapter, provider, and
 workflow layers.
 
 It reuses the current repository-chat config shape and the same fixed read-only
-tool set as the Textual lane:
+tool set as the Textual lane, while exposing Streamlit-native controls for the
+same session features:
 
 - transcript-style user and assistant turns
 - in-memory chat session history
+- live-ish active-turn polling with stop and approval actions
+- model inspection and switching
+- session-scoped tool enable/disable and approval toggles
+- transcript export and inspector/debug panels
+- slash-command aliases for `/help`, `/model`, `/tools`, `/approvals`,
+  `/inspect`, `/copy`, `quit`, and `exit`
 - grounded final answers with citations, confidence, uncertainty, missing
   information, and follow-up suggestions
 - OpenAI-compatible provider support for OpenAI, Ollama, and custom endpoints
@@ -47,8 +54,11 @@ The Streamlit app reuses the same YAML shape as `llm_tools.apps.textual_chat`:
 - `policy`
 - `ui`
 
-The `ui` section is accepted for schema compatibility with the Textual lane.
-The current Streamlit app ignores those `ui` values.
+The Streamlit lane honors the shared `ui` controls it supports:
+
+- `show_token_usage`
+- `show_footer_help`
+- `inspector_open_by_default`
 
 Minimal Ollama example:
 
@@ -93,7 +103,17 @@ fixed read-only repository tool set:
 - `get_file_info`
 - `read_file`
 
-The current Streamlit lane keeps session history in memory only and does not
-implement an interactive approval queue. If local-read approvals are enabled in
-config, the app will deny those approval requests and report that in the
-transcript.
+The Streamlit lane keeps session history in memory only. It mirrors the Textual
+chat session controls through sidebar widgets plus slash-command aliases:
+
+- `Session`: root, active model, token usage, active status, clear/refresh/stop
+- `Model Controls`: list available models and switch the active model
+- `Tool Controls`: enable, disable, or reset the session tool set
+- `Approval Controls`: toggle local-read approvals and approve or deny pending
+  requests
+- `Transcript Export`: selectable export text and a download button
+- `Inspector`: current tool state, pending approval payload, model messages,
+  parsed responses, and tool execution records
+
+`quit` and `exit` do not stop the Streamlit server. They add a system notice
+telling you to clear the chat or close the browser tab instead.

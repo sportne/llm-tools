@@ -12,6 +12,10 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Static
 
+from llm_tools.apps.chat_controls import (
+    build_chat_control_state,
+    build_startup_message,
+)
 from llm_tools.apps.textual_chat.controller import (
     ChatScreenController,
     build_available_tool_specs,
@@ -223,20 +227,16 @@ class ChatScreen(Screen[None]):
         self._active_assistant_entry: TranscriptEntry | None = None
         self._active_runner: ChatSessionTurnRunner | None = None
         self._available_tool_specs = build_available_tool_specs()
-        configured_tools = config.policy.enabled_tools
-        if configured_tools is None:
-            self._default_enabled_tools = set(self._available_tool_specs)
-        else:
-            self._default_enabled_tools = {
-                tool_name
-                for tool_name in configured_tools
-                if tool_name in self._available_tool_specs
-            }
-        self._enabled_tools = set(self._default_enabled_tools)
-        self._require_approval_for = set(config.policy.require_approval_for)
+        control_state = build_chat_control_state(
+            config,
+            available_tool_names=set(self._available_tool_specs),
+        )
+        self._default_enabled_tools = set(control_state.default_enabled_tools)
+        self._enabled_tools = set(control_state.enabled_tools)
+        self._require_approval_for = set(control_state.require_approval_for)
         self._pending_approval: ChatWorkflowApprovalState | None = None
         self._approval_decision_in_flight = False
-        self._inspector_open = config.ui.inspector_open_by_default
+        self._inspector_open = control_state.inspector_open
         self._active_turn_number = 0
         self._inspector_provider_messages: list[dict[str, object]] = []
         self._inspector_parsed_responses: list[dict[str, object]] = []
@@ -288,10 +288,10 @@ class ChatScreen(Screen[None]):
     def on_mount(self) -> None:
         self._controller.append_transcript(
             "system",
-            (
-                f"Root: {self._root_path}\n"
-                f"Model: {self._active_model_name}\n"
-                "Use /help for guidance. Type quit or exit to leave."
+            build_startup_message(
+                root_path=self._root_path,
+                model_name=self._active_model_name,
+                exit_hint="Type quit or exit to leave.",
             ),
         )
         metadata = (

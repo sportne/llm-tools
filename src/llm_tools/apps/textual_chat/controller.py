@@ -10,6 +10,16 @@ from textual.containers import VerticalScroll
 from textual.timer import Timer
 from textual.widgets import Button, Static
 
+from llm_tools.apps.chat_controls import (
+    ChatCommandOutcome,
+    ChatControlNotice,
+    ChatControlState,
+    ModelCatalogOutcome,
+    ModelSwitchOutcome,
+    build_tool_state_payload,
+    build_tools_command_text,
+    handle_chat_command,
+)
 from llm_tools.apps.chat_runtime import (
     build_available_tool_specs as build_shared_available_tool_specs,
 )
@@ -279,21 +289,12 @@ class ChatScreenController:
         )
 
     def _render_tool_state(self) -> str:
-        enabled_tools = sorted(self._screen._enabled_tools)
-        disabled_tools = sorted(
-            set(self._screen._available_tool_specs).difference(
-                self._screen._enabled_tools
+        return pretty_json(
+            build_tool_state_payload(
+                self._control_state(),
+                available_tool_specs=self._screen._available_tool_specs,
             )
         )
-        approvals_enabled = sorted(
-            side_effect.value for side_effect in self._screen._require_approval_for
-        )
-        payload = {
-            "enabled_tools": enabled_tools,
-            "disabled_tools": disabled_tools,
-            "require_approval_for": approvals_enabled,
-        }
-        return pretty_json(payload)
 
     def _render_pending_approval(self) -> str:
         if self._screen._pending_approval is None:
@@ -323,69 +324,102 @@ class ChatScreenController:
     def _describe_active_model(self) -> str:
         return f"Current model: {self._screen._active_model_name}"
 
-    def _show_available_models(self) -> None:
-        if not self.ensure_provider_ready():
-            return
-        provider = self._screen._provider
-        if provider is None:
-            self.append_transcript(
-                "system",
-                f"{self._describe_active_model()}\nProvider is not configured yet.",
-            )
-            return
-        try:
-            model_ids = provider.list_available_models()
-        except Exception as exc:
-            self.append_transcript(
-                "system",
-                f"{self._describe_active_model()}\nUnable to list available models: {exc}",
-            )
-            return
-        if not model_ids:
-            self.append_transcript(
-                "system",
-                f"{self._describe_active_model()}\nNo models were returned by models.list.",
-            )
-            return
-        available = "\n".join(f"- {model_id}" for model_id in model_ids)
-        self.append_transcript(
-            "system",
-            f"{self._describe_active_model()}\nAvailable models:\n{available}",
+    def _control_state(self) -> ChatControlState:
+        return ChatControlState(
+            active_model_name=self._screen._active_model_name,
+            default_enabled_tools=self._screen._default_enabled_tools,
+            enabled_tools=self._screen._enabled_tools,
+            require_approval_for=self._screen._require_approval_for,
+            inspector_open=self._screen._inspector_open,
         )
 
-    def _switch_active_model(self, new_model_name: str) -> None:
-        if self._screen._busy:
-            self.append_transcript(
-                "system",
-                "Stop the active turn before changing models.",
+    def _apply_control_state(self, state: ChatControlState) -> None:
+        self._screen._active_model_name = state.active_model_name
+        self._screen._default_enabled_tools = set(state.default_enabled_tools)
+        self._screen._enabled_tools = set(state.enabled_tools)
+        self._screen._require_approval_for = set(state.require_approval_for)
+        self._screen._inspector_open = state.inspector_open
+
+    def _apply_control_notices(self, notices: list[ChatControlNotice]) -> None:
+        for notice in notices:
+            self.append_transcript(notice.role, notice.text)
+
+    def _list_models_outcome(self) -> ModelCatalogOutcome:
+        if not self.ensure_provider_ready():
+            return ModelCatalogOutcome(unavailable=True)
+        provider = self._screen._provider
+        if provider is None:
+            return ModelCatalogOutcome(
+                notice=ChatControlNotice(
+                    role="system",
+                    text=f"{self._describe_active_model()}\nProvider is not configured yet.",
+                )
             )
-            return
-        cleaned_model_name = new_model_name.strip()
-        if not cleaned_model_name:
-            self._show_available_models()
-            return
-        if cleaned_model_name == self._screen._active_model_name:
-            self.append_transcript("system", f"Current model: {cleaned_model_name}")
-            return
+        try:
+            return ModelCatalogOutcome(model_ids=provider.list_available_models())
+        except Exception as exc:
+            return ModelCatalogOutcome(
+                notice=ChatControlNotice(
+                    role="system",
+                    text=(
+                        f"{self._describe_active_model()}\n"
+                        f"Unable to list available models: {exc}"
+                    ),
+                )
+            )
+
+    def _switch_model_outcome(
+        self,
+        new_model_name: str,
+    ) -> ModelSwitchOutcome[OpenAICompatibleProvider]:
         try:
             provider = self._screen._create_provider(
                 self._screen._config.llm,
                 api_key=self._screen._credential_secret,
-                model_name=cleaned_model_name,
+                model_name=new_model_name,
             )
         except Exception as exc:
-            self.append_transcript(
-                "error",
-                f"Unable to switch model to {cleaned_model_name}: {exc}",
+            return ModelSwitchOutcome(
+                notice=ChatControlNotice(
+                    role="error",
+                    text=f"Unable to switch model to {new_model_name}: {exc}",
+                )
             )
-            return
-        previous = self._screen._active_model_name
-        self._screen._provider = provider
-        self._screen._active_model_name = cleaned_model_name
-        self.append_transcript(
-            "system",
-            f"Switched model from {previous} to {cleaned_model_name}.",
+        return ModelSwitchOutcome(provider=provider)
+
+    def _show_available_models(self) -> None:
+        state = self._control_state()
+        outcome = handle_chat_command(
+            "/model",
+            state=state,
+            available_tool_specs=self._screen._available_tool_specs,
+            busy=self._screen._busy,
+            list_models=self._list_models_outcome,
+            switch_model=self._switch_model_outcome,
+            exit_mode="request_exit",
+            exit_notice="Use quit or exit to leave.",
         )
+        self._apply_control_state(state)
+        self._apply_control_notices(outcome.notices)
+        self.refresh_inspector()
+
+    def _switch_active_model(self, new_model_name: str) -> None:
+        state = self._control_state()
+        outcome = handle_chat_command(
+            f"/model {new_model_name}".rstrip(),
+            state=state,
+            available_tool_specs=self._screen._available_tool_specs,
+            busy=self._screen._busy,
+            list_models=self._list_models_outcome,
+            switch_model=self._switch_model_outcome,
+            exit_mode="request_exit",
+            exit_notice="Use quit or exit to leave.",
+        )
+        self._apply_control_state(state)
+        if outcome.provider is not None:
+            self._screen._provider = outcome.provider
+        self._apply_control_notices(outcome.notices)
+        self.refresh_inspector()
 
     def handle_credential_submit(self, secret_value: str | None) -> None:
         self._screen._credential_secret = secret_value
@@ -553,129 +587,35 @@ class ChatScreenController:
         self.refresh_inspector()
 
     def _tools_command_text(self) -> str:
-        enabled_tools = sorted(self._screen._enabled_tools)
-        disabled_tools = sorted(
-            set(self._screen._available_tool_specs).difference(
-                self._screen._enabled_tools
-            )
+        return build_tools_command_text(
+            self._control_state(),
+            available_tool_specs=self._screen._available_tool_specs,
         )
-        approval_suffix = (
-            " (approval required)"
-            if SideEffectClass.LOCAL_READ in self._screen._require_approval_for
-            else ""
-        )
-        enabled_lines = [
-            (
-                f"- {tool_name}: "
-                f"{self._screen._available_tool_specs[tool_name].side_effects.value}"
-                f"{approval_suffix}"
-            )
-            for tool_name in enabled_tools
-        ]
-        disabled_lines = [f"- {tool_name}" for tool_name in disabled_tools]
-        parts = [
-            "Enabled tools:\n"
-            + ("\n".join(enabled_lines) if enabled_lines else "- none"),
-            "Disabled tools:\n"
-            + ("\n".join(disabled_lines) if disabled_lines else "- none"),
-        ]
-        return "\n\n".join(parts)
-
-    def _handle_tools_command(self, user_message: str) -> bool:
-        parts = user_message.strip().split()
-        if len(parts) == 1:
-            self.append_transcript("system", self._tools_command_text())
-            return True
-        if len(parts) == 2 and parts[1].lower() == "reset":
-            self._screen._enabled_tools = set(self._screen._default_enabled_tools)
-            self.append_transcript("system", "Restored the default session tool set.")
-            self.refresh_inspector()
-            return True
-        if len(parts) == 3 and parts[1].lower() in {"enable", "disable"}:
-            tool_name = parts[2].strip()
-            if tool_name not in self._screen._available_tool_specs:
-                self.append_transcript("error", f"Unknown tool: {tool_name}")
-                return True
-            if parts[1].lower() == "enable":
-                self._screen._enabled_tools.add(tool_name)
-                self.append_transcript("system", f"Enabled tool: {tool_name}")
-            else:
-                self._screen._enabled_tools.discard(tool_name)
-                self.append_transcript("system", f"Disabled tool: {tool_name}")
-            self.refresh_inspector()
-            return True
-        self.append_transcript(
-            "system",
-            (
-                "Usage: /tools | /tools enable <tool_name> | "
-                "/tools disable <tool_name> | /tools reset"
-            ),
-        )
-        return True
-
-    def _handle_approvals_command(self, user_message: str) -> bool:
-        parts = user_message.strip().split()
-        if len(parts) == 1:
-            enabled = SideEffectClass.LOCAL_READ in self._screen._require_approval_for
-            self.append_transcript(
-                "system",
-                (
-                    "Approvals are ON for local_read tools."
-                    if enabled
-                    else "Approvals are OFF for local_read tools."
-                ),
-            )
-            return True
-        if len(parts) == 2 and parts[1].lower() in {"on", "off"}:
-            if parts[1].lower() == "on":
-                self._screen._require_approval_for.add(SideEffectClass.LOCAL_READ)
-                self.append_transcript(
-                    "system", "Enabled approvals for local_read tools."
-                )
-            else:
-                self._screen._require_approval_for.discard(SideEffectClass.LOCAL_READ)
-                self.append_transcript(
-                    "system", "Disabled approvals for local_read tools."
-                )
-            self.refresh_inspector()
-            return True
-        self.append_transcript(
-            "system", "Usage: /approvals | /approvals on | /approvals off"
-        )
-        return True
 
     def handle_inline_command(self, user_message: str) -> bool:
-        normalized = user_message.strip().lower()
-        if normalized == "/help":
-            self.append_transcript(
-                "system",
-                (
-                    "Ask grounded questions about the selected root. Use /model to "
-                    "inspect or switch models, /tools to manage tools, /approvals "
-                    "to toggle approvals, /inspect to toggle the inspector, and "
-                    "/copy to open a selectable transcript view. Use quit or exit "
-                    "to leave."
-                ),
-            )
-            return True
-        if normalized.startswith("/tools"):
-            return self._handle_tools_command(user_message)
-        if normalized.startswith("/approvals"):
-            return self._handle_approvals_command(user_message)
-        if normalized == "/inspect":
-            self.toggle_inspector()
-            return True
-        if normalized.startswith("/model"):
-            parts = user_message.strip().split(maxsplit=1)
-            self._switch_active_model(parts[1] if len(parts) > 1 else "")
-            return True
-        if normalized == "/copy":
+        state = self._control_state()
+        outcome: ChatCommandOutcome[OpenAICompatibleProvider] = handle_chat_command(
+            user_message,
+            state=state,
+            available_tool_specs=self._screen._available_tool_specs,
+            busy=self._screen._busy,
+            list_models=self._list_models_outcome,
+            switch_model=self._switch_model_outcome,
+            exit_mode="request_exit",
+            exit_notice="Use quit or exit to leave.",
+        )
+        if not outcome.handled:
+            return False
+        self._apply_control_state(state)
+        if outcome.provider is not None:
+            self._screen._provider = outcome.provider
+        self._apply_control_notices(outcome.notices)
+        if outcome.request_copy:
             self.open_transcript_copy()
-            return True
-        if normalized in {"quit", "exit"}:
+        if outcome.request_exit:
             self._screen.app.exit()
-            return True
-        return False
+        self.refresh_inspector()
+        return True
 
     def transcript_copy_text(self) -> str:
         transcript = self._screen.query_one("#transcript", VerticalScroll)

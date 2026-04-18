@@ -75,3 +75,21 @@ def format_final_response_metadata(response: ChatFinalResponse) -> str:
             + "\n".join(f"- {item}" for item in response.follow_up_suggestions)
         )
     return "\n\n".join(parts)
+
+
+def format_transcript_text(
+    role: str,
+    text: str,
+    *,
+    assistant_completion_state: str = "complete",
+) -> str:
+    """Return one transcript entry in durable plain-text export form."""
+    if role == "assistant":
+        if assistant_completion_state == "interrupted":
+            return f"Assistant (interrupted):\n{text}".rstrip()
+        return f"Assistant:\n{text}".rstrip()
+    if role == "user":
+        return f"You:\n{text}".rstrip()
+    if role == "error":
+        return f"Error: {text}".rstrip()
+    return f"System:\n{text}".rstrip()
