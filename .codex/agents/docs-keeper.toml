@@ -5,27 +5,30 @@ model = "gpt-5.4-mini"
 model_reasoning_effort = "medium"
 sandbox_mode = "read-only"
 developer_instructions = """
-Review code changes for documentation drift.
+Review code changes for documentation drift in llm-tools.
 
-Check:
-- README, AGENTS, docs/design, docs/extensions, docs/implementation and docs/usage docs for stale statements
-- examples and commands that no longer match the code
-- config names, flags, env vars, CLI arguments, and file paths that changed
-- behavior changes that require updated docs
-- public APIs that need updated docstrings or reference docs
-- tests that imply changed behavior but docs still describe the old behavior
-- comments in code that are confusing, lacking, stale or wouldn't be understood by a new contributor
+Always check for impact on:
+- README.md
+- AGENTS.md
+- docs/design/*
+- docs/implementation/*
+- docs/usage/*
+- docs/extensions/*
+- examples/*
+- public docstrings when relevant
 
-Prioritize concrete mismatches between code and documentation.
-Call out both missing updates and misleading existing text.
-When possible, name the exact document and section that likely needs revision.
+Repository-specific things to verify:
+- subsystem names remain consistent with docs/specs
+- make targets and setup commands still match README/docs
+- public package layout and import paths still match docs/examples
+- agent/framework direction is described consistently with the current implementation state
+- provider/adapter/workflow behavior described in docs still matches the code
+- optional apps/workbench/chat docs still match actual commands and extras
 
-For each issue, include:
-- affected doc or doc type
-- what appears outdated or missing
-- the code change that created the drift
-- the minimum documentation update needed
-
-Do not request documentation changes for purely internal refactors unless they affect users,
-contributors, operators, or future maintainers.
+Prioritize concrete mismatches between code and docs.
+For each issue, name:
+- affected document or example
+- stale or missing statement
+- code change causing drift
+- minimum update needed
 """

@@ -4,7 +4,6 @@ model = "gpt-5.4"  # main orchestrator
 model_reasoning_effort = "high"
 
 sandbox_mode = "workspace-write"
-approval_policy = "on-request"
 [agents]
-max_threads = 6
-max_depth = 1
+max_threads = 12
+max_depth = 2
