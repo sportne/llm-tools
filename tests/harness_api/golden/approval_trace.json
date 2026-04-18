@@ -1,0 +1,171 @@
+{
+  "trace": {
+    "final_stop_reason": "completed",
+    "session_id": "golden-approval",
+    "turns": [
+      {
+        "context_projection": {
+          "context_budget": {
+            "budget_exhausted": false,
+            "configured": {
+              "max_chars_per_text_field": 400,
+              "max_related_tasks": 6,
+              "max_recent_turns": 5,
+              "max_selected_tasks": 1,
+              "max_total_chars": 6000
+            },
+            "omitted_recent_turn_count": 0,
+            "omitted_related_task_count": 0,
+            "omitted_selected_task_count": 0,
+            "remaining_total_chars": 5974,
+            "truncated_field_count": 0
+          },
+          "current_turn_index": 0,
+          "recent_turns": [],
+          "related_tasks": [],
+          "root_task_id": "task-1",
+          "selected_tasks": [
+            {
+              "artifact_refs": [],
+              "depends_on_task_ids": [],
+              "intent": "Need approval",
+              "is_actionable": true,
+              "is_selected": true,
+              "parent_task_id": null,
+              "retry_count": 0,
+              "status": "pending",
+              "status_summary": null,
+              "task_id": "task-1",
+              "title": "Approval task",
+              "truncated_fields": [],
+              "verification_status": "not_run"
+            }
+          ],
+          "session_budget_policy": {
+            "max_elapsed_seconds": null,
+            "max_tool_invocations": null,
+            "max_turns": 3
+          },
+          "session_id": "golden-approval",
+          "session_retry_count": 0,
+          "session_started_at": "2026-01-01T00:00:00Z",
+          "turn_index": 1
+        },
+        "decision_action": "stop",
+        "decision_stop_reason": "completed",
+        "decision_summary": "Completed selected tasks.",
+        "ended_at": "<ended_at>",
+        "invocation_traces": [
+          {
+            "approval_id": "<approval_id>",
+            "artifacts": [],
+            "error_code": null,
+            "invocation_id": null,
+            "invocation_index": 1,
+            "logs": [],
+            "ok": null,
+            "policy_snapshot": {
+              "allowed": true,
+              "metadata": {
+                "side_effects": "local_read",
+                "tool_name": "list_directory"
+              },
+              "reason": "approval required",
+              "requires_approval": true,
+              "source": "approval_request",
+              "tool_name": "list_directory",
+              "tool_version": "0.1.0"
+            },
+            "redaction": {},
+            "request": {
+              "arguments": {
+                "path": "."
+              },
+              "tool_name": "list_directory"
+            },
+            "status": "approval_requested",
+            "tool_name": "list_directory",
+            "tool_version": "0.1.0"
+          },
+          {
+            "approval_id": "<approval_id>",
+            "artifacts": [],
+            "error_code": null,
+            "invocation_id": "turn-1",
+            "invocation_index": 1,
+            "logs": [
+              "Listed directory '.'."
+            ],
+            "ok": true,
+            "policy_snapshot": {
+              "allowed": true,
+              "metadata": {
+                "tool_name": "list_directory"
+              },
+              "reason": "allowed",
+              "requires_approval": false,
+              "source": "execution_record",
+              "tool_name": "list_directory",
+              "tool_version": "0.1.0"
+            },
+            "redaction": {
+              "applied_rule_count": 0,
+              "matched_paths": [],
+              "matched_targets": [],
+              "retain_unredacted_inputs": true,
+              "retain_unredacted_outputs": true
+            },
+            "request": {
+              "arguments": {
+                "path": "."
+              },
+              "tool_name": "list_directory"
+            },
+            "status": "executed",
+            "tool_name": "list_directory",
+            "tool_version": "0.1.0"
+          }
+        ],
+        "no_progress_signals": [],
+        "pending_approval_id": "<approval_id>",
+        "planner_selected_task_ids": [
+          "task-1"
+        ],
+        "replanning_triggers": [],
+        "selected_task_ids": [
+          "task-1"
+        ],
+        "started_at": "<started_at>",
+        "turn_index": 1,
+        "verification_status_by_task_id": {
+          "task-1": "not_run"
+        },
+        "workflow_outcome_statuses": [
+          "approval_requested",
+          "executed"
+        ]
+      }
+    ]
+  },
+  "replay": {
+    "final_stop_reason": "completed",
+    "limitations": [],
+    "mode": "trace",
+    "session_id": "golden-approval",
+    "steps": [
+      {
+        "decision_action": "stop",
+        "decision_stop_reason": "completed",
+        "decision_summary": "Completed selected tasks.",
+        "selected_task_ids": [
+          "task-1"
+        ],
+        "turn_index": 1,
+        "workflow_outcome_statuses": [
+          "approval_requested",
+          "executed"
+        ]
+      }
+    ]
+  }
+}

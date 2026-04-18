@@ -22,6 +22,7 @@ from llm_tools.harness_api import (
     HarnessTurn,
     InMemoryHarnessStateStore,
     ResumeDisposition,
+    StoredHarnessArtifacts,
     TaskLifecycleStatus,
     TurnDecision,
     TurnDecisionAction,
@@ -208,14 +209,23 @@ class _ConflictOnceStore(InMemoryHarnessStateStore):
         state: HarnessState,
         *,
         expected_revision: str | None = None,
+        artifacts: StoredHarnessArtifacts | None = None,
     ):
         if expected_revision is not None and not self._raised_conflict:
             current = self.load_session(state.session.session_id)
             if current is not None and current.revision == expected_revision:
                 self._raised_conflict = True
-                super().save_session(current.state, expected_revision=expected_revision)
+                super().save_session(
+                    current.state,
+                    expected_revision=expected_revision,
+                    artifacts=current.artifacts if artifacts is None else artifacts,
+                )
                 raise HarnessStateConflictError("synthetic conflict")
-        return super().save_session(state, expected_revision=expected_revision)
+        return super().save_session(
+            state,
+            expected_revision=expected_revision,
+            artifacts=artifacts,
+        )
 
 
 @pytest.fixture
@@ -628,6 +638,7 @@ class _MismatchedConflictStore(InMemoryHarnessStateStore):
         state: HarnessState,
         *,
         expected_revision: str | None = None,
+        artifacts: StoredHarnessArtifacts | None = None,
     ):
         if expected_revision is not None:
             current = self.load_session(state.session.session_id)
@@ -642,9 +653,17 @@ class _MismatchedConflictStore(InMemoryHarnessStateStore):
                     },
                     deep=True,
                 )
-                super().save_session(divergent, expected_revision=expected_revision)
+                super().save_session(
+                    divergent,
+                    expected_revision=expected_revision,
+                    artifacts=current.artifacts if artifacts is None else artifacts,
+                )
                 raise HarnessStateConflictError("divergent conflict")
-        return super().save_session(state, expected_revision=expected_revision)
+        return super().save_session(
+            state,
+            expected_revision=expected_revision,
+            artifacts=artifacts,
+        )
 
 
 def _prior_turn_state(*, max_tool_invocations: int = 2) -> HarnessState:

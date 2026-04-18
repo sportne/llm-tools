@@ -17,6 +17,11 @@ from llm_tools.harness_api.models import (
     TurnDecision,
     TurnDecisionAction,
 )
+from llm_tools.harness_api.replay import (
+    StoredHarnessArtifacts,
+    build_stored_artifacts,
+    build_turn_trace,
+)
 from llm_tools.harness_api.resume import (
     ResumedHarnessSession,
     ResumeDisposition,
@@ -135,7 +140,11 @@ class HarnessExecutor:
         now: datetime | None = None,
     ) -> HarnessExecutionResult:
         """Persist a starting state and run until the harness stops."""
-        snapshot = self._store.save_session(state, expected_revision=expected_revision)
+        snapshot = self._store.save_session(
+            state,
+            expected_revision=expected_revision,
+            artifacts=build_stored_artifacts(state=state),
+        )
         return self._drive(snapshot=snapshot, approval_resolution=None, now=now)
 
     async def run_async(
@@ -146,7 +155,11 @@ class HarnessExecutor:
         now: datetime | None = None,
     ) -> HarnessExecutionResult:
         """Asynchronously persist a starting state and run the harness."""
-        snapshot = self._store.save_session(state, expected_revision=expected_revision)
+        snapshot = self._store.save_session(
+            state,
+            expected_revision=expected_revision,
+            artifacts=build_stored_artifacts(state=state),
+        )
         return await self._drive_async(
             snapshot=snapshot,
             approval_resolution=None,
@@ -282,6 +295,10 @@ class HarnessExecutor:
             saved = self._save_with_conflict_retry(
                 base_snapshot=snapshot,
                 new_state=self._terminal_state(state, stop_reason=budget_stop, now=now),
+                artifacts=build_stored_artifacts(
+                    state=self._terminal_state(state, stop_reason=budget_stop, now=now),
+                    prior_artifacts=snapshot.artifacts,
+                ),
             )
             return saved, False
 
@@ -293,6 +310,14 @@ class HarnessExecutor:
                     state,
                     stop_reason=HarnessStopReason.COMPLETED,
                     now=now,
+                ),
+                artifacts=build_stored_artifacts(
+                    state=self._terminal_state(
+                        state,
+                        stop_reason=HarnessStopReason.COMPLETED,
+                        now=now,
+                    ),
+                    prior_artifacts=snapshot.artifacts,
                 ),
             )
             return saved, False
@@ -331,12 +356,17 @@ class HarnessExecutor:
                         f"Provider retry budget exhausted: {type(exc).__name__}: {exc}"
                     ),
                 )
+                terminal_state = self._terminal_state(
+                    exhausted_state,
+                    stop_reason=HarnessStopReason.ERROR,
+                    now=now,
+                )
                 saved = self._save_with_conflict_retry(
                     base_snapshot=snapshot,
-                    new_state=self._terminal_state(
-                        exhausted_state,
-                        stop_reason=HarnessStopReason.ERROR,
-                        now=now,
+                    new_state=terminal_state,
+                    artifacts=build_stored_artifacts(
+                        state=terminal_state,
+                        prior_artifacts=snapshot.artifacts,
                     ),
                 )
                 return saved, False
@@ -359,12 +389,22 @@ class HarnessExecutor:
                     selected_task_ids=list(selected_task_ids),
                     workflow_result=workflow_result,
                 )
+                waiting_state = self._append_incomplete_turn(
+                    retry_state,
+                    turn=waiting_turn,
+                    pending_approval=pending_record,
+                )
                 saved = self._save_with_conflict_retry(
                     base_snapshot=snapshot,
-                    new_state=self._append_incomplete_turn(
-                        retry_state,
-                        turn=waiting_turn,
-                        pending_approval=pending_record,
+                    new_state=waiting_state,
+                    artifacts=build_stored_artifacts(
+                        state=waiting_state,
+                        prior_artifacts=snapshot.artifacts,
+                        turn_trace=build_turn_trace(
+                            turn=waiting_turn,
+                            context=context,
+                            tasks_state=waiting_state,
+                        ),
                     ),
                 )
                 return saved, False
@@ -417,6 +457,7 @@ class HarnessExecutor:
                 turn=completed_turn,
                 decision=decision,
                 now=now,
+                context=context,
             )
             return saved, decision.action is not TurnDecisionAction.STOP
 
@@ -432,6 +473,10 @@ class HarnessExecutor:
             saved = self._save_with_conflict_retry(
                 base_snapshot=snapshot,
                 new_state=self._terminal_state(state, stop_reason=budget_stop, now=now),
+                artifacts=build_stored_artifacts(
+                    state=self._terminal_state(state, stop_reason=budget_stop, now=now),
+                    prior_artifacts=snapshot.artifacts,
+                ),
             )
             return saved, False
 
@@ -443,6 +488,14 @@ class HarnessExecutor:
                     state,
                     stop_reason=HarnessStopReason.COMPLETED,
                     now=now,
+                ),
+                artifacts=build_stored_artifacts(
+                    state=self._terminal_state(
+                        state,
+                        stop_reason=HarnessStopReason.COMPLETED,
+                        now=now,
+                    ),
+                    prior_artifacts=snapshot.artifacts,
                 ),
             )
             return saved, False
@@ -481,12 +534,17 @@ class HarnessExecutor:
                         f"Provider retry budget exhausted: {type(exc).__name__}: {exc}"
                     ),
                 )
+                terminal_state = self._terminal_state(
+                    exhausted_state,
+                    stop_reason=HarnessStopReason.ERROR,
+                    now=now,
+                )
                 saved = self._save_with_conflict_retry(
                     base_snapshot=snapshot,
-                    new_state=self._terminal_state(
-                        exhausted_state,
-                        stop_reason=HarnessStopReason.ERROR,
-                        now=now,
+                    new_state=terminal_state,
+                    artifacts=build_stored_artifacts(
+                        state=terminal_state,
+                        prior_artifacts=snapshot.artifacts,
                     ),
                 )
                 return saved, False
@@ -511,12 +569,22 @@ class HarnessExecutor:
                     selected_task_ids=list(selected_task_ids),
                     workflow_result=workflow_result,
                 )
+                waiting_state = self._append_incomplete_turn(
+                    retry_state,
+                    turn=waiting_turn,
+                    pending_approval=pending_record,
+                )
                 saved = self._save_with_conflict_retry(
                     base_snapshot=snapshot,
-                    new_state=self._append_incomplete_turn(
-                        retry_state,
-                        turn=waiting_turn,
-                        pending_approval=pending_record,
+                    new_state=waiting_state,
+                    artifacts=build_stored_artifacts(
+                        state=waiting_state,
+                        prior_artifacts=snapshot.artifacts,
+                        turn_trace=build_turn_trace(
+                            turn=waiting_turn,
+                            context=context,
+                            tasks_state=waiting_state,
+                        ),
                     ),
                 )
                 return saved, False
@@ -569,6 +637,7 @@ class HarnessExecutor:
                 turn=completed_turn,
                 decision=decision,
                 now=now,
+                context=context,
             )
             return saved, decision.action is not TurnDecisionAction.STOP
 
@@ -627,6 +696,7 @@ class HarnessExecutor:
             turn=completed_turn,
             decision=decision,
             now=now,
+            context=pending_approval.base_context,
         )
         return saved, decision.action is not TurnDecisionAction.STOP
 
@@ -685,6 +755,7 @@ class HarnessExecutor:
             turn=completed_turn,
             decision=decision,
             now=now,
+            context=pending_approval.base_context,
         )
         return saved, decision.action is not TurnDecisionAction.STOP
 
@@ -696,6 +767,7 @@ class HarnessExecutor:
         turn: HarnessTurn,
         decision: TurnDecision,
         now: datetime,
+        context: ToolContext,
     ) -> StoredHarnessState:
         finalized_turn = turn.model_copy(
             update={
@@ -732,6 +804,15 @@ class HarnessExecutor:
         return self._save_with_conflict_retry(
             base_snapshot=base_snapshot,
             new_state=new_state,
+            artifacts=build_stored_artifacts(
+                state=new_state,
+                prior_artifacts=base_snapshot.artifacts,
+                turn_trace=build_turn_trace(
+                    turn=finalized_turn,
+                    context=context,
+                    tasks_state=new_state,
+                ),
+            ),
         )
 
     def _save_resumed_turn(
@@ -742,6 +823,7 @@ class HarnessExecutor:
         turn: HarnessTurn,
         decision: TurnDecision,
         now: datetime,
+        context: ToolContext,
     ) -> StoredHarnessState:
         finalized_turn = turn.model_copy(
             update={
@@ -778,6 +860,15 @@ class HarnessExecutor:
         return self._save_with_conflict_retry(
             base_snapshot=base_snapshot,
             new_state=new_state,
+            artifacts=build_stored_artifacts(
+                state=new_state,
+                prior_artifacts=base_snapshot.artifacts,
+                turn_trace=build_turn_trace(
+                    turn=finalized_turn,
+                    context=context,
+                    tasks_state=new_state,
+                ),
+            ),
         )
 
     def _append_incomplete_turn(
@@ -826,6 +917,7 @@ class HarnessExecutor:
         *,
         base_snapshot: StoredHarnessState,
         new_state: HarnessState,
+        artifacts: StoredHarnessArtifacts | None = None,
     ) -> StoredHarnessState:
         expected_revision = base_snapshot.revision
         attempts = 0
@@ -834,6 +926,7 @@ class HarnessExecutor:
                 return self._store.save_session(
                     new_state,
                     expected_revision=expected_revision,
+                    artifacts=artifacts,
                 )
             except HarnessStateConflictError:
                 if attempts >= self._retry_policy.max_persistence_retries:

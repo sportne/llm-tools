@@ -380,3 +380,25 @@ repository-wide runtime, observability, or adapter phases above.
 - [x] 6.1 Add provider-neutral turn-context projection models
 - [x] 6.2 Add explicit count-and-character budget handling for derived context
 - [x] 6.3 Add canonical-vs-derived projection rules, exports, tests, and docs
+
+
+### Phase 7. Harness trust and observability
+- [x] 7.1 Persist approval-resolution-ready stop reasons and replay-safe approval history
+- [x] 7.2 Add deterministic retry, approval, and save-point durability semantics
+- [x] 7.3 Persist trace artifacts, policy snapshots, session summaries, and replay models outside canonical `HarnessState`
+
+### Phase 8. Harness observability and testing
+- [x] 8.1 Record durable per-turn traces and policy snapshots at every executor save point
+- [x] 8.2 Add golden trace and replay coverage for success and approval flows
+- [x] 8.3 Add state-machine-oriented harness tests for approval, stop, and retry edges
+
+### Phase 9. Public session surface
+- [x] 9.1 Add the public Python session API with injectable and minimal built-in runner surfaces
+- [x] 9.2 Add end-to-end session API coverage for success, approval, retry, replay, and budget paths
+- [ ] 9.3 Add richer multi-root or advanced decomposition session runners
+- [x] 9.4 Add recent-session inspection and deterministic replay helpers on stored snapshots
+
+### Phase 10. Minimal harness UX
+- [x] 10.1 Add the minimal persisted harness CLI backed by the public session API
+- [x] 10.2 Update README and usage docs for traces, replay, sessions, and CLI flows
+- [x] 10.3 Add the integration plan for Textual chat, Streamlit chat, and Textual workbench

@@ -24,6 +24,8 @@ The core v0.1 foundation is implemented:
 - dual sync/async execution paths across runtime, provider, and workflow layers
 - optional app layers with Textual and Streamlit repository chat clients plus a
   developer-facing Textual workbench
+- `harness_api` durable session orchestration with persisted traces, replay,
+  summaries, a public Python session API, and a minimal persisted-session CLI
 
 ## Core Concepts
 
@@ -49,6 +51,7 @@ src/llm_tools/
   llm_providers/
   tools/
   workflow_api/
+  harness_api/
 ```
 
 ## Quick Start
@@ -121,6 +124,24 @@ or:
 ```bash
 llm-tools-chat <directory> --config <path>
 ```
+
+## Harness Sessions
+
+Launch the minimal persisted harness CLI with either:
+
+```bash
+python -m llm_tools.apps.harness_cli start --title "Task" --intent "Do work"
+```
+
+or:
+
+```bash
+llm-tools-harness start --title "Task" --intent "Do work"
+```
+
+Use the public Python session API from `llm_tools.harness_api` when you need
+injectable session control, replay inspection, or a minimal built-in runner for
+scripted and approval-aware harness tests.
 
 ## Streamlit Chat App
 

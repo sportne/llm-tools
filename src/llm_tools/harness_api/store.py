@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
+from urllib.parse import quote
 
-from pydantic import BaseModel, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from llm_tools.harness_api.models import HarnessState
+from llm_tools.harness_api.replay import StoredHarnessArtifacts
 
 CURRENT_HARNESS_STATE_SCHEMA_VERSION = "3"
 SUPPORTED_HARNESS_STATE_SCHEMA_VERSIONS = frozenset(
@@ -27,7 +31,12 @@ class StoredHarnessState(BaseModel):
 
     session_id: str
     revision: str
+    saved_at: str = Field(
+        default_factory=lambda: _timestamp(datetime.now(UTC)),
+        min_length=1,
+    )
     state: HarnessState
+    artifacts: StoredHarnessArtifacts = Field(default_factory=StoredHarnessArtifacts)
 
     @model_validator(mode="after")
     def validate_session_binding(self) -> StoredHarnessState:
@@ -35,6 +44,20 @@ class StoredHarnessState(BaseModel):
         if self.session_id != self.state.session.session_id:
             raise ValueError(
                 "StoredHarnessState session_id must match state.session.session_id."
+            )
+        if (
+            self.artifacts.trace is not None
+            and self.artifacts.trace.session_id != self.session_id
+        ):
+            raise ValueError(
+                "StoredHarnessState trace.session_id must match session_id."
+            )
+        if (
+            self.artifacts.summary is not None
+            and self.artifacts.summary.session_id != self.session_id
+        ):
+            raise ValueError(
+                "StoredHarnessState summary.session_id must match session_id."
             )
         return self
 
@@ -50,11 +73,15 @@ class HarnessStateStore(Protocol):
         state: HarnessState,
         *,
         expected_revision: str | None = None,
+        artifacts: StoredHarnessArtifacts | None = None,
     ) -> StoredHarnessState:
         """Persist a new canonical snapshot, optionally with optimistic locking."""
 
     def delete_session(self, session_id: str) -> None:
         """Delete one persisted session snapshot when present."""
+
+    def list_sessions(self, *, limit: int | None = None) -> list[StoredHarnessState]:
+        """Return stored sessions in newest-first order."""
 
 
 class InMemoryHarnessStateStore:
@@ -74,6 +101,7 @@ class InMemoryHarnessStateStore:
         state: HarnessState,
         *,
         expected_revision: str | None = None,
+        artifacts: StoredHarnessArtifacts | None = None,
     ) -> StoredHarnessState:
         ensure_supported_schema_version(state.schema_version)
         session_id = state.session.session_id
@@ -89,13 +117,91 @@ class InMemoryHarnessStateStore:
         snapshot = StoredHarnessState(
             session_id=session_id,
             revision=next_revision,
+            saved_at=_timestamp(datetime.now(UTC)),
             state=state.model_copy(deep=True),
+            artifacts=_resolved_artifacts(current=current, artifacts=artifacts),
         )
         self._snapshots[session_id] = snapshot
         return snapshot.model_copy(deep=True)
 
     def delete_session(self, session_id: str) -> None:
         self._snapshots.pop(session_id, None)
+
+    def list_sessions(self, *, limit: int | None = None) -> list[StoredHarnessState]:
+        snapshots = sorted(
+            (snapshot.model_copy(deep=True) for snapshot in self._snapshots.values()),
+            key=lambda item: (item.saved_at, item.session_id),
+            reverse=True,
+        )
+        if limit is not None:
+            return snapshots[:limit]
+        return snapshots
+
+
+class FileHarnessStateStore:
+    """JSON-file-backed harness store suitable for CLI and manual inspection."""
+
+    def __init__(self, directory: Path | str) -> None:
+        self._directory = Path(directory)
+        self._directory.mkdir(parents=True, exist_ok=True)
+
+    def load_session(self, session_id: str) -> StoredHarnessState | None:
+        path = self._path_for_session(session_id)
+        if not path.exists():
+            return None
+        return StoredHarnessState.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def save_session(
+        self,
+        state: HarnessState,
+        *,
+        expected_revision: str | None = None,
+        artifacts: StoredHarnessArtifacts | None = None,
+    ) -> StoredHarnessState:
+        ensure_supported_schema_version(state.schema_version)
+        session_id = state.session.session_id
+        current = self.load_session(session_id)
+        if expected_revision is not None:
+            current_revision = None if current is None else current.revision
+            if current_revision != expected_revision:
+                raise HarnessStateConflictError(
+                    f"Session '{session_id}' revision mismatch."
+                )
+
+        next_revision = "1" if current is None else str(int(current.revision) + 1)
+        snapshot = StoredHarnessState(
+            session_id=session_id,
+            revision=next_revision,
+            saved_at=_timestamp(datetime.now(UTC)),
+            state=state.model_copy(deep=True),
+            artifacts=_resolved_artifacts(current=current, artifacts=artifacts),
+        )
+        self._path_for_session(session_id).write_text(
+            snapshot.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+        return snapshot.model_copy(deep=True)
+
+    def delete_session(self, session_id: str) -> None:
+        path = self._path_for_session(session_id)
+        if path.exists():
+            path.unlink()
+
+    def list_sessions(self, *, limit: int | None = None) -> list[StoredHarnessState]:
+        snapshots = sorted(
+            (
+                StoredHarnessState.model_validate_json(path.read_text(encoding="utf-8"))
+                for path in self._directory.glob("*.json")
+            ),
+            key=lambda item: (item.saved_at, item.session_id),
+            reverse=True,
+        )
+        if limit is not None:
+            return snapshots[:limit]
+        return snapshots
+
+    def _path_for_session(self, session_id: str) -> Path:
+        return self._directory / f"{quote(session_id, safe='')}.json"
 
 
 def ensure_supported_schema_version(schema_version: str) -> None:
@@ -123,3 +229,19 @@ def deserialize_harness_state(payload: str) -> HarnessState:
         raise
     ensure_supported_schema_version(state.schema_version)
     return state
+
+
+def _resolved_artifacts(
+    *,
+    current: StoredHarnessState | None,
+    artifacts: StoredHarnessArtifacts | None,
+) -> StoredHarnessArtifacts:
+    if artifacts is not None:
+        return artifacts.model_copy(deep=True)
+    if current is None:
+        return StoredHarnessArtifacts()
+    return current.artifacts.model_copy(deep=True)
+
+
+def _timestamp(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
