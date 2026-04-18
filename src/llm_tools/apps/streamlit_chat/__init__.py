@@ -8,7 +8,9 @@ from pathlib import Path
 from llm_tools.apps.chat_config import ProviderPreset, TextualChatConfig
 
 
-def run_streamlit_chat_app(*, root_path: Path, config: TextualChatConfig) -> None:
+def run_streamlit_chat_app(
+    *, root_path: Path | None, config: TextualChatConfig
+) -> None:
     """Render the Streamlit chat app for one Streamlit script execution."""
     from llm_tools.apps.streamlit_chat.app import run_streamlit_chat_app as _run
 

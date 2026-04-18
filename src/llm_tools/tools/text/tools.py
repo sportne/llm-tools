@@ -13,6 +13,7 @@ from llm_tools.tool_api import (
     ToolRegistry,
     ToolSpec,
 )
+from llm_tools.tools._path_utils import get_workspace_root
 from llm_tools.tools.filesystem.models import SourceFilters, ToolLimits
 from llm_tools.tools.text._ops import search_text_impl
 from llm_tools.tools.text.models import TextSearchResult
@@ -21,7 +22,7 @@ from llm_tools.tools.text.models import TextSearchResult
 def _require_repository_metadata(
     context: ToolContext,
 ) -> tuple[Path, SourceFilters, ToolLimits]:
-    workspace = Path(context.workspace or Path.cwd()).resolve()
+    workspace = get_workspace_root(context)
     metadata = context.metadata
     source_filters = SourceFilters.model_validate(metadata.get("source_filters", {}))
     tool_limits = ToolLimits.model_validate(metadata.get("tool_limits", {}))

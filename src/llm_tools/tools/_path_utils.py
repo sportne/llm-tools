@@ -9,7 +9,10 @@ from llm_tools.tool_api import ToolContext
 
 def get_workspace_root(context: ToolContext) -> Path:
     """Return the resolved workspace root for a tool invocation."""
-    root = Path(context.workspace or Path.cwd()).expanduser().resolve()
+    workspace = (context.workspace or "").strip()
+    if workspace == "":
+        raise ValueError("No workspace configured for local tool execution.")
+    root = Path(workspace).expanduser().resolve()
     if not root.exists() or not root.is_dir():
         raise ValueError(
             f"Workspace root '{root}' does not exist or is not a directory."

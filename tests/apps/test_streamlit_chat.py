@@ -1,9 +1,8 @@
-"""Tests for the Streamlit repository chat app layer."""
+"""Tests for the redesigned Streamlit chat app layer."""
 
 from __future__ import annotations
 
 import importlib
-import queue
 import runpy
 import sys
 import tomllib
@@ -13,10 +12,14 @@ from types import SimpleNamespace
 import pytest
 from tests.apps._imports import import_streamlit_chat_modules
 
+from llm_tools.apps.chat_controls import ChatCommandOutcome, ChatControlNotice
 from llm_tools.llm_adapters import ParsedModelResponse
-from llm_tools.tool_api import SideEffectClass
+from llm_tools.tool_api import SideEffectClass, ToolContext
+from llm_tools.tools._path_utils import get_workspace_root
 from llm_tools.workflow_api import (
+    ApprovalRequest,
     ChatFinalResponse,
+    ChatMessage,
     ChatSessionState,
     ChatTokenUsage,
     ChatWorkflowApprovalEvent,
@@ -27,14 +30,13 @@ from llm_tools.workflow_api import (
     ChatWorkflowStatusEvent,
     ChatWorkflowTurnResult,
 )
-from llm_tools.workflow_api.models import ApprovalRequest
 
 _STREAMLIT_MODULES = import_streamlit_chat_modules()
 _CHAT_RUNTIME_MODULE = importlib.import_module("llm_tools.apps.chat_runtime")
+_CHAT_PROMPTS_MODULE = importlib.import_module("llm_tools.apps.chat_prompts")
 build_parser = _STREAMLIT_MODULES.app.build_parser
 process_streamlit_chat_turn = _STREAMLIT_MODULES.app.process_streamlit_chat_turn
 resolve_enabled_tool_names = _STREAMLIT_MODULES.app.resolve_enabled_tool_names
-StreamlitTurnOutcome = _STREAMLIT_MODULES.app.StreamlitTurnOutcome
 _resolve_chat_config = _STREAMLIT_MODULES.app._resolve_chat_config
 
 
@@ -47,126 +49,91 @@ class _FakeProvider:
         return self._responses.pop(0)
 
 
-class _FakeRunner:
-    def __init__(self, events: list[object]) -> None:
-        self._events = events
-        self.resolutions: list[bool] = []
-        self.cancelled = False
-
-    def __iter__(self):  # type: ignore[no-untyped-def]
-        return iter(self._events)
-
-    def resolve_pending_approval(self, approved: bool) -> bool:
-        self.resolutions.append(approved)
-        return True
-
-    def cancel(self) -> None:
-        self.cancelled = True
-
-
-class _DoneThread:
-    def is_alive(self) -> bool:
-        return False
-
-
-class _ThreadSpy:
-    def __init__(
-        self, target: object | None = None, args: tuple[object, ...] = ()
-    ) -> None:
-        self.target = target
-        self.args = args
-        self.started = False
-
-    def start(self) -> None:
-        self.started = True
-
-    def is_alive(self) -> bool:
-        return self.started
-
-
-class _ExplodingRunner:
-    def __iter__(self):  # type: ignore[no-untyped-def]
-        raise RuntimeError("worker boom")
-
-
 class _RerunRequestError(RuntimeError):
     pass
 
 
-class _FakeSidebar:
+class _FakeBlock:
     def __init__(self, streamlit: _FakeStreamlit) -> None:
         self._streamlit = streamlit
 
-    def __enter__(self) -> _FakeSidebar:
+    def __enter__(self) -> _FakeBlock:
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
         return False
 
-    def subheader(self, text: str) -> None:
-        self._streamlit.sidebar_messages.append(("subheader", text))
+    def button(self, label: str, **kwargs: object) -> bool:
+        return self._streamlit.button(label, **kwargs)
 
-    def text_input(self, label: str, *, value: str = "", type: str = "default") -> str:
-        del value, type
-        self._streamlit.sidebar_messages.append(("text_input", label))
-        return self._streamlit.sidebar_text_input
+    def text_input(self, label: str, **kwargs: object) -> str:
+        return self._streamlit.text_input(label, **kwargs)
 
+    def text_area(self, label: str, *args: object, **kwargs: object) -> str:
+        return self._streamlit.text_area(label, *args, **kwargs)
 
-class _NullContext:
-    def __enter__(self) -> _NullContext:
-        return self
+    def checkbox(self, label: str, **kwargs: object) -> bool:
+        return self._streamlit.checkbox(label, **kwargs)
 
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
-        return False
+    def toggle(self, label: str, **kwargs: object) -> bool:
+        return self._streamlit.toggle(label, **kwargs)
+
+    def selectbox(self, label: str, **kwargs: object) -> object:
+        return self._streamlit.selectbox(label, **kwargs)
+
+    def columns(self, spec: int | list[int]) -> list[_FakeBlock]:
+        return self._streamlit.columns(spec)
+
+    def markdown(self, text: str, **kwargs: object) -> None:
+        self._streamlit.markdown(text, **kwargs)
+
+    def caption(self, text: str) -> None:
+        self._streamlit.caption(text)
+
+    def code(self, text: str) -> None:
+        self._streamlit.code(text)
+
+    def warning(self, text: str) -> None:
+        self._streamlit.warning(text)
+
+    def error(self, text: str) -> None:
+        self._streamlit.error(text)
+
+    def download_button(self, label: str, **kwargs: object) -> bool:
+        return self._streamlit.download_button(label, **kwargs)
+
+    def tabs(self, names: list[str]) -> list[_FakeBlock]:
+        return self._streamlit.tabs(names)
 
 
 class _FakeStreamlit:
     def __init__(
         self,
         *,
-        chat_input: str | None = None,
-        button_value: bool = False,
-        sidebar_text_input: str = "",
         button_values: dict[str, bool] | None = None,
         text_input_values: dict[str, str] | None = None,
         checkbox_values: dict[str, bool] | None = None,
+        selectbox_values: dict[str, object] | None = None,
     ) -> None:
         self.session_state: dict[str, object] = {}
-        self.chat_input_value = chat_input
-        self.button_value = button_value
         self.button_values = button_values or {}
         self.text_input_values = text_input_values or {}
         self.checkbox_values = checkbox_values or {}
-        self.sidebar_text_input = sidebar_text_input
-        self.sidebar = _FakeSidebar(self)
-        self.info_messages: list[str] = []
-        self.error_messages: list[str] = []
+        self.selectbox_values = selectbox_values or {}
+        self.sidebar = _FakeBlock(self)
+        self.page_config_kwargs: list[dict[str, object]] = []
         self.markdown_messages: list[str] = []
         self.caption_messages: list[str] = []
-        self.sidebar_messages: list[tuple[str, str]] = []
-        self.chat_message_roles: list[str] = []
-        self.chat_input_calls = 0
-        self.rerun_called = False
-        self.page_config_calls = 0
-        self.page_config_kwargs: list[dict[str, object]] = []
-        self.title_messages: list[str] = []
-        self.button_calls = 0
+        self.warning_messages: list[str] = []
+        self.error_messages: list[str] = []
         self.button_labels: list[str] = []
-        self.text_area_values: dict[str, str] = {}
         self.download_calls: list[tuple[str, str, str | None]] = []
-        self.checkbox_calls: list[str] = []
-        self.toggle_calls: list[str] = []
+        self.text_area_values: dict[str, str] = {}
+        self.chat_roles: list[str] = []
+        self.rerun_called = False
 
     def set_page_config(self, **kwargs: object) -> None:
-        self.page_config_calls += 1
         self.page_config_kwargs.append(kwargs)
-
-    def title(self, text: str) -> None:
-        self.title_messages.append(text)
-        self.markdown_messages.append(text)
-
-    def subheader(self, text: str) -> None:
-        self.markdown_messages.append(text)
 
     def markdown(self, text: str, unsafe_allow_html: bool = False) -> None:
         del unsafe_allow_html
@@ -175,29 +142,67 @@ class _FakeStreamlit:
     def caption(self, text: str) -> None:
         self.caption_messages.append(text)
 
+    def warning(self, text: str) -> None:
+        self.warning_messages.append(text)
+
+    def info(self, text: str) -> None:
+        self.caption_messages.append(text)
+
+    def error(self, text: str) -> None:
+        self.error_messages.append(text)
+
+    def code(self, text: str) -> None:
+        self.markdown_messages.append(text)
+
     def button(
         self,
         label: str,
         *,
+        key: str | None = None,
         use_container_width: bool = False,
         disabled: bool = False,
     ) -> bool:
         del use_container_width
-        self.button_calls += 1
         self.button_labels.append(label)
         if disabled:
             return False
-        return self.button_values.get(label, self.button_value)
+        token = key or label
+        return self.button_values.get(token, self.button_values.get(label, False))
 
     def text_input(
         self,
         label: str,
         *,
         value: str = "",
+        key: str | None = None,
+        disabled: bool = False,
+        placeholder: str | None = None,
         type: str = "default",
     ) -> str:
-        del type
-        return self.text_input_values.get(label, value)
+        del disabled, placeholder, type
+        token = key or label
+        return self.text_input_values.get(
+            token, self.text_input_values.get(label, value)
+        )
+
+    def text_area(
+        self,
+        label: str,
+        value: str = "",
+        *,
+        key: str | None = None,
+        height: int | None = None,
+        placeholder: str | None = None,
+        label_visibility: str | None = None,
+    ) -> str:
+        del height, placeholder, label_visibility
+        token = key or label
+        resolved = self.text_input_values.get(
+            token, self.text_input_values.get(label, value)
+        )
+        self.text_area_values[token] = str(resolved)
+        self.session_state[token] = str(resolved)
+        return str(resolved)
 
     def checkbox(
         self,
@@ -205,10 +210,12 @@ class _FakeStreamlit:
         *,
         value: bool = False,
         key: str | None = None,
+        disabled: bool = False,
     ) -> bool:
+        if disabled:
+            return value
         token = key or label
-        self.checkbox_calls.append(token)
-        return self.checkbox_values.get(token, value)
+        return self.checkbox_values.get(token, self.checkbox_values.get(label, value))
 
     def toggle(
         self,
@@ -216,21 +223,52 @@ class _FakeStreamlit:
         *,
         value: bool = False,
         key: str | None = None,
+        disabled: bool = False,
     ) -> bool:
+        if disabled:
+            return value
         token = key or label
-        self.toggle_calls.append(token)
-        return self.checkbox_values.get(token, value)
+        return self.checkbox_values.get(token, self.checkbox_values.get(label, value))
 
-    def text_area(
+    def selectbox(
         self,
         label: str,
-        value: str = "",
         *,
-        height: int | None = None,
-    ) -> str:
-        del height
-        self.text_area_values[label] = value
-        return value
+        options: list[object],
+        index: int = 0,
+        key: str | None = None,
+        disabled: bool = False,
+        format_func=None,
+    ) -> object:
+        del format_func
+        if disabled:
+            return options[index]
+        token = key or label
+        return self.selectbox_values.get(
+            token, self.selectbox_values.get(label, options[index])
+        )
+
+    def columns(self, spec: int | list[int]) -> list[_FakeBlock]:
+        count = spec if isinstance(spec, int) else len(spec)
+        return [_FakeBlock(self) for _ in range(count)]
+
+    def tabs(self, names: list[str]) -> list[_FakeBlock]:
+        return [_FakeBlock(self) for _ in names]
+
+    def expander(self, label: str, expanded: bool = False) -> _FakeBlock:
+        del label, expanded
+        return _FakeBlock(self)
+
+    def popover(self, label: str) -> _FakeBlock:
+        del label
+        return _FakeBlock(self)
+
+    def container(self) -> _FakeBlock:
+        return _FakeBlock(self)
+
+    def chat_message(self, role: str) -> _FakeBlock:
+        self.chat_roles.append(role)
+        return _FakeBlock(self)
 
     def download_button(
         self,
@@ -244,33 +282,53 @@ class _FakeStreamlit:
         self.download_calls.append((label, data, file_name))
         return False
 
-    def info(self, text: str) -> None:
-        self.info_messages.append(text)
-
-    def error(self, text: str) -> None:
-        self.error_messages.append(text)
-
-    def code(self, text: str) -> None:
-        self.markdown_messages.append(text)
-
-    def chat_message(self, role: str) -> _NullContext:
-        self.chat_message_roles.append(role)
-        return _NullContext()
-
-    def chat_input(self, prompt: str) -> str | None:
-        del prompt
-        self.chat_input_calls += 1
-        value = self.chat_input_value
-        self.chat_input_value = None
-        return value
-
-    def spinner(self, text: str) -> _NullContext:
-        self.caption_messages.append(text)
-        return _NullContext()
-
     def rerun(self) -> None:
         self.rerun_called = True
         raise _RerunRequestError()
+
+
+def _make_runtime(*, root_path: str | None = None):
+    return _STREAMLIT_MODULES.app.StreamlitRuntimeConfig(
+        provider=_STREAMLIT_MODULES.package.ProviderPreset.OLLAMA,
+        model_name="gemma4:26b",
+        api_base_url="http://127.0.0.1:11434/v1",
+        root_path=root_path,
+        enabled_tools=["read_file", "search_text"] if root_path is not None else [],
+    )
+
+
+def _make_record(*, session_id: str = "session-1", root_path: str | None = None):
+    runtime = _make_runtime(root_path=root_path)
+    return _STREAMLIT_MODULES.app._new_session_record(session_id, runtime)
+
+
+def _make_app_state(*, session_id: str = "session-1", root_path: str | None = None):
+    record = _make_record(session_id=session_id, root_path=root_path)
+    return _STREAMLIT_MODULES.app.StreamlitWorkspaceState(
+        sessions={session_id: record},
+        session_order=[session_id],
+        active_session_id=session_id,
+        preferences=_STREAMLIT_MODULES.app.StreamlitPreferences(),
+        turn_states={session_id: _STREAMLIT_MODULES.app.StreamlitTurnState()},
+    )
+
+
+class _DeadThread:
+    def is_alive(self) -> bool:
+        return False
+
+
+class _FakeRunnerHandle:
+    def __init__(self) -> None:
+        self.cancelled = False
+        self.approvals: list[bool] = []
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+    def resolve_pending_approval(self, approved: bool) -> bool:
+        self.approvals.append(approved)
+        return True
 
 
 def test_streamlit_chat_package_imports_without_loading_streamlit() -> None:
@@ -282,106 +340,29 @@ def test_streamlit_chat_package_imports_without_loading_streamlit() -> None:
     assert hasattr(main_module, "main")
 
 
-def test_streamlit_chat_config_loading_and_cli_overrides(tmp_path: Path) -> None:
+def test_streamlit_chat_config_loading_and_optional_cli(tmp_path: Path) -> None:
     config_path = tmp_path / "chat.yaml"
     config_path.write_text(
-        """
-llm:
-  provider: ollama
-  model_name: base-model
-session:
-  max_context_tokens: 99
-""".strip(),
+        "llm:\n  provider: ollama\n  model_name: base-model\n",
         encoding="utf-8",
     )
 
     args = build_parser().parse_args(
-        [
-            str(tmp_path),
-            "--config",
-            str(config_path),
-            "--model",
-            "override-model",
-            "--max-context-tokens",
-            "123",
-        ]
+        ["--config", str(config_path), "--model", "override-model"]
     )
-
     resolved = _resolve_chat_config(args)
     assert resolved.llm.model_name == "override-model"
-    assert resolved.session.max_context_tokens == 123
+    assert _STREAMLIT_MODULES.app._resolve_root_argument(args) is None
+
+    no_config = build_parser().parse_args([])
+    default_config = _resolve_chat_config(no_config)
+    assert default_config.llm.model_name
 
 
-def test_chat_runtime_provider_factory_and_context_helpers(
+def test_chat_runtime_builds_full_tool_catalog_and_optional_root_context(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    openai_calls: list[dict[str, object]] = []
-    ollama_calls: list[dict[str, object]] = []
-    custom_calls: list[dict[str, object]] = []
-
-    monkeypatch.setattr(
-        "llm_tools.apps.chat_runtime.OpenAICompatibleProvider.for_openai",
-        lambda **kwargs: openai_calls.append(kwargs) or SimpleNamespace(kind="openai"),
-    )
-    monkeypatch.setattr(
-        "llm_tools.apps.chat_runtime.OpenAICompatibleProvider.for_ollama",
-        lambda **kwargs: ollama_calls.append(kwargs) or SimpleNamespace(kind="ollama"),
-    )
-
-    _CHAT_RUNTIME_MODULE.create_provider(
-        _STREAMLIT_MODULES.package.TextualChatConfig().llm.model_copy(
-            update={"provider": _STREAMLIT_MODULES.package.ProviderPreset.OPENAI}
-        ),
-        api_key="secret",
-        model_name="gpt-demo",
-    )
-    _CHAT_RUNTIME_MODULE.create_provider(
-        _STREAMLIT_MODULES.package.TextualChatConfig().llm.model_copy(
-            update={"provider": _STREAMLIT_MODULES.package.ProviderPreset.OLLAMA}
-        ),
-        api_key=None,
-        model_name="llama-demo",
-    )
-
-    class _CustomProvider:
-        @classmethod
-        def for_openai(cls, **kwargs: object) -> object:
-            return SimpleNamespace(kind="openai-from-custom", kwargs=kwargs)
-
-        @classmethod
-        def for_ollama(cls, **kwargs: object) -> object:
-            return SimpleNamespace(kind="ollama-from-custom", kwargs=kwargs)
-
-        def __init__(self, **kwargs: object) -> None:
-            custom_calls.append(kwargs)
-
-    monkeypatch.setattr(
-        "llm_tools.apps.chat_runtime.OpenAICompatibleProvider",
-        _CustomProvider,
-    )
-    _CHAT_RUNTIME_MODULE.create_provider(
-        _STREAMLIT_MODULES.package.TextualChatConfig().llm.model_copy(
-            update={
-                "provider": _STREAMLIT_MODULES.package.ProviderPreset.CUSTOM_OPENAI_COMPATIBLE,
-                "api_base_url": "http://custom/v1",
-            }
-        ),
-        api_key="secret",
-        model_name="custom-demo",
-    )
-    with pytest.raises(ValueError):
-        _CHAT_RUNTIME_MODULE.create_provider(
-            _STREAMLIT_MODULES.package.TextualChatConfig().llm.model_copy(
-                update={
-                    "provider": _STREAMLIT_MODULES.package.ProviderPreset.CUSTOM_OPENAI_COMPATIBLE,
-                    "api_base_url": None,
-                }
-            ),
-            api_key=None,
-            model_name="custom-demo",
-        )
-
     config = _STREAMLIT_MODULES.package.TextualChatConfig().model_copy(
         update={
             "session": _STREAMLIT_MODULES.package.TextualChatConfig().session.model_copy(
@@ -390,44 +371,155 @@ def test_chat_runtime_provider_factory_and_context_helpers(
         }
     )
     context = _CHAT_RUNTIME_MODULE.build_chat_context(
-        root_path=tmp_path,
+        root_path=None,
         config=config,
         app_name="streamlit-chat",
     )
-    assert context.workspace == str(tmp_path)
-    assert context.metadata["tool_limits"]["max_read_file_chars"] == 40
-    assert openai_calls and ollama_calls and custom_calls
+    specs = _CHAT_RUNTIME_MODULE.build_available_tool_specs()
+    assert context.workspace is None
+    assert "write_file" in specs
+    assert "run_git_status" in specs
+    assert "search_jira" in specs
+    prompt = _CHAT_PROMPTS_MODULE.build_chat_system_prompt(
+        tool_registry=_CHAT_RUNTIME_MODULE.build_chat_registry(),
+        tool_limits=config.tool_limits,
+        enabled_tool_names={"run_git_status", "search_jira"},
+        workspace_enabled=False,
+    )
+    assert "run_git_status" in prompt
+    assert "search_jira" in prompt
+    assert "No workspace root is configured" in prompt
 
 
-def test_chat_runtime_executor_and_registry_helpers() -> None:
-    registry, executor = _CHAT_RUNTIME_MODULE.build_chat_executor()
-    assert registry.list_registered_tools()
-    assert executor._policy.allow_filesystem is True
-    assert executor._policy.allow_network is False
-    assert "read_file" in _CHAT_RUNTIME_MODULE.build_available_tool_names()
-    assert "read_file" in _CHAT_RUNTIME_MODULE.build_available_tool_specs()
+def test_local_tools_require_explicit_workspace() -> None:
+    with pytest.raises(ValueError, match="No workspace configured"):
+        get_workspace_root(ToolContext(invocation_id="test"))
 
 
-def test_streamlit_chat_resolve_enabled_tools_filters_unknown_entries() -> None:
+def test_streamlit_chat_default_enabled_tools_depend_on_root(tmp_path: Path) -> None:
+    config = _STREAMLIT_MODULES.package.TextualChatConfig()
+    assert resolve_enabled_tool_names(config, root_path=None) == set()
+    with_root = resolve_enabled_tool_names(config, root_path=tmp_path)
+    assert "read_file" in with_root
+    assert "search_text" in with_root
+    assert "run_git_status" not in with_root
+    assert "search_jira" not in with_root
+    assert "write_file" not in with_root
+
+
+def test_streamlit_chat_initial_render_uses_new_title_and_no_root_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setenv(_STREAMLIT_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
+
+    _STREAMLIT_MODULES.app.run_streamlit_chat_app(
+        root_path=None,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+    )
+
+    assert fake_st.page_config_kwargs[0]["page_title"] == "llm-tools chat"
+    assert any("llm-tools chat" in text for text in fake_st.markdown_messages)
+    app_state = fake_st.session_state[_STREAMLIT_MODULES.app._APP_STATE_SLOT]
+    active = app_state.sessions[app_state.active_session_id]
+    assert active.runtime.root_path is None
+    assert active.runtime.enabled_tools == []
+
+
+def test_streamlit_chat_persists_multiple_sessions_and_deletes_them(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setenv(_STREAMLIT_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
+
+    state = _STREAMLIT_MODULES.app._load_workspace_state(
+        root_path=tmp_path,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+    )
+    original_id = state.active_session_id
+    _STREAMLIT_MODULES.app._create_session(
+        state,
+        template_runtime=state.sessions[original_id].runtime,
+    )
+    reloaded = _STREAMLIT_MODULES.app._load_workspace_state(
+        root_path=tmp_path,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+    )
+    assert len(reloaded.session_order) == 2
+    session_to_delete = reloaded.session_order[0]
+    _STREAMLIT_MODULES.app._delete_session(
+        reloaded,
+        session_id=session_to_delete,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+        root_path=tmp_path,
+    )
+    assert session_to_delete not in reloaded.session_order
+    assert not (_STREAMLIT_MODULES.app._session_path(session_to_delete)).exists()
+
+
+def test_streamlit_chat_skips_corrupt_persisted_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    storage_root = tmp_path / "state"
+    monkeypatch.setenv(_STREAMLIT_MODULES.app._STORAGE_ENV_VAR, str(storage_root))
+    (storage_root / "sessions").mkdir(parents=True)
+    (storage_root / "index.json").write_text(
+        _STREAMLIT_MODULES.app.StreamlitSessionIndex(
+            active_session_id="broken",
+            session_order=["broken"],
+        ).model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+    (storage_root / "sessions" / "broken.json").write_text(
+        "{not-json", encoding="utf-8"
+    )
+    state = _STREAMLIT_MODULES.app._load_workspace_state(
+        root_path=None,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+    )
+    assert state.session_order
+    assert any(
+        "Skipped unreadable chat session broken" in text
+        for text in state.startup_notices
+    )
+
+
+def test_streamlit_chat_does_not_persist_entered_api_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit(
+        text_input_values={"api-key:OPENAI_API_KEY": "top-secret"},
+    )
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setenv(_STREAMLIT_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
     config = _STREAMLIT_MODULES.package.TextualChatConfig().model_copy(
         update={
-            "policy": _STREAMLIT_MODULES.package.TextualChatConfig().policy.model_copy(
-                update={"enabled_tools": ["search_text", "unknown"]}
+            "llm": _STREAMLIT_MODULES.package.TextualChatConfig().llm.model_copy(
+                update={
+                    "provider": _STREAMLIT_MODULES.package.ProviderPreset.OPENAI,
+                    "model_name": "gpt-demo",
+                }
             )
         }
     )
-
-    assert resolve_enabled_tool_names(config) == {"search_text"}
+    _STREAMLIT_MODULES.app.run_streamlit_chat_app(root_path=None, config=config)
+    saved_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (tmp_path / "state").rglob("*.json")
+    )
+    assert "top-secret" not in saved_text
 
 
 def test_streamlit_chat_turn_processes_completed_result(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("needle = 1\n", encoding="utf-8")
-    config = _STREAMLIT_MODULES.package.TextualChatConfig()
-
     outcome = process_streamlit_chat_turn(
-        root_path=tmp_path,
-        config=config,
         provider=_FakeProvider(
             [
                 ParsedModelResponse(
@@ -443,1522 +535,20 @@ def test_streamlit_chat_turn_processes_completed_result(tmp_path: Path) -> None:
                         answer="It is defined in src/app.py.",
                         citations=[{"source_path": "src/app.py", "line_start": 1}],
                         confidence=0.8,
-                        uncertainty=["Only one match was checked."],
-                        follow_up_suggestions=["Inspect surrounding code."],
                     ).model_dump(mode="json")
                 ),
             ]
         ),
         session_state=ChatSessionState(),
         user_message="Where is needle defined?",
+        root_path=tmp_path,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
     )
-
-    assert isinstance(outcome, StreamlitTurnOutcome)
-    assert len(outcome.transcript_entries) == 1
-    assert outcome.transcript_entries[0].role == "assistant"
-    assert outcome.transcript_entries[0].final_response is not None
-    assert outcome.transcript_entries[0].final_response.answer.startswith(
+    assert outcome.transcript_entries[-1].final_response is not None
+    assert outcome.transcript_entries[-1].final_response.answer.startswith(
         "It is defined"
     )
     assert len(outcome.session_state.turns) == 1
-
-
-def test_streamlit_chat_turn_denies_interactive_approvals(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    approval_state = ChatWorkflowApprovalState(
-        approval_request=ApprovalRequest(
-            approval_id="approval-1",
-            invocation_index=1,
-            request={
-                "tool_name": "search_text",
-                "arguments": {"path": ".", "query": "needle"},
-            },
-            tool_name="search_text",
-            tool_version="0.1.0",
-            policy_reason="approval required",
-            requested_at="2026-01-01T00:00:00Z",
-            expires_at="2026-01-01T00:01:00Z",
-        ),
-        tool_name="search_text",
-        redacted_arguments={"path": ".", "query": "needle"},
-        policy_reason="approval required",
-    )
-    runner = _FakeRunner(
-        [
-            ChatWorkflowApprovalEvent(approval=approval_state),
-            ChatWorkflowApprovalResolvedEvent(
-                approval=approval_state,
-                resolution="denied",
-            ),
-            ChatWorkflowResultEvent(
-                result=ChatWorkflowTurnResult(
-                    status="needs_continuation",
-                    continuation_reason="Approval was denied.",
-                )
-            ),
-        ]
-    )
-    monkeypatch.setattr(
-        "llm_tools.apps.streamlit_chat.app.run_interactive_chat_session_turn",
-        lambda **kwargs: runner,
-    )
-
-    outcome = process_streamlit_chat_turn(
-        root_path=tmp_path,
-        config=_STREAMLIT_MODULES.package.TextualChatConfig().model_copy(
-            update={
-                "policy": _STREAMLIT_MODULES.package.TextualChatConfig().policy.model_copy(
-                    update={"require_approval_for": {SideEffectClass.LOCAL_READ}}
-                )
-            }
-        ),
-        provider=object(),
-        session_state=ChatSessionState(),
-        user_message="Need approval",
-    )
-
-    assert runner.resolutions == [False]
-    assert [entry.role for entry in outcome.transcript_entries] == [
-        "system",
-        "system",
-        "system",
-    ]
-    assert outcome.transcript_entries[0].text == (
-        "Approval requested for search_text: approval required"
-    )
-    assert outcome.transcript_entries[-1].text == "Approval was denied."
-
-
-def test_streamlit_chat_turn_handles_timed_out_approval_resolution(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    approval_state = ChatWorkflowApprovalState(
-        approval_request=ApprovalRequest(
-            approval_id="approval-1",
-            invocation_index=1,
-            request={
-                "tool_name": "search_text",
-                "arguments": {"path": ".", "query": "needle"},
-            },
-            tool_name="search_text",
-            tool_version="0.1.0",
-            policy_reason="approval required",
-            requested_at="2026-01-01T00:00:00Z",
-            expires_at="2026-01-01T00:01:00Z",
-        ),
-        tool_name="search_text",
-        redacted_arguments={"path": ".", "query": "needle"},
-        policy_reason="approval required",
-    )
-    runner = _FakeRunner(
-        [
-            ChatWorkflowApprovalEvent(approval=approval_state),
-            ChatWorkflowApprovalResolvedEvent(
-                approval=approval_state,
-                resolution="timed_out",
-            ),
-            ChatWorkflowResultEvent(
-                result=ChatWorkflowTurnResult(
-                    status="needs_continuation",
-                    continuation_reason="Approval timed out.",
-                )
-            ),
-        ]
-    )
-    monkeypatch.setattr(
-        "llm_tools.apps.streamlit_chat.app.run_interactive_chat_session_turn",
-        lambda **kwargs: runner,
-    )
-
-    outcome = process_streamlit_chat_turn(
-        root_path=tmp_path,
-        config=_STREAMLIT_MODULES.package.TextualChatConfig().model_copy(
-            update={
-                "policy": _STREAMLIT_MODULES.package.TextualChatConfig().policy.model_copy(
-                    update={"require_approval_for": {SideEffectClass.LOCAL_READ}}
-                )
-            }
-        ),
-        provider=object(),
-        session_state=ChatSessionState(),
-        user_message="Need approval",
-    )
-
-    assert outcome.transcript_entries[1].text == "Pending approval request timed out."
-    assert outcome.transcript_entries[-1].text == "Approval timed out."
-
-
-def test_streamlit_chat_turn_handles_interrupted_result_with_context_warning(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setattr(
-        "llm_tools.apps.streamlit_chat.app.run_interactive_chat_session_turn",
-        lambda **kwargs: _FakeRunner(
-            [
-                ChatWorkflowResultEvent(
-                    result=ChatWorkflowTurnResult(
-                        status="interrupted",
-                        interruption_reason="Stopped by user.",
-                        context_warning="Older turns were removed.",
-                    )
-                )
-            ]
-        ),
-    )
-
-    outcome = process_streamlit_chat_turn(
-        root_path=tmp_path,
-        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-        provider=object(),
-        session_state=ChatSessionState(),
-        user_message="Stop",
-    )
-
-    assert [entry.text for entry in outcome.transcript_entries] == [
-        "Older turns were removed.",
-        "Stopped by user.",
-    ]
-
-
-def test_streamlit_chat_turn_handles_approved_resolution(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    approval_state = ChatWorkflowApprovalState(
-        approval_request=ApprovalRequest(
-            approval_id="approval-1",
-            invocation_index=1,
-            request={
-                "tool_name": "search_text",
-                "arguments": {"path": ".", "query": "needle"},
-            },
-            tool_name="search_text",
-            tool_version="0.1.0",
-            policy_reason="approval required",
-            requested_at="2026-01-01T00:00:00Z",
-            expires_at="2026-01-01T00:01:00Z",
-        ),
-        tool_name="search_text",
-        redacted_arguments={"path": ".", "query": "needle"},
-        policy_reason="approval required",
-    )
-    monkeypatch.setattr(
-        "llm_tools.apps.streamlit_chat.app.run_interactive_chat_session_turn",
-        lambda **kwargs: _FakeRunner(
-            [
-                ChatWorkflowApprovalResolvedEvent(
-                    approval=approval_state,
-                    resolution="approved",
-                ),
-                ChatWorkflowResultEvent(
-                    result=ChatWorkflowTurnResult(
-                        status="needs_continuation",
-                        continuation_reason="Continue after approval.",
-                    )
-                ),
-            ]
-        ),
-    )
-
-    outcome = process_streamlit_chat_turn(
-        root_path=tmp_path,
-        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-        provider=_FakeProvider([]),
-        session_state=ChatSessionState(),
-        user_message="Need approval",
-    )
-
-    assert outcome.transcript_entries[0].text == "Approved pending approval request."
-    assert outcome.transcript_entries[1].text == "Continue after approval."
-
-
-def test_streamlit_chat_app_requires_api_key_before_chat(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    fake_st = _FakeStreamlit()
-    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
-    monkeypatch.setattr(_STREAMLIT_MODULES.app.os, "getenv", lambda name: None)
-
-    config = _STREAMLIT_MODULES.package.TextualChatConfig().model_copy(
-        update={
-            "llm": _STREAMLIT_MODULES.package.TextualChatConfig().llm.model_copy(
-                update={"provider": _STREAMLIT_MODULES.package.ProviderPreset.OPENAI}
-            )
-        }
-    )
-    _STREAMLIT_MODULES.app.run_streamlit_chat_app(root_path=tmp_path, config=config)
-
-    assert fake_st.page_config_calls == 1
-    assert fake_st.page_config_kwargs == [
-        {
-            "page_title": "llm-tools Streamlit Chat",
-            "layout": "wide",
-            "menu_items": {
-                "Get help": None,
-                "Report a bug": None,
-                "About": None,
-            },
-        }
-    ]
-    assert fake_st.title_messages == ["llm-tools Streamlit Chat"]
-    assert fake_st.info_messages == [
-        "Set OPENAI_API_KEY or enter it in the sidebar to start chatting."
-    ]
-    assert fake_st.chat_input_calls == 0
-    assert fake_st.session_state[_STREAMLIT_MODULES.app._API_KEY_STATE_SLOT] == ""
-    transcript = fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_STATE_SLOT]
-    assert len(transcript) == 1
-    assert transcript[0].role == "system"
-    assert (
-        fake_st.session_state[_STREAMLIT_MODULES.app._SESSION_STATE_SLOT]
-        == ChatSessionState()
-    )
-    assert fake_st.session_state[_STREAMLIT_MODULES.app._TOKEN_USAGE_STATE_SLOT] is None
-
-
-def test_streamlit_chat_app_uses_env_api_key_without_prompt(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    fake_st = _FakeStreamlit()
-    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
-    monkeypatch.setattr(_STREAMLIT_MODULES.app.os, "getenv", lambda name: "env-secret")
-
-    config = _STREAMLIT_MODULES.package.TextualChatConfig().model_copy(
-        update={
-            "llm": _STREAMLIT_MODULES.package.TextualChatConfig().llm.model_copy(
-                update={"provider": _STREAMLIT_MODULES.package.ProviderPreset.OPENAI}
-            )
-        }
-    )
-    _STREAMLIT_MODULES.app.run_streamlit_chat_app(root_path=tmp_path, config=config)
-
-    assert fake_st.chat_input_calls == 1
-    assert not fake_st.info_messages
-    assert fake_st.sidebar_messages == []
-
-
-def test_streamlit_chat_app_clear_chat_resets_transcript_and_api_key(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    fake_st = _FakeStreamlit(button_value=True)
-    fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_STATE_SLOT] = [
-        _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(role="user", text="old")
-    ]
-    fake_st.session_state[_STREAMLIT_MODULES.app._SESSION_STATE_SLOT] = (
-        ChatSessionState(turns=[])
-    )
-    fake_st.session_state[_STREAMLIT_MODULES.app._TOKEN_USAGE_STATE_SLOT] = "tokens"
-    fake_st.session_state[_STREAMLIT_MODULES.app._API_KEY_STATE_SLOT] = "secret"
-    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
-
-    with pytest.raises(_RerunRequestError):
-        _STREAMLIT_MODULES.app.run_streamlit_chat_app(
-            root_path=tmp_path,
-            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-        )
-
-    assert fake_st.rerun_called is True
-    assert (
-        len(fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_STATE_SLOT]) == 1
-    )
-    assert fake_st.session_state[_STREAMLIT_MODULES.app._API_KEY_STATE_SLOT] == ""
-    assert (
-        fake_st.session_state[_STREAMLIT_MODULES.app._SESSION_STATE_SLOT]
-        == ChatSessionState()
-    )
-    assert fake_st.session_state[_STREAMLIT_MODULES.app._TOKEN_USAGE_STATE_SLOT] is None
-
-
-def test_streamlit_chat_app_processes_prompt_and_reruns(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    fake_st = _FakeStreamlit(chat_input="question")
-    created_provider: dict[str, object] = {}
-    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
-    monkeypatch.setattr(
-        _STREAMLIT_MODULES.app,
-        "create_provider",
-        lambda config, api_key, model_name: (
-            created_provider.update(
-                {
-                    "provider": SimpleNamespace(model=model_name),
-                    "provider_name": config.provider.value,
-                    "api_key": api_key,
-                    "model_name": model_name,
-                }
-            )
-            or created_provider["provider"]
-        ),
-    )
-    monkeypatch.setattr(
-        _STREAMLIT_MODULES.app,
-        "_start_streamlit_turn",
-        lambda *, root_path, config, provider, user_message: (
-            fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_STATE_SLOT].append(
-                _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(
-                    role="user",
-                    text=user_message,
-                )
-            ),
-            fake_st.session_state.__setitem__(
-                _STREAMLIT_MODULES.app._TURN_STATE_SLOT,
-                _STREAMLIT_MODULES.app.StreamlitTurnState(
-                    busy=True,
-                    status_text="thinking",
-                    active_turn_number=1,
-                ),
-            ),
-            fake_st.session_state.__setitem__(
-                _STREAMLIT_MODULES.app._ACTIVE_TURN_STATE_SLOT,
-                SimpleNamespace(turn_number=1),
-            ),
-        ),
-    )
-
-    with pytest.raises(_RerunRequestError):
-        _STREAMLIT_MODULES.app.run_streamlit_chat_app(
-            root_path=tmp_path,
-            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-        )
-
-    transcript = fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_STATE_SLOT]
-    assert [entry.role for entry in transcript] == ["system", "user"]
-    assert transcript[1].text == "question"
-    assert created_provider == {
-        "provider": created_provider["provider"],
-        "provider_name": "ollama",
-        "api_key": None,
-        "model_name": "gemma4:26b",
-    }
-    assert fake_st.session_state[_STREAMLIT_MODULES.app._TURN_STATE_SLOT].busy is True
-    assert fake_st.rerun_called is True
-
-
-def test_streamlit_chat_apply_error_event_records_turn_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_st = _FakeStreamlit()
-    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
-    fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_STATE_SLOT] = []
-    fake_st.session_state[_STREAMLIT_MODULES.app._INSPECTOR_STATE_SLOT] = (
-        _STREAMLIT_MODULES.app.StreamlitInspectorState()
-    )
-    fake_st.session_state[_STREAMLIT_MODULES.app._TURN_STATE_SLOT] = (
-        _STREAMLIT_MODULES.app.StreamlitTurnState(
-            busy=True,
-            status_text="thinking",
-            pending_interrupt_draft="carry",
-        )
-    )
-
-    _STREAMLIT_MODULES.app._apply_queued_event(
-        _STREAMLIT_MODULES.app.StreamlitQueuedEvent(
-            kind="error",
-            payload="boom",
-            turn_number=1,
-        )
-    )
-
-    transcript = fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_STATE_SLOT]
-    assert [entry.role for entry in transcript] == ["error"]
-    assert transcript[-1].role == "error"
-    assert transcript[-1].text == "boom"
-    turn_state = fake_st.session_state[_STREAMLIT_MODULES.app._TURN_STATE_SLOT]
-    assert turn_state.busy is False
-    assert turn_state.pending_interrupt_draft is None
-
-
-def test_streamlit_chat_render_helpers_cover_remaining_branches(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_st = _FakeStreamlit()
-    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
-
-    _STREAMLIT_MODULES.app._render_final_response(
-        ChatFinalResponse(
-            answer="Answer",
-            citations=[
-                {
-                    "source_path": "src/app.py",
-                    "line_start": 1,
-                    "excerpt": "needle = 1",
-                }
-            ],
-            confidence=0.5,
-            uncertainty=["unclear"],
-            missing_information=["missing"],
-            follow_up_suggestions=["next"],
-        )
-    )
-    _STREAMLIT_MODULES.app._render_transcript_entry(
-        _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(role="user", text="hello")
-    )
-    _STREAMLIT_MODULES.app._render_transcript_entry(
-        _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(role="system", text="notice")
-    )
-    _STREAMLIT_MODULES.app._render_transcript_entry(
-        _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(role="error", text="boom")
-    )
-    _STREAMLIT_MODULES.app._render_transcript_entry(
-        _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(
-            role="assistant",
-            text="plain assistant text",
-        )
-    )
-
-    assert "needle = 1" in fake_st.markdown_messages
-    assert fake_st.error_messages == ["boom"]
-
-
-def test_streamlit_chat_command_controls_update_session_state(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    fake_st = _FakeStreamlit()
-    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
-    _STREAMLIT_MODULES.app._ensure_session_state(
-        tmp_path,
-        _STREAMLIT_MODULES.package.TextualChatConfig(),
-    )
-
-    for command in ("/tools disable read_file", "/approvals on", "/inspect", "/copy"):
-        outcome = _STREAMLIT_MODULES.app._run_streamlit_command(
-            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-            raw_command=command,
-        )
-        _STREAMLIT_MODULES.app._apply_streamlit_command(outcome)
-
-    exit_outcome = _STREAMLIT_MODULES.app._run_streamlit_command(
-        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-        raw_command="quit",
-    )
-    _STREAMLIT_MODULES.app._apply_streamlit_command(exit_outcome)
-
-    control_state = fake_st.session_state[_STREAMLIT_MODULES.app._CONTROL_STATE_SLOT]
-    assert "read_file" not in control_state.enabled_tools
-    assert SideEffectClass.LOCAL_READ in control_state.require_approval_for
-    assert control_state.inspector_open is True
-    assert (
-        fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_EXPORT_STATE_SLOT]
-        is True
-    )
-    transcript = fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_STATE_SLOT]
-    assert transcript[-1].text.startswith("Streamlit chat keeps running.")
-
-
-def test_streamlit_chat_state_and_api_key_helpers_cover_session_branches(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    fake_st = _FakeStreamlit(sidebar_text_input=" typed-secret ")
-    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
-    monkeypatch.setattr(_STREAMLIT_MODULES.app.os, "getenv", lambda name: None)
-
-    config = _STREAMLIT_MODULES.package.TextualChatConfig().model_copy(
-        update={
-            "llm": _STREAMLIT_MODULES.package.TextualChatConfig().llm.model_copy(
-                update={"provider": _STREAMLIT_MODULES.package.ProviderPreset.OPENAI}
-            )
-        }
-    )
-    _STREAMLIT_MODULES.app._ensure_session_state(tmp_path, config)
-    assert (
-        fake_st.session_state[
-            _STREAMLIT_MODULES.app._TURN_STATE_SLOT
-        ].active_turn_number
-        == 0
-    )
-    assert (
-        fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_EXPORT_STATE_SLOT]
-        is False
-    )
-    assert (
-        fake_st.session_state[_STREAMLIT_MODULES.app._THEME_MODE_STATE_SLOT] == "dark"
-    )
-
-    transcript_entry = _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(
-        role="assistant",
-        text="Answer",
-        final_response=ChatFinalResponse(answer="Answer"),
-    )
-    assert transcript_entry.transcript_text.startswith("Assistant:")
-
-    runner = _FakeRunner([])
-    fake_st.session_state[_STREAMLIT_MODULES.app._ACTIVE_TURN_STATE_SLOT] = (
-        _STREAMLIT_MODULES.app.StreamlitActiveTurnHandle(
-            runner=runner,
-            event_queue=queue.Queue(),
-            thread=_DoneThread(),  # type: ignore[arg-type]
-            turn_number=1,
-        )
-    )
-    _STREAMLIT_MODULES.app._reset_session_state(tmp_path, config)
-    assert runner.cancelled is True
-    assert (
-        fake_st.session_state[_STREAMLIT_MODULES.app._THEME_MODE_STATE_SLOT] == "dark"
-    )
-
-    api_key = _STREAMLIT_MODULES.app._resolve_api_key(config)
-    assert api_key == "typed-secret"
-    assert (
-        fake_st.session_state[_STREAMLIT_MODULES.app._API_SECRET_STATE_SLOT]
-        == "typed-secret"
-    )
-    assert _STREAMLIT_MODULES.app._current_api_key(config) == "typed-secret"
-    assert (
-        _STREAMLIT_MODULES.app._current_api_key(
-            _STREAMLIT_MODULES.package.TextualChatConfig()
-        )
-        is None
-    )
-
-
-def test_streamlit_chat_drains_background_events_and_updates_inspector(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    fake_st = _FakeStreamlit()
-    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
-    _STREAMLIT_MODULES.app._ensure_session_state(
-        tmp_path,
-        _STREAMLIT_MODULES.package.TextualChatConfig(),
-    )
-
-    approval_state = ChatWorkflowApprovalState(
-        approval_request=ApprovalRequest(
-            approval_id="approval-1",
-            invocation_index=1,
-            request={
-                "tool_name": "search_text",
-                "arguments": {"path": ".", "query": "needle"},
-            },
-            tool_name="search_text",
-            tool_version="0.1.0",
-            policy_reason="approval required",
-            requested_at="2026-01-01T00:00:00Z",
-            expires_at="2026-01-01T00:01:00Z",
-        ),
-        tool_name="search_text",
-        redacted_arguments={"path": ".", "query": "needle"},
-        policy_reason="approval required",
-    )
-    event_queue: queue.Queue[object] = queue.Queue()
-    for queued_event in (
-        _STREAMLIT_MODULES.app.StreamlitQueuedEvent(
-            kind="status",
-            payload=ChatWorkflowStatusEvent(status="thinking").model_dump(mode="json"),
-            turn_number=1,
-        ),
-        _STREAMLIT_MODULES.app.StreamlitQueuedEvent(
-            kind="approval_requested",
-            payload=ChatWorkflowApprovalEvent(approval=approval_state).model_dump(
-                mode="json"
-            ),
-            turn_number=1,
-        ),
-        _STREAMLIT_MODULES.app.StreamlitQueuedEvent(
-            kind="inspector",
-            payload=ChatWorkflowInspectorEvent(
-                round_index=1,
-                kind="parsed_response",
-                payload={"ok": True},
-            ).model_dump(mode="json"),
-            turn_number=1,
-        ),
-        _STREAMLIT_MODULES.app.StreamlitQueuedEvent(
-            kind="approval_resolved",
-            payload=ChatWorkflowApprovalResolvedEvent(
-                approval=approval_state,
-                resolution="approved",
-            ).model_dump(mode="json"),
-            turn_number=1,
-        ),
-        _STREAMLIT_MODULES.app.StreamlitQueuedEvent(
-            kind="result",
-            payload=ChatWorkflowResultEvent(
-                result=ChatWorkflowTurnResult(
-                    status="completed",
-                    final_response=ChatFinalResponse(answer="Answer"),
-                    session_state=ChatSessionState(),
-                    token_usage=ChatTokenUsage(
-                        session_tokens=7,
-                        active_context_tokens=9,
-                    ),
-                )
-            ).model_dump(mode="json"),
-            turn_number=1,
-        ),
-        _STREAMLIT_MODULES.app.StreamlitQueuedEvent(
-            kind="complete",
-            payload=None,
-            turn_number=1,
-        ),
-    ):
-        event_queue.put(queued_event)
-
-    fake_st.session_state[_STREAMLIT_MODULES.app._TURN_STATE_SLOT] = (
-        _STREAMLIT_MODULES.app.StreamlitTurnState(busy=True, active_turn_number=1)
-    )
-    fake_st.session_state[_STREAMLIT_MODULES.app._ACTIVE_TURN_STATE_SLOT] = (
-        _STREAMLIT_MODULES.app.StreamlitActiveTurnHandle(
-            runner=_FakeRunner([]),
-            event_queue=event_queue,
-            thread=_DoneThread(),  # type: ignore[arg-type]
-            turn_number=1,
-        )
-    )
-
-    assert _STREAMLIT_MODULES.app._drain_active_turn_events() is None
-    transcript = fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_STATE_SLOT]
-    assert transcript[-1].final_response is not None
-    inspector_state = fake_st.session_state[
-        _STREAMLIT_MODULES.app._INSPECTOR_STATE_SLOT
-    ]
-    assert inspector_state.parsed_responses[0].label == "Turn 1 Round 1 parsed response"
-    assert fake_st.session_state[_STREAMLIT_MODULES.app._ACTIVE_TURN_STATE_SLOT] is None
-
-
-def test_streamlit_chat_low_level_worker_and_queue_helpers_cover_branches(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    fake_st = _FakeStreamlit()
-    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
-    _STREAMLIT_MODULES.app._ensure_session_state(
-        tmp_path,
-        _STREAMLIT_MODULES.package.TextualChatConfig(),
-    )
-
-    result_event = ChatWorkflowResultEvent(
-        result=ChatWorkflowTurnResult(
-            status="needs_continuation",
-            continuation_reason="Need more budget.",
-            context_warning="Older turns were removed.",
-            session_state=ChatSessionState(),
-            token_usage=ChatTokenUsage(session_tokens=3, active_context_tokens=4),
-        )
-    )
-    fake_st.session_state[_STREAMLIT_MODULES.app._TURN_STATE_SLOT] = (
-        _STREAMLIT_MODULES.app.StreamlitTurnState(
-            busy=True,
-            pending_interrupt_draft="follow-up",
-        )
-    )
-    pending_prompt = _STREAMLIT_MODULES.app._apply_turn_result(result_event)
-    assert pending_prompt == "follow-up"
-    transcript = fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_STATE_SLOT]
-    assert transcript[-2].text == "Older turns were removed."
-    assert transcript[-1].text == "Need more budget."
-
-    interrupted_event = ChatWorkflowResultEvent(
-        result=ChatWorkflowTurnResult(
-            status="interrupted",
-            interruption_reason="Stopped by user.",
-            new_messages=[],
-        )
-    )
-    fake_st.session_state[_STREAMLIT_MODULES.app._TURN_STATE_SLOT] = (
-        _STREAMLIT_MODULES.app.StreamlitTurnState(busy=True)
-    )
-    _STREAMLIT_MODULES.app._apply_turn_result(interrupted_event)
-    assert transcript[-1].text == "Stopped by user."
-
-    handle = _STREAMLIT_MODULES.app.StreamlitActiveTurnHandle(
-        runner=_FakeRunner([]),
-        event_queue=queue.Queue(),
-        thread=_DoneThread(),  # type: ignore[arg-type]
-        turn_number=7,
-    )
-    fake_st.session_state[_STREAMLIT_MODULES.app._ACTIVE_TURN_STATE_SLOT] = handle
-    fake_st.session_state[_STREAMLIT_MODULES.app._TURN_STATE_SLOT] = (
-        _STREAMLIT_MODULES.app.StreamlitTurnState(busy=False)
-    )
-    _STREAMLIT_MODULES.app._apply_queued_event(
-        _STREAMLIT_MODULES.app.StreamlitQueuedEvent(
-            kind="complete",
-            payload=None,
-            turn_number=7,
-        )
-    )
-    assert fake_st.session_state[_STREAMLIT_MODULES.app._ACTIVE_TURN_STATE_SLOT] is None
-
-    queued_result = ChatWorkflowResultEvent(
-        result=ChatWorkflowTurnResult(
-            status="completed",
-            final_response=ChatFinalResponse(answer="Queued answer"),
-            session_state=ChatSessionState(),
-        )
-    )
-    event_queue: queue.Queue[object] = queue.Queue()
-    event_queue.put(
-        _STREAMLIT_MODULES.app.StreamlitQueuedEvent(
-            kind="result",
-            payload=queued_result.model_dump(mode="json"),
-            turn_number=9,
-        )
-    )
-    fake_st.session_state[_STREAMLIT_MODULES.app._TURN_STATE_SLOT] = (
-        _STREAMLIT_MODULES.app.StreamlitTurnState(
-            busy=True,
-            pending_interrupt_draft="queued prompt",
-        )
-    )
-    fake_st.session_state[_STREAMLIT_MODULES.app._ACTIVE_TURN_STATE_SLOT] = (
-        _STREAMLIT_MODULES.app.StreamlitActiveTurnHandle(
-            runner=_FakeRunner([]),
-            event_queue=event_queue,
-            thread=_DoneThread(),  # type: ignore[arg-type]
-            turn_number=9,
-        )
-    )
-    assert _STREAMLIT_MODULES.app._drain_active_turn_events() == "queued prompt"
-
-    serialized = _STREAMLIT_MODULES.app._serialize_workflow_event(
-        ChatWorkflowStatusEvent(status="thinking"),
-        turn_number=3,
-    )
-    assert serialized.kind == "status"
-    with pytest.raises(TypeError):
-        _STREAMLIT_MODULES.app._serialize_workflow_event(object(), turn_number=3)
-
-    success_queue: queue.Queue[object] = queue.Queue()
-    success_handle = _STREAMLIT_MODULES.app.StreamlitActiveTurnHandle(
-        runner=_FakeRunner([ChatWorkflowStatusEvent(status="thinking")]),
-        event_queue=success_queue,
-        thread=_DoneThread(),  # type: ignore[arg-type]
-        turn_number=4,
-    )
-    _STREAMLIT_MODULES.app._worker_run_turn(success_handle)
-    assert success_queue.get_nowait().kind == "status"
-    assert success_queue.get_nowait().kind == "complete"
-
-    error_queue: queue.Queue[object] = queue.Queue()
-    error_handle = _STREAMLIT_MODULES.app.StreamlitActiveTurnHandle(
-        runner=_ExplodingRunner(),  # type: ignore[arg-type]
-        event_queue=error_queue,
-        thread=_DoneThread(),  # type: ignore[arg-type]
-        turn_number=5,
-    )
-    _STREAMLIT_MODULES.app._worker_run_turn(error_handle)
-    assert error_queue.get_nowait().kind == "error"
-    assert error_queue.get_nowait().kind == "complete"
-
-
-def test_streamlit_chat_busy_prompt_interrupts_active_turn(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    fake_st = _FakeStreamlit(chat_input="replacement")
-    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
-    monkeypatch.setattr(_STREAMLIT_MODULES.app.os, "getenv", lambda name: "env-secret")
-    _STREAMLIT_MODULES.app._ensure_session_state(
-        tmp_path,
-        _STREAMLIT_MODULES.package.TextualChatConfig(),
-    )
-    runner = _FakeRunner([])
-    fake_st.session_state[_STREAMLIT_MODULES.app._TURN_STATE_SLOT] = (
-        _STREAMLIT_MODULES.app.StreamlitTurnState(busy=True, active_turn_number=1)
-    )
-    fake_st.session_state[_STREAMLIT_MODULES.app._ACTIVE_TURN_STATE_SLOT] = (
-        _STREAMLIT_MODULES.app.StreamlitActiveTurnHandle(
-            runner=runner,
-            event_queue=queue.Queue(),
-            thread=_DoneThread(),  # type: ignore[arg-type]
-            turn_number=1,
-        )
-    )
-
-    with pytest.raises(_RerunRequestError):
-        _STREAMLIT_MODULES.app.run_streamlit_chat_app(
-            root_path=tmp_path,
-            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-        )
-
-    turn_state = fake_st.session_state[_STREAMLIT_MODULES.app._TURN_STATE_SLOT]
-    assert turn_state.pending_interrupt_draft == "replacement"
-    assert turn_state.status_text == "stopping"
-    assert runner.cancelled is True
-
-
-def test_streamlit_chat_turn_lifecycle_and_command_wrappers_cover_remaining_paths(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    fake_st = _FakeStreamlit(
-        text_input_values={"Switch model": "model-2"},
-        checkbox_values={
-            "tool:read_file": False,
-            "transcript_export": True,
-            "show_inspector": True,
-            "approvals:local_read": True,
-        },
-    )
-    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
-    monkeypatch.setattr(_STREAMLIT_MODULES.app.os, "getenv", lambda name: "env-secret")
-    _STREAMLIT_MODULES.app._ensure_session_state(
-        tmp_path,
-        _STREAMLIT_MODULES.package.TextualChatConfig(),
-    )
-
-    created_threads: list[_ThreadSpy] = []
-
-    def _thread_factory(*args: object, **kwargs: object) -> _ThreadSpy:
-        thread = _ThreadSpy(
-            target=kwargs.get("target"),
-            args=kwargs.get("args", ()),
-        )
-        created_threads.append(thread)
-        return thread
-
-    monkeypatch.setattr(_STREAMLIT_MODULES.app.threading, "Thread", _thread_factory)
-    fake_runner = _FakeRunner([])
-    monkeypatch.setattr(
-        _STREAMLIT_MODULES.app, "_build_chat_runner", lambda **kwargs: fake_runner
-    )
-    _STREAMLIT_MODULES.app._start_streamlit_turn(
-        root_path=tmp_path,
-        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-        provider=object(),
-        user_message="hello",
-    )
-    assert created_threads[-1].started is True
-    turn_state = fake_st.session_state[_STREAMLIT_MODULES.app._TURN_STATE_SLOT]
-    assert turn_state.busy is True
-    assert (
-        fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_STATE_SLOT][-1].text
-        == "hello"
-    )
-
-    approval_state = ChatWorkflowApprovalState(
-        approval_request=ApprovalRequest(
-            approval_id="approval-2",
-            invocation_index=1,
-            request={"tool_name": "read_file", "arguments": {"path": "x"}},
-            tool_name="read_file",
-            tool_version="0.1.0",
-            policy_reason="approval required",
-            requested_at="2026-01-01T00:00:00Z",
-            expires_at="2026-01-01T00:01:00Z",
-        ),
-        tool_name="read_file",
-        redacted_arguments={"path": "x"},
-        policy_reason="approval required",
-    )
-    turn_state.pending_approval = approval_state
-    _STREAMLIT_MODULES.app._resolve_active_approval(approved=True)
-    assert turn_state.approval_decision_in_flight is True
-    _STREAMLIT_MODULES.app._cancel_active_turn()
-    assert fake_runner.cancelled is True
-    turn_state.busy = False
-    turn_state.pending_approval = None
-
-    monkeypatch.setattr(
-        _STREAMLIT_MODULES.app,
-        "create_provider",
-        lambda config, api_key, model_name: SimpleNamespace(
-            model=model_name,
-            list_available_models=lambda: ["model-1", "model-2"],
-        ),
-    )
-    outcome = _STREAMLIT_MODULES.app._run_streamlit_command(
-        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-        raw_command="/model",
-    )
-    assert outcome.handled is True
-    assert "Available models" in outcome.notices[0].text
-
-    switch_outcome = _STREAMLIT_MODULES.app._run_streamlit_command(
-        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-        raw_command="/model switched-model",
-    )
-    assert switch_outcome.provider is not None
-
-    monkeypatch.setattr(
-        _STREAMLIT_MODULES.app,
-        "create_provider",
-        lambda config, api_key, model_name: (_ for _ in ()).throw(
-            RuntimeError("bad provider")
-        ),
-    )
-    error_outcome = _STREAMLIT_MODULES.app._run_streamlit_command(
-        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-        raw_command="/model broken-model",
-    )
-    assert error_outcome.notices[0].role == "error"
-
-    fake_st.session_state[_STREAMLIT_MODULES.app._TOKEN_USAGE_STATE_SLOT] = (
-        ChatTokenUsage(session_tokens=10, active_context_tokens=20)
-    )
-    fake_st.session_state[_STREAMLIT_MODULES.app._TURN_STATE_SLOT].confidence = 0.8
-    with pytest.raises(_RerunRequestError):
-        fake_st.button_values["Reset tools to defaults"] = True
-        _STREAMLIT_MODULES.app._render_sidebar_tool_controls(
-            fake_st.session_state[_STREAMLIT_MODULES.app._CONTROL_STATE_SLOT]
-        )
-    fake_st.button_values.clear()
-
-    with pytest.raises(_RerunRequestError):
-        fake_st.button_values["List available models"] = True
-        monkeypatch.setattr(
-            _STREAMLIT_MODULES.app,
-            "_run_streamlit_command",
-            lambda **kwargs: _STREAMLIT_MODULES.app.ChatCommandOutcome(handled=True),
-        )
-        _STREAMLIT_MODULES.app._render_sidebar_model_controls(
-            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-            control_state=fake_st.session_state[
-                _STREAMLIT_MODULES.app._CONTROL_STATE_SLOT
-            ],
-        )
-    fake_st.button_values.clear()
-
-    fake_st.session_state[
-        _STREAMLIT_MODULES.app._TURN_STATE_SLOT
-    ].pending_approval = approval_state
-    fake_st.session_state[
-        _STREAMLIT_MODULES.app._TURN_STATE_SLOT
-    ].approval_decision_in_flight = False
-    with pytest.raises(_RerunRequestError):
-        fake_st.button_values["Approve pending request"] = True
-        _STREAMLIT_MODULES.app._render_sidebar_approval_controls(
-            control_state=fake_st.session_state[
-                _STREAMLIT_MODULES.app._CONTROL_STATE_SLOT
-            ],
-            turn_state=fake_st.session_state[_STREAMLIT_MODULES.app._TURN_STATE_SLOT],
-        )
-    fake_st.button_values.clear()
-
-    _STREAMLIT_MODULES.app._render_sidebar_transcript_export()
-    assert "Transcript export" in fake_st.text_area_values
-    assert fake_st.download_calls[-1][0] == "Download transcript"
-
-    _STREAMLIT_MODULES.app._render_sidebar_inspector(
-        control_state=fake_st.session_state[_STREAMLIT_MODULES.app._CONTROL_STATE_SLOT],
-        turn_state=fake_st.session_state[_STREAMLIT_MODULES.app._TURN_STATE_SLOT],
-    )
-    assert any("Tool Execution Records" in text for text in fake_st.caption_messages)
-
-    session_state = fake_st.session_state[_STREAMLIT_MODULES.app._TURN_STATE_SLOT]
-    session_state.busy = True
-    with pytest.raises(_RerunRequestError):
-        fake_st.button_values["Refresh active turn"] = True
-        _STREAMLIT_MODULES.app._render_sidebar_session(
-            root_path=tmp_path,
-            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-            control_state=fake_st.session_state[
-                _STREAMLIT_MODULES.app._CONTROL_STATE_SLOT
-            ],
-            turn_state=session_state,
-        )
-
-
-def test_streamlit_chat_additional_helper_and_command_branches(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    fake_st = _FakeStreamlit(
-        text_input_values={"Switch model": "model-3"},
-        checkbox_values={
-            "show_inspector": False,
-            "transcript_export": False,
-            "approvals:local_read": False,
-            "appearance:dark_mode": False,
-        },
-    )
-    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
-    monkeypatch.setattr(_STREAMLIT_MODULES.app.os, "getenv", lambda name: None)
-    _STREAMLIT_MODULES.app._ensure_session_state(
-        tmp_path,
-        _STREAMLIT_MODULES.package.TextualChatConfig(),
-    )
-
-    config_path = tmp_path / "streamlit-chat.yaml"
-    config_path.write_text("llm:\n  model_name: base-model\n", encoding="utf-8")
-    args = build_parser().parse_args(
-        [
-            str(tmp_path),
-            "--config",
-            str(config_path),
-            "--provider",
-            "openai",
-            "--model",
-            "override-model",
-            "--temperature",
-            "0.25",
-            "--api-base-url",
-            "http://example.invalid/v1",
-            "--max-read-lines",
-            "50",
-        ]
-    )
-    resolved = _resolve_chat_config(args)
-    assert resolved.llm.provider.value == "openai"
-    assert resolved.llm.temperature == 0.25
-    assert resolved.llm.api_base_url == "http://example.invalid/v1"
-    assert resolved.tool_limits.max_read_lines == 50
-
-    monkeypatch.setitem(sys.modules, "streamlit", fake_st)
-    assert _STREAMLIT_MODULES.app._streamlit_module() is fake_st
-
-    _STREAMLIT_MODULES.app._render_sidebar_appearance_controls()
-    assert fake_st.toggle_calls == ["appearance:dark_mode"]
-    assert (
-        fake_st.session_state[_STREAMLIT_MODULES.app._THEME_MODE_STATE_SLOT] == "light"
-    )
-    _STREAMLIT_MODULES.app._render_streamlit_theme()
-    assert any("color-scheme: light;" in text for text in fake_st.markdown_messages)
-    assert any(
-        "--llm-tools-page-background:" in text
-        and "--llm-tools-composer-shell-background:" in text
-        and '[data-testid="stChatInput"]' in text
-        and '[data-testid="stBottomBlockContainer"]' in text
-        and '[data-testid="collapsedControl"]' in text
-        and 'button[data-testid="stBaseButton-headerNoPadding"]' in text
-        and "-webkit-text-fill-color: var(--llm-tools-text-color);" in text
-        and "caret-color: var(--llm-tools-text-color);" in text
-        and "background: var(--llm-tools-page-background);" in text
-        and "border-width: 0;" in text
-        and "box-shadow: none;" in text
-        and "box-shadow:" in text
-        and "backdrop-filter: blur(10px);" in text
-        for text in fake_st.markdown_messages
-    )
-
-    fake_st.session_state[_STREAMLIT_MODULES.app._API_SECRET_STATE_SLOT] = (
-        "cached-secret"
-    )
-    openai_config = _STREAMLIT_MODULES.package.TextualChatConfig().model_copy(
-        update={
-            "llm": _STREAMLIT_MODULES.package.TextualChatConfig().llm.model_copy(
-                update={"provider": _STREAMLIT_MODULES.package.ProviderPreset.OPENAI}
-            )
-        }
-    )
-    assert _STREAMLIT_MODULES.app._current_api_key(openai_config) == "cached-secret"
-    assert _STREAMLIT_MODULES.app._resolve_api_key(openai_config) == "cached-secret"
-
-    approval_state = ChatWorkflowApprovalState(
-        approval_request=ApprovalRequest(
-            approval_id="approval-4",
-            invocation_index=1,
-            request={"tool_name": "read_file", "arguments": {"path": "x"}},
-            tool_name="read_file",
-            tool_version="0.1.0",
-            policy_reason="approval required",
-            requested_at="2026-01-01T00:00:00Z",
-            expires_at="2026-01-01T00:01:00Z",
-        ),
-        tool_name="read_file",
-        redacted_arguments={"path": "x"},
-        policy_reason="approval required",
-    )
-    inspector_event = ChatWorkflowInspectorEvent(
-        round_index=2,
-        kind="provider_messages",
-        payload={"messages": []},
-    )
-    assert (
-        _STREAMLIT_MODULES.app._serialize_workflow_event(
-            ChatWorkflowApprovalEvent(approval=approval_state),
-            turn_number=2,
-        ).kind
-        == "approval_requested"
-    )
-    assert (
-        _STREAMLIT_MODULES.app._serialize_workflow_event(
-            ChatWorkflowApprovalResolvedEvent(
-                approval=approval_state,
-                resolution="timed_out",
-            ),
-            turn_number=2,
-        ).kind
-        == "approval_resolved"
-    )
-    assert (
-        _STREAMLIT_MODULES.app._serialize_workflow_event(
-            inspector_event,
-            turn_number=2,
-        ).kind
-        == "inspector"
-    )
-    assert (
-        _STREAMLIT_MODULES.app._serialize_workflow_event(
-            ChatWorkflowResultEvent(
-                result=ChatWorkflowTurnResult(
-                    status="completed",
-                    final_response=ChatFinalResponse(answer="ok"),
-                )
-            ),
-            turn_number=2,
-        ).kind
-        == "result"
-    )
-
-    fake_st.session_state[_STREAMLIT_MODULES.app._API_SECRET_STATE_SLOT] = ""
-    missing_key_list = _STREAMLIT_MODULES.app._run_streamlit_command(
-        config=openai_config,
-        raw_command="/model",
-    )
-    missing_key_switch = _STREAMLIT_MODULES.app._run_streamlit_command(
-        config=openai_config,
-        raw_command="/model model-4",
-    )
-    assert missing_key_list.notices[0].text.startswith("Set OPENAI_API_KEY")
-    assert missing_key_switch.notices[0].text.startswith("Set OPENAI_API_KEY")
-
-    fake_st.session_state[_STREAMLIT_MODULES.app._API_SECRET_STATE_SLOT] = "env-secret"
-    monkeypatch.setattr(
-        _STREAMLIT_MODULES.app,
-        "create_provider",
-        lambda config, api_key, model_name: SimpleNamespace(
-            list_available_models=lambda: (_ for _ in ()).throw(
-                RuntimeError("cannot list")
-            )
-        ),
-    )
-    model_notice = _STREAMLIT_MODULES.app._run_streamlit_command(
-        config=openai_config,
-        raw_command="/model",
-    )
-    assert "Unable to list available models" in model_notice.notices[0].text
-
-    rejecting_runner = SimpleNamespace(
-        resolve_pending_approval=lambda approved: False,
-        cancel=lambda: None,
-    )
-    fake_st.session_state[_STREAMLIT_MODULES.app._ACTIVE_TURN_STATE_SLOT] = (
-        _STREAMLIT_MODULES.app.StreamlitActiveTurnHandle(
-            runner=rejecting_runner,  # type: ignore[arg-type]
-            event_queue=queue.Queue(),
-            thread=_DoneThread(),  # type: ignore[arg-type]
-            turn_number=3,
-        )
-    )
-    turn_state = fake_st.session_state[_STREAMLIT_MODULES.app._TURN_STATE_SLOT]
-    _STREAMLIT_MODULES.app._resolve_active_approval(approved=True)
-    assert turn_state.approval_decision_in_flight is False
-
-    cancelling_runner = _FakeRunner([])
-    fake_st.session_state[_STREAMLIT_MODULES.app._ACTIVE_TURN_STATE_SLOT] = (
-        _STREAMLIT_MODULES.app.StreamlitActiveTurnHandle(
-            runner=cancelling_runner,
-            event_queue=queue.Queue(),
-            thread=_DoneThread(),  # type: ignore[arg-type]
-            turn_number=4,
-        )
-    )
-    turn_state.pending_interrupt_draft = "draft"
-    _STREAMLIT_MODULES.app._cancel_active_turn()
-    assert turn_state.pending_interrupt_draft is None
-    assert cancelling_runner.cancelled is True
-
-    transcript_before = list(
-        fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_STATE_SLOT]
-    )
-    _STREAMLIT_MODULES.app._submit_streamlit_prompt(
-        root_path=tmp_path,
-        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-        prompt="   ",
-    )
-    assert (
-        fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_STATE_SLOT]
-        == transcript_before
-    )
-
-    turn_state.busy = True
-    with pytest.raises(_RerunRequestError):
-        fake_st.button_values["Stop active turn"] = True
-        _STREAMLIT_MODULES.app._render_sidebar_session(
-            root_path=tmp_path,
-            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-            control_state=fake_st.session_state[
-                _STREAMLIT_MODULES.app._CONTROL_STATE_SLOT
-            ],
-            turn_state=turn_state,
-        )
-    fake_st.button_values.clear()
-
-    with pytest.raises(_RerunRequestError):
-        fake_st.button_values["Switch model"] = True
-        monkeypatch.setattr(
-            _STREAMLIT_MODULES.app,
-            "_run_streamlit_command",
-            lambda **kwargs: _STREAMLIT_MODULES.app.ChatCommandOutcome(handled=True),
-        )
-        _STREAMLIT_MODULES.app._render_sidebar_model_controls(
-            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-            control_state=fake_st.session_state[
-                _STREAMLIT_MODULES.app._CONTROL_STATE_SLOT
-            ],
-        )
-    fake_st.button_values.clear()
-
-    turn_state.busy = False
-    turn_state.pending_approval = approval_state
-    turn_state.approval_decision_in_flight = False
-    fake_st.session_state[
-        _STREAMLIT_MODULES.app._CONTROL_STATE_SLOT
-    ].require_approval_for.add(SideEffectClass.LOCAL_READ)
-    with pytest.raises(_RerunRequestError):
-        fake_st.button_values["Deny pending request"] = True
-        _STREAMLIT_MODULES.app._render_sidebar_approval_controls(
-            control_state=fake_st.session_state[
-                _STREAMLIT_MODULES.app._CONTROL_STATE_SLOT
-            ],
-            turn_state=turn_state,
-        )
-    assert (
-        SideEffectClass.LOCAL_READ
-        not in fake_st.session_state[
-            _STREAMLIT_MODULES.app._CONTROL_STATE_SLOT
-        ].require_approval_for
-    )
-    fake_st.button_values.clear()
-
-    _STREAMLIT_MODULES.app._render_sidebar_transcript_export()
-    assert fake_st.download_calls == []
-
-    _STREAMLIT_MODULES.app._render_sidebar_inspector(
-        control_state=fake_st.session_state[_STREAMLIT_MODULES.app._CONTROL_STATE_SLOT],
-        turn_state=turn_state,
-    )
-
-    fake_st.session_state[_STREAMLIT_MODULES.app._TURN_STATE_SLOT] = (
-        _STREAMLIT_MODULES.app.StreamlitTurnState()
-    )
-    with pytest.raises(ValueError):
-        _STREAMLIT_MODULES.app._apply_queued_event(
-            _STREAMLIT_MODULES.app.StreamlitQueuedEvent(
-                kind="bogus", payload=None, turn_number=1
-            )
-        )
-
-
-def test_streamlit_chat_run_app_and_reducer_extra_paths(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    fake_st = _FakeStreamlit(
-        chat_input="/help",
-        checkbox_values={"appearance:dark_mode": False},
-    )
-    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
-    monkeypatch.setattr(_STREAMLIT_MODULES.app.os, "getenv", lambda name: "env-secret")
-
-    submitted_prompts: list[str] = []
-    monkeypatch.setattr(
-        _STREAMLIT_MODULES.app,
-        "_drain_active_turn_events",
-        lambda: "resumed prompt",
-    )
-    monkeypatch.setattr(
-        _STREAMLIT_MODULES.app,
-        "_submit_streamlit_prompt",
-        lambda *, root_path, config, prompt: submitted_prompts.append(prompt),
-    )
-    monkeypatch.setattr(
-        _STREAMLIT_MODULES.app,
-        "_run_streamlit_command",
-        lambda **kwargs: _STREAMLIT_MODULES.app.ChatCommandOutcome(
-            handled=True,
-            notices=[
-                _STREAMLIT_MODULES.app.ChatControlNotice(role="system", text="help")
-            ],
-        ),
-    )
-
-    config = _STREAMLIT_MODULES.package.TextualChatConfig().model_copy(
-        update={
-            "ui": _STREAMLIT_MODULES.package.TextualChatConfig().ui.model_copy(
-                update={"show_footer_help": False}
-            )
-        }
-    )
-    with pytest.raises(_RerunRequestError):
-        _STREAMLIT_MODULES.app.run_streamlit_chat_app(root_path=tmp_path, config=config)
-
-    assert submitted_prompts == ["resumed prompt"]
-    assert not any(
-        "Use /help for controls" in text for text in fake_st.caption_messages
-    )
-    assert (
-        fake_st.session_state[_STREAMLIT_MODULES.app._THEME_MODE_STATE_SLOT] == "light"
-    )
-    assert any("color-scheme: light;" in text for text in fake_st.markdown_messages)
-    transcript = fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_STATE_SLOT]
-    assert transcript[-1].text == "help"
-
-    busy_streamlit = _FakeStreamlit()
-    monkeypatch.setattr(
-        _STREAMLIT_MODULES.app, "_streamlit_module", lambda: busy_streamlit
-    )
-    monkeypatch.setattr(_STREAMLIT_MODULES.app.os, "getenv", lambda name: "env-secret")
-    monkeypatch.setattr(
-        _STREAMLIT_MODULES.app, "_drain_active_turn_events", lambda: None
-    )
-    monkeypatch.setattr(_STREAMLIT_MODULES.app.time, "sleep", lambda seconds: None)
-    _STREAMLIT_MODULES.app._ensure_session_state(
-        tmp_path,
-        _STREAMLIT_MODULES.package.TextualChatConfig(),
-    )
-    busy_streamlit.session_state[_STREAMLIT_MODULES.app._TURN_STATE_SLOT] = (
-        _STREAMLIT_MODULES.app.StreamlitTurnState(busy=True)
-    )
-    with pytest.raises(_RerunRequestError):
-        _STREAMLIT_MODULES.app.run_streamlit_chat_app(
-            root_path=tmp_path,
-            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-        )
-
-    monkeypatch.setattr(
-        "llm_tools.apps.streamlit_chat.app.run_interactive_chat_session_turn",
-        lambda **kwargs: _FakeRunner(
-            [
-                object(),
-                ChatWorkflowResultEvent(
-                    result=ChatWorkflowTurnResult(
-                        status="interrupted",
-                        interruption_reason="Stopped by user.",
-                        new_messages=[
-                            {
-                                "role": "assistant",
-                                "content": "partial answer",
-                                "completion_state": "interrupted",
-                            }
-                        ],
-                    )
-                ),
-            ]
-        ),
-    )
-    outcome = process_streamlit_chat_turn(
-        root_path=tmp_path,
-        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-        provider=object(),
-        session_state=ChatSessionState(),
-        user_message="interrupt",
-    )
-    assert outcome.transcript_entries[-1].assistant_completion_state == "interrupted"
-    assert outcome.transcript_entries[-1].text == "partial answer"
-
-    render_streamlit = _FakeStreamlit()
-    monkeypatch.setattr(
-        _STREAMLIT_MODULES.app, "_streamlit_module", lambda: render_streamlit
-    )
-    _STREAMLIT_MODULES.app._render_transcript_entry(
-        _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(
-            role="assistant",
-            text="partial answer",
-            assistant_completion_state="interrupted",
-        )
-    )
-    _STREAMLIT_MODULES.app._render_transcript_entry(
-        _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(
-            role="assistant",
-            text="final",
-            final_response=ChatFinalResponse(answer="final"),
-        )
-    )
-    assert "Assistant (interrupted)" in render_streamlit.caption_messages
-
-
-def test_streamlit_chat_process_turn_covers_status_inspector_and_interruption_paths(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    approval_state = ChatWorkflowApprovalState(
-        approval_request=ApprovalRequest(
-            approval_id="approval-3",
-            invocation_index=1,
-            request={"tool_name": "read_file", "arguments": {"path": "x"}},
-            tool_name="read_file",
-            tool_version="0.1.0",
-            policy_reason="approval required",
-            requested_at="2026-01-01T00:00:00Z",
-            expires_at="2026-01-01T00:01:00Z",
-        ),
-        tool_name="read_file",
-        redacted_arguments={"path": "x"},
-        policy_reason="approval required",
-    )
-    monkeypatch.setattr(
-        "llm_tools.apps.streamlit_chat.app.run_interactive_chat_session_turn",
-        lambda **kwargs: _FakeRunner(
-            [
-                ChatWorkflowStatusEvent(status="thinking"),
-                ChatWorkflowInspectorEvent(
-                    round_index=1,
-                    kind="tool_execution",
-                    payload={"tool_name": "read_file"},
-                ),
-                ChatWorkflowApprovalEvent(approval=approval_state),
-                ChatWorkflowApprovalResolvedEvent(
-                    approval=approval_state,
-                    resolution="cancelled",
-                ),
-                ChatWorkflowResultEvent(
-                    result=ChatWorkflowTurnResult(
-                        status="interrupted",
-                        interruption_reason="Approval cancelled.",
-                        new_messages=[],
-                    )
-                ),
-            ]
-        ),
-    )
-
-    outcome = process_streamlit_chat_turn(
-        root_path=tmp_path,
-        config=_STREAMLIT_MODULES.package.TextualChatConfig().model_copy(
-            update={
-                "policy": _STREAMLIT_MODULES.package.TextualChatConfig().policy.model_copy(
-                    update={"require_approval_for": {SideEffectClass.LOCAL_READ}}
-                )
-            }
-        ),
-        provider=object(),
-        session_state=ChatSessionState(),
-        user_message="Need approval",
-        approval_resolver=lambda approval: True,
-    )
-
-    assert (
-        outcome.transcript_entries[1].text == "Pending approval request was cancelled."
-    )
-    assert outcome.transcript_entries[-1].text == "Approval cancelled."
-
-
-def test_streamlit_chat_app_propagates_provider_creation_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    fake_st = _FakeStreamlit(chat_input="question")
-    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
-    monkeypatch.setattr(
-        _STREAMLIT_MODULES.app,
-        "create_provider",
-        lambda config, api_key, model_name: (_ for _ in ()).throw(
-            ValueError("provider failed")
-        ),
-    )
-
-    with pytest.raises(ValueError, match="provider failed"):
-        _STREAMLIT_MODULES.app.run_streamlit_chat_app(
-            root_path=tmp_path,
-            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-        )
-
-    transcript = fake_st.session_state[_STREAMLIT_MODULES.app._TRANSCRIPT_STATE_SLOT]
-    assert [entry.role for entry in transcript] == ["system"]
-    assert fake_st.rerun_called is False
 
 
 def test_streamlit_chat_main_and_runner_dispatch_to_app_layer(
@@ -1977,7 +567,7 @@ def test_streamlit_chat_main_and_runner_dispatch_to_app_layer(
     )
 
     package.run_streamlit_chat_app(
-        root_path=Path("."),
+        root_path=None,
         config=package.TextualChatConfig(),
     )
     assert package.main() == 0
@@ -2039,10 +629,7 @@ def test_streamlit_chat_launch_and_script_helpers(
         SimpleNamespace(web=SimpleNamespace(cli=fake_cli)),
     )
 
-    assert (
-        _STREAMLIT_MODULES.app._launch_streamlit_app(["repo", "--config", "chat.yaml"])
-        == 0
-    )
+    assert _STREAMLIT_MODULES.app._launch_streamlit_app(["--config", "chat.yaml"]) == 0
     assert captured[:3] == [
         "streamlit",
         "run",
@@ -2056,20 +643,853 @@ def test_streamlit_chat_launch_and_script_helpers(
 
     config_path = tmp_path / "chat.yaml"
     config_path.write_text("llm:\n  provider: ollama\n", encoding="utf-8")
-    called: list[tuple[Path, object]] = []
+    called: list[tuple[Path | None, object]] = []
     monkeypatch.setattr(
         _STREAMLIT_MODULES.app,
         "run_streamlit_chat_app",
         lambda *, root_path, config: called.append((root_path, config)),
     )
-    _STREAMLIT_MODULES.app._run_streamlit_script(
-        [str(tmp_path), "--config", str(config_path)]
+    _STREAMLIT_MODULES.app._run_streamlit_script(["--config", str(config_path)])
+    assert called[0][0] is None
+
+
+def test_streamlit_chat_helper_defaults_and_model_validators(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _STREAMLIT_MODULES.package.TextualChatConfig()
+    assert _STREAMLIT_MODULES.app._dedupe_preserve([" a ", "", "a", "b "]) == ["a", "b"]
+    assert (
+        _STREAMLIT_MODULES.app._default_model_for_provider(
+            config, _STREAMLIT_MODULES.package.ProviderPreset.OPENAI
+        )
+        == "gpt-4.1-mini"
     )
-    assert called and called[0][0] == tmp_path.resolve()
+    assert (
+        _STREAMLIT_MODULES.app._default_model_for_provider(
+            config, _STREAMLIT_MODULES.package.ProviderPreset.OLLAMA
+        )
+        == config.llm.model_name
+    )
+    assert (
+        _STREAMLIT_MODULES.app._default_base_url_for_provider(
+            config, _STREAMLIT_MODULES.package.ProviderPreset.OPENAI
+        )
+        is None
+    )
+    assert (
+        _STREAMLIT_MODULES.app._default_base_url_for_provider(
+            config, _STREAMLIT_MODULES.package.ProviderPreset.OLLAMA
+        )
+        == config.llm.api_base_url
+    )
+    assert (
+        _STREAMLIT_MODULES.app._filter_enabled_tools_for_root(
+            {"read_file", "run_git_status"}, root_path=None
+        )
+        == set()
+    )
+
+    configured = config.model_copy(
+        update={
+            "policy": config.policy.model_copy(
+                update={"enabled_tools": ["read_file", "run_git_status", "missing"]}
+            )
+        }
+    )
+    assert (
+        _STREAMLIT_MODULES.app._default_enabled_tool_names(configured, root_path=None)
+        == set()
+    )
+
+    runtime = _STREAMLIT_MODULES.app._default_runtime_config(config, root_path=tmp_path)
+    assert runtime.root_path == str(tmp_path)
+    assert "read_file" in runtime.enabled_tools
+    llm_config = _STREAMLIT_MODULES.app._llm_config_for_runtime(config, runtime)
+    assert llm_config.model_name == runtime.model_name
+
+    parser_args = build_parser().parse_args(
+        [str(tmp_path), "--directory", str(tmp_path / "override")]
+    )
+    assert (
+        _STREAMLIT_MODULES.app._resolve_root_argument(parser_args)
+        == (tmp_path / "override").resolve()
+    )
+
+    existing_root, root_error = _STREAMLIT_MODULES.app._resolve_root_text(str(tmp_path))
+    missing_root, missing_error = _STREAMLIT_MODULES.app._resolve_root_text(
+        str(tmp_path / "missing")
+    )
+    file_path = tmp_path / "file.txt"
+    file_path.write_text("x", encoding="utf-8")
+    _, file_error = _STREAMLIT_MODULES.app._resolve_root_text(str(file_path))
+    assert existing_root == str(tmp_path.resolve())
+    assert root_error is None
+    assert missing_root is None and "does not exist" in str(missing_error)
+    assert "not a directory" in str(file_error)
+
+    monkeypatch.setenv(_STREAMLIT_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
+    assert _STREAMLIT_MODULES.app._storage_root() == (tmp_path / "state").resolve()
+    assert (
+        _STREAMLIT_MODULES.app._read_model_file(
+            tmp_path / "absent.json", _STREAMLIT_MODULES.app.StreamlitPreferences
+        )
+        is None
+    )
+
+    validated_runtime = _STREAMLIT_MODULES.app.StreamlitRuntimeConfig(
+        model_name="  demo  ",
+        api_base_url="  ",
+        root_path="  ",
+        enabled_tools=[" read_file ", "search_text"],
+    )
+    assert validated_runtime.model_name == "demo"
+    assert validated_runtime.api_base_url is None
+    assert validated_runtime.root_path is None
+    assert validated_runtime.enabled_tools == ["read_file", "search_text"]
+    with pytest.raises(ValueError):
+        _STREAMLIT_MODULES.app.StreamlitRuntimeConfig(model_name="   ")
+    with pytest.raises(ValueError):
+        _STREAMLIT_MODULES.app.StreamlitRuntimeConfig(enabled_tools=["read_file", " "])
+
+    prefs = _STREAMLIT_MODULES.app.StreamlitPreferences(
+        recent_roots=["  /a  ", ""],
+        recent_models={" ollama ": [" gemma ", " "]},
+        recent_base_urls={" ": ["skip"], "openai": [" https://api.example.com ", " "]},
+    )
+    assert prefs.recent_roots == ["/a"]
+    assert prefs.recent_models == {"ollama": ["gemma"]}
+    assert prefs.recent_base_urls == {"openai": ["https://api.example.com"]}
+
+
+def test_streamlit_chat_build_runner_and_render_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
+
+    captured: dict[str, object] = {}
+
+    def _fake_build_chat_executor(*, policy):
+        captured["policy"] = policy
+        return SimpleNamespace(name="registry"), SimpleNamespace(name="executor")
+
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "build_chat_executor", _fake_build_chat_executor
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "build_chat_system_prompt", lambda **kwargs: "prompt"
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app,
+        "build_chat_context",
+        lambda **kwargs: {"workspace": kwargs["root_path"]},
+    )
+
+    def _fake_run_interactive_chat_session_turn(**kwargs):
+        captured["runner_kwargs"] = kwargs
+        return SimpleNamespace(name="runner")
 
     monkeypatch.setattr(
         _STREAMLIT_MODULES.app,
-        "_launch_streamlit_app",
-        lambda script_args: len(script_args),
+        "run_interactive_chat_session_turn",
+        _fake_run_interactive_chat_session_turn,
     )
-    assert _STREAMLIT_MODULES.app.main(["a", "b"]) == 2
+
+    runtime = _make_runtime(root_path=str(tmp_path))
+    runtime.enabled_tools = ["read_file", "run_git_status", "search_jira"]
+    runtime.allow_network = True
+    runtime.allow_subprocess = True
+    runtime.require_approval_for = {SideEffectClass.LOCAL_WRITE}
+    result = _STREAMLIT_MODULES.app._build_chat_runner(
+        session_id="session-1",
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+        runtime=runtime,
+        provider=SimpleNamespace(),
+        session_state=ChatSessionState(),
+        user_message="hello",
+    )
+    assert result.name == "runner"
+    policy = captured["policy"]
+    assert policy.allow_network is True
+    assert policy.allow_filesystem is True
+    assert policy.allow_subprocess is True
+    assert SideEffectClass.LOCAL_READ in policy.allowed_side_effects
+    assert SideEffectClass.EXTERNAL_READ in policy.allowed_side_effects
+
+    response = ChatFinalResponse(
+        answer="Answer",
+        citations=[
+            {"source_path": "src/app.py", "line_start": 1, "excerpt": "needle = 1"}
+        ],
+        confidence=0.9,
+        uncertainty=["maybe"],
+        missing_information=["more"],
+        follow_up_suggestions=["next"],
+    )
+    export_text = _STREAMLIT_MODULES.app._transcript_export_text(
+        [
+            _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(role="user", text="Hi"),
+            _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(
+                role="assistant", text="Answer", final_response=response
+            ),
+        ]
+    )
+    assert "Hi" in export_text and "Answer" in export_text
+
+    _STREAMLIT_MODULES.app._render_theme(
+        _STREAMLIT_MODULES.app.StreamlitPreferences(theme_mode="light")
+    )
+    _STREAMLIT_MODULES.app._render_brand_header()
+    _STREAMLIT_MODULES.app._render_final_response(response)
+    _STREAMLIT_MODULES.app._render_transcript_entry(
+        _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(role="user", text="Question")
+    )
+    _STREAMLIT_MODULES.app._render_transcript_entry(
+        _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(
+            role="system", text="System note"
+        )
+    )
+    _STREAMLIT_MODULES.app._render_transcript_entry(
+        _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(role="error", text="Problem")
+    )
+    _STREAMLIT_MODULES.app._render_transcript_entry(
+        _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(
+            role="assistant",
+            text="Interrupted output",
+            assistant_completion_state="interrupted",
+        )
+    )
+    _STREAMLIT_MODULES.app._render_transcript_entry(
+        _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(
+            role="assistant", text="Plain answer"
+        )
+    )
+    record = _make_record(root_path=str(tmp_path))
+    record.token_usage = ChatTokenUsage(session_tokens=123, active_context_tokens=45)
+    record.confidence = 0.75
+    _STREAMLIT_MODULES.app._render_summary_chips(record)
+    _STREAMLIT_MODULES.app._render_empty_state(record)
+    record.inspector_state.provider_messages.append(
+        _STREAMLIT_MODULES.app.StreamlitInspectorEntry(
+            label="provider", payload={"x": 1}
+        )
+    )
+    record.runtime.inspector_open = True
+    app_state = _make_app_state(root_path=str(tmp_path))
+    app_state.sessions["session-1"] = record
+    app_state.show_export_for.add("session-1")
+    _STREAMLIT_MODULES.app._render_session_details(app_state, session_id="session-1")
+
+    assert any("llm-tools chat" in text for text in fake_st.markdown_messages)
+    assert "Confidence: 0.90" in fake_st.caption_messages
+    assert "System" in fake_st.caption_messages
+    assert "Error" in fake_st.caption_messages
+    assert any(call[0] == "Download transcript" for call in fake_st.download_calls)
+    assert fake_st.chat_roles.count("assistant") >= 4
+
+
+def test_streamlit_chat_workspace_state_persistence_and_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(_STREAMLIT_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
+    app_state = _make_app_state(root_path=str(tmp_path))
+    record = app_state.sessions["session-1"]
+    record.transcript.extend(
+        [
+            _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(role="user", text="Hi"),
+            _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(
+                role="assistant", text="Hello"
+            ),
+        ]
+    )
+    _STREAMLIT_MODULES.app._remember_runtime_preferences(
+        app_state.preferences, record.runtime
+    )
+    _STREAMLIT_MODULES.app._touch_record(record)
+    orphan = _STREAMLIT_MODULES.app._sessions_dir() / "orphan.json"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_text("{}", encoding="utf-8")
+    _STREAMLIT_MODULES.app._save_workspace_state(app_state)
+    assert not orphan.exists()
+    assert _STREAMLIT_MODULES.app._active_session(app_state) is record
+    assert _STREAMLIT_MODULES.app._turn_state_for(app_state, "missing").busy is False
+
+    session_id = _STREAMLIT_MODULES.app._create_session(
+        app_state, template_runtime=record.runtime
+    )
+    assert session_id == app_state.active_session_id
+    _STREAMLIT_MODULES.app._delete_session(
+        app_state,
+        session_id=session_id,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+        root_path=tmp_path,
+    )
+    assert app_state.session_order
+
+    storage_root = tmp_path / "broken-state"
+    monkeypatch.setenv(_STREAMLIT_MODULES.app._STORAGE_ENV_VAR, str(storage_root))
+    storage_root.mkdir(parents=True, exist_ok=True)
+    _STREAMLIT_MODULES.app._preferences_path().write_text("{bad", encoding="utf-8")
+    _STREAMLIT_MODULES.app._index_path().write_text(
+        _STREAMLIT_MODULES.app.StreamlitSessionIndex(
+            active_session_id="missing", session_order=["missing"]
+        ).model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+    loaded = _STREAMLIT_MODULES.app._load_workspace_state(
+        root_path=None,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+    )
+    assert loaded.active_session_id in loaded.sessions
+    assert any(
+        "Unable to load preferences" in notice for notice in loaded.startup_notices
+    )
+    assert any(
+        "Skipped missing chat session missing." in notice
+        for notice in loaded.startup_notices
+    )
+
+
+def test_streamlit_chat_event_reducers_and_drain(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setenv(_STREAMLIT_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
+    app_state = _make_app_state(root_path=str(tmp_path))
+    approval = ChatWorkflowApprovalState(
+        approval_request=ApprovalRequest(
+            approval_id="approval-1",
+            invocation_index=1,
+            request={"tool_name": "read_file", "arguments": {"path": "a.txt"}},
+            tool_name="read_file",
+            tool_version="0.1.0",
+            policy_reason="approval required",
+            policy_metadata={},
+            requested_at="2026-01-01T00:00:00Z",
+            expires_at="2026-01-01T00:05:00Z",
+        ),
+        tool_name="read_file",
+        redacted_arguments={"path": "a.txt"},
+        policy_reason="approval required",
+        policy_metadata={},
+    )
+    queued_events = [
+        _STREAMLIT_MODULES.app._serialize_workflow_event(
+            ChatWorkflowStatusEvent(status="thinking"),
+            turn_number=1,
+            session_id="session-1",
+        ),
+        _STREAMLIT_MODULES.app._serialize_workflow_event(
+            ChatWorkflowApprovalEvent(approval=approval),
+            turn_number=1,
+            session_id="session-1",
+        ),
+        _STREAMLIT_MODULES.app._serialize_workflow_event(
+            ChatWorkflowApprovalResolvedEvent(approval=approval, resolution="approved"),
+            turn_number=1,
+            session_id="session-1",
+        ),
+        _STREAMLIT_MODULES.app._serialize_workflow_event(
+            ChatWorkflowInspectorEvent(
+                round_index=1, kind="provider_messages", payload=[{"role": "user"}]
+            ),
+            turn_number=1,
+            session_id="session-1",
+        ),
+        _STREAMLIT_MODULES.app._serialize_workflow_event(
+            ChatWorkflowResultEvent(
+                result=ChatWorkflowTurnResult(
+                    status="completed",
+                    new_messages=[],
+                    context_warning="warn",
+                    continuation_reason=None,
+                    final_response=ChatFinalResponse(answer="done", confidence=0.5),
+                    token_usage=ChatTokenUsage(
+                        session_tokens=22, active_context_tokens=10
+                    ),
+                    session_state=ChatSessionState(),
+                )
+            ),
+            turn_number=1,
+            session_id="session-1",
+        ),
+        _STREAMLIT_MODULES.app.StreamlitQueuedEvent(
+            kind="error", payload="boom", turn_number=1, session_id="session-1"
+        ),
+        _STREAMLIT_MODULES.app.StreamlitQueuedEvent(
+            kind="complete", payload=None, turn_number=1, session_id="session-1"
+        ),
+    ]
+    queue_obj = _STREAMLIT_MODULES.app.queue.Queue()
+    for event in queued_events:
+        queue_obj.put(event)
+    turn_state = _STREAMLIT_MODULES.app._turn_state_for(app_state, "session-1")
+    turn_state.busy = False
+    fake_st.session_state[_STREAMLIT_MODULES.app._ACTIVE_TURN_STATE_SLOT] = (
+        _STREAMLIT_MODULES.app.StreamlitActiveTurnHandle(
+            session_id="session-1",
+            runner=_FakeRunnerHandle(),
+            event_queue=queue_obj,
+            thread=_DeadThread(),
+            turn_number=1,
+        )
+    )
+    pending_prompt = _STREAMLIT_MODULES.app._drain_active_turn_events(app_state)
+    record = app_state.sessions["session-1"]
+    assert pending_prompt is None
+    assert any(entry.text == "warn" for entry in record.transcript)
+    assert any(
+        entry.text == "Approved pending approval request."
+        for entry in record.transcript
+    )
+    assert any(entry.text == "boom" for entry in record.transcript)
+    assert record.inspector_state.provider_messages
+    assert record.confidence == 0.5
+    assert fake_st.session_state[_STREAMLIT_MODULES.app._ACTIVE_TURN_STATE_SLOT] is None
+
+    interrupted_event = ChatWorkflowResultEvent(
+        result=ChatWorkflowTurnResult(
+            status="interrupted",
+            new_messages=[
+                ChatMessage(
+                    role="assistant",
+                    content="partial answer",
+                    completion_state="interrupted",
+                )
+            ],
+            interruption_reason="stopped",
+        )
+    )
+    _STREAMLIT_MODULES.app._apply_turn_result(
+        app_state, session_id="session-1", event=interrupted_event
+    )
+    assert record.transcript[-1].assistant_completion_state == "interrupted"
+
+    interrupted_no_message = ChatWorkflowResultEvent(
+        result=ChatWorkflowTurnResult(
+            status="interrupted",
+            new_messages=[],
+            interruption_reason="stopped hard",
+        )
+    )
+    _STREAMLIT_MODULES.app._apply_turn_result(
+        app_state, session_id="session-1", event=interrupted_no_message
+    )
+    assert record.transcript[-1].text == "stopped hard"
+
+
+def test_streamlit_chat_submit_and_command_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_save_workspace_state", lambda app_state: None
+    )
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+    app_state.drafts[session_id] = "/help"
+
+    started: list[str] = []
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "create_provider", lambda *args, **kwargs: "provider"
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app,
+        "_start_streamlit_turn",
+        lambda **kwargs: started.append(kwargs["user_message"]),
+    )
+    cancelled: list[bool] = []
+    original_cancel_active_turn = _STREAMLIT_MODULES.app._cancel_active_turn
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app,
+        "_cancel_active_turn",
+        lambda app_state, session_id, preserve_pending_prompt=False: cancelled.append(
+            preserve_pending_prompt
+        ),
+    )
+
+    turn_state = _STREAMLIT_MODULES.app._turn_state_for(app_state, session_id)
+    _STREAMLIT_MODULES.app._submit_streamlit_prompt(
+        app_state=app_state,
+        session_id=session_id,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+        prompt="   ",
+    )
+    turn_state.busy = True
+    _STREAMLIT_MODULES.app._submit_streamlit_prompt(
+        app_state=app_state,
+        session_id=session_id,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+        prompt="pending",
+    )
+    turn_state.busy = False
+    _STREAMLIT_MODULES.app._submit_streamlit_prompt(
+        app_state=app_state,
+        session_id=session_id,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+        prompt="hello",
+    )
+    assert cancelled == [True]
+    assert started == ["hello"]
+
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_cancel_active_turn", original_cancel_active_turn
+    )
+
+    handle_runner = _FakeRunnerHandle()
+    fake_st.session_state[_STREAMLIT_MODULES.app._ACTIVE_TURN_STATE_SLOT] = (
+        _STREAMLIT_MODULES.app.StreamlitActiveTurnHandle(
+            session_id=session_id,
+            runner=handle_runner,
+            event_queue=_STREAMLIT_MODULES.app.queue.Queue(),
+            thread=_DeadThread(),
+            turn_number=1,
+        )
+    )
+    approval = ChatWorkflowApprovalState(
+        approval_request=ApprovalRequest(
+            approval_id="approval-1",
+            invocation_index=1,
+            request={"tool_name": "read_file", "arguments": {"path": "a.txt"}},
+            tool_name="read_file",
+            tool_version="0.1.0",
+            policy_reason="approval required",
+            policy_metadata={},
+            requested_at="2026-01-01T00:00:00Z",
+            expires_at="2026-01-01T00:05:00Z",
+        ),
+        tool_name="read_file",
+        redacted_arguments={"path": "a.txt"},
+        policy_reason="approval required",
+        policy_metadata={},
+    )
+    turn_state.pending_approval = approval
+    _STREAMLIT_MODULES.app._resolve_active_approval(
+        app_state, session_id=session_id, approved=True
+    )
+    assert handle_runner.approvals == [True]
+    _STREAMLIT_MODULES.app._cancel_active_turn(app_state, session_id=session_id)
+    assert handle_runner.cancelled is True
+
+    control_state = _STREAMLIT_MODULES.app._runtime_to_control_state(
+        _STREAMLIT_MODULES.package.TextualChatConfig(),
+        app_state.sessions[session_id].runtime,
+    )
+    control_state.active_model_name = "replacement"
+    control_state.enabled_tools = {"read_file"}
+    control_state.require_approval_for = {SideEffectClass.LOCAL_READ}
+    control_state.inspector_open = True
+    _STREAMLIT_MODULES.app._apply_control_state(
+        app_state.sessions[session_id].runtime, control_state
+    )
+    assert app_state.sessions[session_id].runtime.model_name == "replacement"
+    assert app_state.sessions[session_id].runtime.inspector_open is True
+    assert _STREAMLIT_MODULES.app._is_command_prompt("/help") is True
+    assert _STREAMLIT_MODULES.app._is_command_prompt("exit") is True
+    assert _STREAMLIT_MODULES.app._is_command_prompt("hello") is False
+
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app,
+        "handle_chat_command",
+        lambda *args, **kwargs: ChatCommandOutcome(
+            handled=True,
+            notices=[ChatControlNotice(role="system", text="notice")],
+            request_copy=True,
+        ),
+    )
+    outcome = _STREAMLIT_MODULES.app._run_streamlit_command(
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+        app_state=app_state,
+        session_id=session_id,
+    )
+    _STREAMLIT_MODULES.app._apply_streamlit_command(
+        app_state, session_id=session_id, outcome=outcome
+    )
+    assert app_state.show_export_for == {session_id}
+    assert app_state.sessions[session_id].transcript[-1].text == "notice"
+
+
+def test_streamlit_chat_provider_controls_tools_popover_and_composer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_save_workspace_state", lambda app_state: None
+    )
+
+    app_state = _make_app_state(root_path=None)
+    session_id = app_state.active_session_id
+    record = app_state.sessions[session_id]
+    fake_provider_change = _FakeStreamlit(
+        selectbox_values={
+            f"provider:{session_id}": _STREAMLIT_MODULES.package.ProviderPreset.OPENAI.value
+        }
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_provider_change
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app,
+        "_available_model_options",
+        lambda *args: (["gpt-4.1-mini"], None),
+    )
+    with pytest.raises(_RerunRequestError):
+        _STREAMLIT_MODULES.app._provider_control_strip(
+            app_state,
+            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+            session_id=session_id,
+        )
+    assert record.runtime.provider is _STREAMLIT_MODULES.package.ProviderPreset.OPENAI
+
+    app_state = _make_app_state(root_path=None)
+    session_id = app_state.active_session_id
+    record = app_state.sessions[session_id]
+    fake_root_apply = _FakeStreamlit(
+        button_values={f"root-apply:{session_id}": True},
+        text_input_values={f"root-input:{session_id}": str(tmp_path)},
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_root_apply
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app,
+        "_available_model_options",
+        lambda *args: (["gemma4:26b"], None),
+    )
+    with pytest.raises(_RerunRequestError):
+        _STREAMLIT_MODULES.app._provider_control_strip(
+            app_state,
+            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+            session_id=session_id,
+        )
+    assert record.runtime.root_path == str(tmp_path.resolve())
+    assert record.transcript[-1].text.startswith("Workspace root updated")
+
+    fake_tools = _FakeStreamlit(
+        button_values={f"tools-all:{session_id}": True},
+    )
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_tools)
+    with pytest.raises(_RerunRequestError):
+        _STREAMLIT_MODULES.app._render_tools_popover(
+            app_state,
+            session_id=session_id,
+            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+        )
+    assert "search_jira" in record.runtime.enabled_tools
+    assert record.runtime.allow_network is True
+    assert record.runtime.allow_subprocess is True
+
+    fake_tools_toggle = _FakeStreamlit(
+        checkbox_values={
+            f"allow-network:{session_id}": False,
+            f"allow-filesystem:{session_id}": True,
+            f"allow-subprocess:{session_id}": False,
+            f"approval:{session_id}:local_write": True,
+            f"tool:{session_id}:search_jira": False,
+        }
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_tools_toggle
+    )
+    _STREAMLIT_MODULES.app._render_tools_popover(
+        app_state,
+        session_id=session_id,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+    )
+    assert SideEffectClass.LOCAL_WRITE in record.runtime.require_approval_for
+    assert "search_jira" not in record.runtime.enabled_tools
+
+    busy_state = _make_app_state(root_path=str(tmp_path))
+    busy_session = busy_state.active_session_id
+    busy_turn = _STREAMLIT_MODULES.app._turn_state_for(busy_state, busy_session)
+    busy_turn.busy = True
+    fake_stop = _FakeStreamlit(button_values={f"stop:{busy_session}": True})
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_stop)
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_cancel_active_turn", lambda *args, **kwargs: None
+    )
+    with pytest.raises(_RerunRequestError):
+        _STREAMLIT_MODULES.app._render_status_and_composer(
+            busy_state,
+            session_id=busy_session,
+            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+        )
+
+    command_state = _make_app_state(root_path=str(tmp_path))
+    command_session = command_state.active_session_id
+    fake_command = _FakeStreamlit(
+        button_values={f"send:{command_session}": True},
+        text_input_values={f"composer:{command_session}": "/help"},
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_command
+    )
+    command_called: list[str] = []
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app,
+        "_run_streamlit_command",
+        lambda **kwargs: (
+            command_called.append("command") or ChatCommandOutcome(handled=True)
+        ),
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_apply_streamlit_command", lambda *args, **kwargs: None
+    )
+    with pytest.raises(_RerunRequestError):
+        _STREAMLIT_MODULES.app._render_status_and_composer(
+            command_state,
+            session_id=command_session,
+            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+        )
+    assert command_called == ["command"]
+
+    prompt_state = _make_app_state(root_path=str(tmp_path))
+    prompt_session = prompt_state.active_session_id
+    fake_prompt = _FakeStreamlit(
+        button_values={f"send:{prompt_session}": True},
+        text_input_values={f"composer:{prompt_session}": "hello there"},
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_prompt
+    )
+    submitted: list[str] = []
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app,
+        "_submit_streamlit_prompt",
+        lambda **kwargs: submitted.append(kwargs["prompt"]),
+    )
+    with pytest.raises(_RerunRequestError):
+        _STREAMLIT_MODULES.app._render_status_and_composer(
+            prompt_state,
+            session_id=prompt_session,
+            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+        )
+    assert submitted == ["hello there"]
+
+
+def test_chat_runtime_provider_factory_and_executor_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _STREAMLIT_MODULES.package.TextualChatConfig().llm
+    openai_calls: list[dict[str, object]] = []
+    ollama_calls: list[dict[str, object]] = []
+    custom_calls: list[dict[str, object]] = []
+
+    class _FakeProvider:
+        def __init__(self, **kwargs: object) -> None:
+            custom_calls.append(dict(kwargs))
+            self.kind = "custom-provider"
+
+        @classmethod
+        def for_openai(cls, **kwargs: object) -> str:
+            openai_calls.append(dict(kwargs))
+            return "openai-provider"
+
+        @classmethod
+        def for_ollama(cls, **kwargs: object) -> str:
+            ollama_calls.append(dict(kwargs))
+            return "ollama-provider"
+
+    monkeypatch.setattr(_CHAT_RUNTIME_MODULE, "OpenAICompatibleProvider", _FakeProvider)
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+
+    openai_config = config.model_copy(
+        update={
+            "provider": _STREAMLIT_MODULES.package.ProviderPreset.OPENAI,
+            "api_key_env_var": "OPENAI_API_KEY",
+            "api_base_url": None,
+        }
+    )
+    assert (
+        _CHAT_RUNTIME_MODULE.create_provider(
+            openai_config, api_key=None, model_name="gpt-4.1-mini"
+        )
+        == "openai-provider"
+    )
+    assert openai_calls[0]["api_key"] == "env-key"
+
+    ollama_config = config.model_copy(
+        update={
+            "provider": _STREAMLIT_MODULES.package.ProviderPreset.OLLAMA,
+            "api_base_url": None,
+        }
+    )
+    assert (
+        _CHAT_RUNTIME_MODULE.create_provider(
+            ollama_config, api_key=None, model_name="gemma4:26b"
+        )
+        == "ollama-provider"
+    )
+    assert ollama_calls[0]["base_url"] == "http://127.0.0.1:11434/v1"
+    assert ollama_calls[0]["api_key"] == "ollama"
+
+    custom_config = config.model_copy(
+        update={
+            "provider": _STREAMLIT_MODULES.package.ProviderPreset.CUSTOM_OPENAI_COMPATIBLE,
+            "api_base_url": "https://example.invalid/v1",
+            "api_key_env_var": "OPENAI_API_KEY",
+        }
+    )
+    custom_provider = _CHAT_RUNTIME_MODULE.create_provider(
+        custom_config, api_key="provided", model_name="custom-model"
+    )
+    assert custom_provider.kind == "custom-provider"
+    assert custom_calls[0]["api_key"] == "provided"
+    with pytest.raises(ValueError, match="require api_base_url"):
+        _CHAT_RUNTIME_MODULE.create_provider(
+            custom_config.model_copy(update={"api_base_url": None}),
+            api_key=None,
+            model_name="custom-model",
+        )
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(_CHAT_RUNTIME_MODULE, "build_chat_registry", lambda: "registry")
+
+    def _fake_workflow_executor(**kwargs):
+        captured["executor_kwargs"] = kwargs
+        return "executor"
+
+    monkeypatch.setattr(
+        _CHAT_RUNTIME_MODULE,
+        "WorkflowExecutor",
+        _fake_workflow_executor,
+    )
+    registry, executor = _CHAT_RUNTIME_MODULE.build_chat_executor()
+    assert registry == "registry"
+    assert executor == "executor"
+    policy = captured["executor_kwargs"]["policy"]
+    assert policy.allow_network is False
+    assert policy.allow_filesystem is True
+    assert policy.allow_subprocess is False
+
+
+def test_chat_runtime_available_tool_names_and_context_limits(tmp_path: Path) -> None:
+    names = _CHAT_RUNTIME_MODULE.build_available_tool_names()
+    specs = _CHAT_RUNTIME_MODULE.build_available_tool_specs()
+    assert names
+    assert names == set(specs)
+
+    config = _STREAMLIT_MODULES.package.TextualChatConfig().model_copy(
+        update={
+            "session": _STREAMLIT_MODULES.package.TextualChatConfig().session.model_copy(
+                update={"max_context_tokens": 25}
+            )
+        }
+    )
+    context = _CHAT_RUNTIME_MODULE.build_chat_context(
+        root_path=tmp_path,
+        config=config,
+        app_name="streamlit-chat",
+    )
+    assert context.workspace == str(tmp_path)
+    assert context.metadata["tool_limits"]["max_read_file_chars"] == 100
+    assert context.metadata["source_filters"] == config.source_filters.model_dump(
+        mode="json"
+    )

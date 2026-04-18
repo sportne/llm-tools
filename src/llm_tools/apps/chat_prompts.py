@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from llm_tools.tool_api import SideEffectClass, ToolRegistry
+from llm_tools.tool_api import ToolRegistry
 from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import ChatFinalResponse
 
@@ -45,6 +45,7 @@ def build_chat_system_prompt(
     tool_registry: ToolRegistry,
     tool_limits: ToolLimits,
     enabled_tool_names: set[str] | None = None,
+    workspace_enabled: bool = True,
 ) -> str:
     """Return the interactive repository-chat system prompt."""
     tool_catalog = json.dumps(
@@ -61,8 +62,6 @@ def build_chat_system_prompt(
             }
             for tool in tool_registry.list_registered_tools()
             if enabled_tool_names is None or tool.spec.name in enabled_tool_names
-            if tool.spec.side_effects
-            in {SideEffectClass.NONE, SideEffectClass.LOCAL_READ}
         ],
         indent=2,
         sort_keys=True,
@@ -96,6 +95,11 @@ def build_chat_system_prompt(
         f"- {field_name}: {FIELD_GUIDANCE.get(field_name, DEFAULT_FIELD_GUIDANCE)}"
         for field_name in ChatFinalResponse.model_fields
     )
+    workspace_rules = (
+        "- A workspace root is configured for this session. Workspace-relative paths must stay inside it.\n"
+        if workspace_enabled
+        else "- No workspace root is configured for this session. Do not call local workspace tools unless a root is selected later.\n"
+    )
     return (
         f"{CHAT_SYSTEM_PROMPT_PREAMBLE}\n\n"
         "Available tools:\n"
@@ -110,7 +114,8 @@ def build_chat_system_prompt(
         "Tool usage examples:\n"
         f"{usage_examples}\n\n"
         "Operational rules:\n"
-        "- path must never be blank. Use path='.' to operate on the entire configured root.\n"
+        f"{workspace_rules}"
+        "- path must never be blank. Use path='.' to operate on the entire configured root when a workspace root is configured.\n"
         "- list_directory expects a directory path.\n"
         "- Use recursive=true and optional max_depth for tree-style listings.\n"
         "- search_text accepts either a directory path or a single file path.\n"
@@ -121,6 +126,8 @@ def build_chat_system_prompt(
         "- Prefer find_files or search_text before broad file reads.\n"
         "- Use get_file_info before read_file when a file may be large.\n"
         "- Use start_char and end_char for partial reads when a full file is unnecessary.\n"
+        "- Git tools operate on a workspace directory and require subprocess access.\n"
+        "- Jira tools require the configured Jira environment variables when enabled.\n"
         "- If a tool call fails because of its arguments or target path, do not repeat the same failing call.\n"
         "- Answer conservatively and cite the evidence you actually have.\n\n"
         "Relevant limits:\n"

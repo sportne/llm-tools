@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from os import getenv
 from pathlib import Path
 from uuid import uuid4
@@ -16,7 +17,12 @@ from llm_tools.tool_api import (
     ToolSpec,
 )
 from llm_tools.tool_api.redaction import RedactionConfig
-from llm_tools.tools import register_filesystem_tools, register_text_tools
+from llm_tools.tools import (
+    register_atlassian_tools,
+    register_filesystem_tools,
+    register_git_tools,
+    register_text_tools,
+)
 from llm_tools.workflow_api import WorkflowExecutor
 
 
@@ -59,7 +65,9 @@ def build_chat_registry() -> ToolRegistry:
     """Return the full generic tool registry available to chat apps."""
     registry = ToolRegistry()
     register_filesystem_tools(registry)
+    register_git_tools(registry)
     register_text_tools(registry)
+    register_atlassian_tools(registry)
     return registry
 
 
@@ -97,7 +105,7 @@ def build_available_tool_specs() -> dict[str, ToolSpec]:
 
 def build_chat_context(
     *,
-    root_path: Path,
+    root_path: Path | None,
     config: TextualChatConfig,
     app_name: str,
 ) -> ToolContext:
@@ -112,7 +120,8 @@ def build_chat_context(
     )
     return ToolContext(
         invocation_id=f"{app_name}-{uuid4()}",
-        workspace=str(root_path),
+        workspace=str(root_path) if root_path is not None else None,
+        env=dict(os.environ),
         metadata={
             "source_filters": config.source_filters.model_dump(mode="json"),
             "tool_limits": effective_tool_limits.model_dump(mode="json"),
