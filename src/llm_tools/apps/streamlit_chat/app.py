@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import os
 import queue
 import shutil
@@ -79,6 +80,7 @@ _WIDGET_OVERRIDES_STATE_SLOT = "llm_tools_streamlit_chat_widget_overrides"
 _STREAMLIT_BROWSER_USAGE_STATS_FLAG = "--browser.gatherUsageStats=false"
 _STREAMLIT_TOOLBAR_MODE_FLAG = "--client.toolbarMode=minimal"
 _POLL_INTERVAL_SECONDS = 1.0
+_TURN_STALL_NOTICE_SECONDS = 15.0
 _DEFAULT_THEME_MODE: Literal["dark", "light"] = "dark"
 _STORAGE_ENV_VAR = "LLM_TOOLS_STREAMLIT_STATE_DIR"
 _SESSION_STORAGE_DIR_NAME = "sessions"
@@ -104,6 +106,16 @@ class StreamlitTurnState:
     pending_interrupt_draft: str | None = None
     confidence: float | None = None
     cancelling: bool = False
+    started_at_monotonic: float | None = None
+    last_event_at_monotonic: float | None = None
+
+
+def _default_mode_strategy_for_provider(
+    provider: ProviderPreset,
+) -> ProviderModeStrategy:
+    if provider is ProviderPreset.OLLAMA:
+        return ProviderModeStrategy.MD_JSON
+    return ProviderModeStrategy.AUTO
 
 
 @dataclass(slots=True)
@@ -375,6 +387,7 @@ def _default_runtime_config(
 ) -> StreamlitRuntimeConfig:
     return StreamlitRuntimeConfig(
         provider=config.llm.provider,
+        provider_mode_strategy=_default_mode_strategy_for_provider(config.llm.provider),
         model_name=config.llm.model_name,
         api_base_url=config.llm.api_base_url,
         root_path=str(root_path) if root_path is not None else None,
@@ -538,6 +551,16 @@ def _load_workspace_state(
         if record is None:
             startup_notices.append(f"Skipped missing chat session {session_id}.")
             continue
+        if (
+            record.runtime.provider is ProviderPreset.OLLAMA
+            and record.runtime.provider_mode_strategy is ProviderModeStrategy.AUTO
+        ):
+            record.runtime.provider_mode_strategy = _default_mode_strategy_for_provider(
+                record.runtime.provider
+            )
+            startup_notices.append(
+                f"Updated session {session_id} to Ollama prompt-text mode for better compatibility."
+            )
         sessions[session_id] = record
         session_order.append(session_id)
 
@@ -766,16 +789,29 @@ def _streamlit_theme_css(
   --llm-tools-accent-soft: {palette["accent_soft"]};
   --llm-tools-shadow: {palette["shadow"]};
 }}
-.stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {{
+.stApp, [data-testid="stAppViewContainer"] {{
   background: {palette["gradient"]};
   color: var(--llm-tools-text);
+}}
+[data-testid="stHeader"] {{
+  background: color-mix(in srgb, var(--llm-tools-page) 84%, transparent);
+  color: var(--llm-tools-text);
+  height: auto;
+  min-height: 1.9rem;
+}}
+[data-testid="stHeader"] .stAppToolbar {{
+  min-height: 1.9rem;
+  height: 1.9rem;
+  padding-top: 0.05rem;
+  padding-bottom: 0.05rem;
 }}
 section[data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child {{
   background: linear-gradient(180deg, var(--llm-tools-sidebar) 0%, var(--llm-tools-page) 100%);
   color: var(--llm-tools-text);
 }}
-[data-testid="stAppViewBlockContainer"] {{
-  padding-top: 0.75rem;
+.stMainBlockContainer,
+.stMain .block-container {{
+  padding-top: 0.85rem !important;
 }}
 .stApp p,
 .stApp label,
@@ -814,9 +850,20 @@ section[data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child {{
 .stApp [data-baseweb="tab"],
 .stApp .stButton > button,
 .stApp [data-testid="stDownloadButton"] > button,
-.stApp [data-testid="stFormSubmitButton"] > button {{
+.stApp [data-testid="stFormSubmitButton"] > button,
+.stApp [data-testid="stCode"],
+.stApp [data-testid="stCodeBlock"],
+.stApp .stCode {{
   background: var(--llm-tools-surface);
   color: var(--llm-tools-text);
+  border: 1px solid var(--llm-tools-border);
+  border-radius: 0.85rem;
+}}
+.stApp [data-testid="stCode"] pre,
+.stApp [data-testid="stCodeBlock"] pre,
+.stApp .stCode pre {{
+  background: color-mix(in srgb, var(--llm-tools-surface-alt) 96%, transparent) !important;
+  color: var(--llm-tools-text) !important;
   border: 1px solid var(--llm-tools-border);
   border-radius: 0.85rem;
 }}
@@ -864,7 +911,10 @@ section[data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child {{
 .llm-tools-session-meta {{ color: var(--llm-tools-muted); font-size: 0.78rem; margin-top: 0.2rem; }}
 .llm-tools-sidebar-title {{ font-weight: 700; letter-spacing: -0.02em; font-size: 1.2rem; margin-bottom: 0.25rem; }}
 .llm-tools-status-text {{ font-size: 0.92rem; font-weight: 600; }}
+.llm-tools-status-text--animated::after {{ content: '...'; display: inline-block; width: 1ch; overflow: hidden; white-space: nowrap; vertical-align: bottom; animation: llm-tools-ellipsis 1.15s steps(1, end) infinite; }}
 .llm-tools-status-label {{ color: var(--llm-tools-muted); margin-right: 0.35rem; }}
+.llm-tools-status-hint {{ color: var(--llm-tools-muted); font-size: 0.82rem; margin-top: -0.15rem; margin-bottom: 0.65rem; }}
+@keyframes llm-tools-ellipsis {{ 0%, 24% {{ width: 1ch; }} 25%, 49% {{ width: 2ch; }} 50%, 74% {{ width: 3ch; }} 75%, 100% {{ width: 1ch; }} }}
 .llm-tools-settings-title {{ font-size: 1.05rem; font-weight: 700; letter-spacing: -0.02em; margin: 0; color: var(--llm-tools-text); }}
 .llm-tools-settings-meta {{ color: var(--llm-tools-muted); font-size: 0.78rem; margin-bottom: 0.5rem; }}
 .stApp [data-testid="InputInstructions"] {{ pointer-events: none; }}
@@ -1197,6 +1247,8 @@ def _apply_turn_error(
     turn_state.approval_decision_in_flight = False
     turn_state.pending_interrupt_draft = None
     turn_state.cancelling = False
+    turn_state.started_at_monotonic = None
+    turn_state.last_event_at_monotonic = None
     _touch_record(record)
 
 
@@ -1263,6 +1315,8 @@ def _apply_turn_result(
     turn_state.status_text = ""
     turn_state.busy = False
     turn_state.cancelling = False
+    turn_state.started_at_monotonic = None
+    turn_state.last_event_at_monotonic = None
     pending_prompt = turn_state.pending_interrupt_draft
     turn_state.pending_interrupt_draft = None
     _touch_record(record)
@@ -1283,12 +1337,14 @@ def _apply_queued_event(
     turn_state = _turn_state_for(app_state, queued_event.session_id)
     inspector_state = record.inspector_state
     if queued_event.kind == "status":
+        turn_state.last_event_at_monotonic = time.monotonic()
         if turn_state.cancelling:
             return None
         status_event = ChatWorkflowStatusEvent.model_validate(queued_event.payload)
         turn_state.status_text = status_event.status
         return None
     if queued_event.kind == "approval_requested":
+        turn_state.last_event_at_monotonic = time.monotonic()
         approval_event = ChatWorkflowApprovalEvent.model_validate(queued_event.payload)
         turn_state.pending_approval = approval_event.approval
         turn_state.approval_decision_in_flight = False
@@ -1307,6 +1363,7 @@ def _apply_queued_event(
         _touch_record(record)
         return None
     if queued_event.kind == "approval_resolved":
+        turn_state.last_event_at_monotonic = time.monotonic()
         approval_resolved_event = ChatWorkflowApprovalResolvedEvent.model_validate(
             queued_event.payload
         )
@@ -1330,6 +1387,7 @@ def _apply_queued_event(
         _touch_record(record)
         return None
     if queued_event.kind == "inspector":
+        turn_state.last_event_at_monotonic = time.monotonic()
         inspector_event = ChatWorkflowInspectorEvent.model_validate(
             queued_event.payload
         )
@@ -1346,6 +1404,7 @@ def _apply_queued_event(
         _touch_record(record)
         return None
     if queued_event.kind == "result":
+        turn_state.last_event_at_monotonic = time.monotonic()
         result_event = ChatWorkflowResultEvent.model_validate(queued_event.payload)
         return _apply_turn_result(
             app_state,
@@ -1353,6 +1412,7 @@ def _apply_queued_event(
             event=result_event,
         )
     if queued_event.kind == "error":
+        turn_state.last_event_at_monotonic = time.monotonic()
         _apply_turn_error(
             app_state,
             session_id=queued_event.session_id,
@@ -1360,6 +1420,7 @@ def _apply_queued_event(
         )
         return None
     if queued_event.kind == "complete":
+        turn_state.last_event_at_monotonic = time.monotonic()
         if turn_state.busy and turn_state.cancelling:
             pending_prompt = turn_state.pending_interrupt_draft
             turn_state.busy = False
@@ -1383,20 +1444,29 @@ def _drain_active_turn_events(app_state: StreamlitWorkspaceState) -> str | None:
     if not isinstance(handle, StreamlitActiveTurnHandle):
         return None
     pending_prompt: str | None = None
+    observed_event = False
     while True:
         try:
             queued_event = handle.event_queue.get_nowait()
         except queue.Empty:
             break
+        observed_event = True
         next_prompt = _apply_queued_event(app_state, queued_event)
         if next_prompt is not None:
             pending_prompt = next_prompt
     turn_state = _turn_state_for(app_state, handle.session_id)
-    if (
-        not handle.thread.is_alive()
-        and handle.event_queue.empty()
-        and not turn_state.busy
-    ):
+    if observed_event and turn_state.last_event_at_monotonic is None:
+        turn_state.last_event_at_monotonic = time.monotonic()
+    if not handle.thread.is_alive() and handle.event_queue.empty():
+        if turn_state.busy:
+            _apply_turn_error(
+                app_state,
+                session_id=handle.session_id,
+                error_message=(
+                    "The turn ended before a final response was recorded. "
+                    "If this happens with Ollama, switch Instructor mode to Prompt text and retry."
+                ),
+            )
         st.session_state[_ACTIVE_TURN_STATE_SLOT] = None
     _save_workspace_state(app_state)
     return pending_prompt
@@ -1432,12 +1502,15 @@ def _start_streamlit_turn(  # pragma: no cover
     )
     thread = threading.Thread(target=_worker_run_turn, args=(handle,), daemon=True)
     handle.thread = thread
+    turn_started_at = time.monotonic()
     turn_state.active_turn_number = turn_number
     turn_state.busy = True
     turn_state.status_text = "thinking"
     turn_state.pending_approval = None
     turn_state.approval_decision_in_flight = False
     turn_state.cancelling = False
+    turn_state.started_at_monotonic = turn_started_at
+    turn_state.last_event_at_monotonic = turn_started_at
     if record.summary.title == "New chat" and not any(
         entry.role == "user" for entry in record.transcript
     ):
@@ -2006,11 +2079,15 @@ def _provider_control_strip(  # pragma: no cover  # noqa: C901
         )
         if selected_provider != runtime.provider.value:
             runtime.provider = ProviderPreset(selected_provider)
+            runtime.provider_mode_strategy = _default_mode_strategy_for_provider(
+                runtime.provider
+            )
             runtime.api_base_url = _default_base_url_for_provider(
                 config, runtime.provider
             )
             runtime.model_name = _default_model_for_provider(config, runtime.provider)
             _queue_widget_override(provider_key, runtime.provider.value)
+            _queue_widget_override(mode_key, runtime.provider_mode_strategy.value)
             _queue_widget_override(model_key, runtime.model_name)
             _queue_widget_override(base_url_key, runtime.api_base_url or "")
             _remember_runtime_preferences(app_state.preferences, runtime)
@@ -2039,6 +2116,10 @@ def _provider_control_strip(  # pragma: no cover  # noqa: C901
         if runtime.provider_mode_strategy is ProviderModeStrategy.AUTO:
             st.caption(
                 "Auto mode falls back in order: tools, structured response, prompt text."
+            )
+        elif runtime.provider is ProviderPreset.OLLAMA:
+            st.caption(
+                "Prompt text mode is the most reliable default for Ollama-backed sessions."
             )
 
         model_options, model_notice = _available_model_options(
@@ -2601,15 +2682,46 @@ def _render_status_and_composer(  # pragma: no cover
     turn_state = _turn_state_for(app_state, session_id)
     status_cols = st.columns([6, 1, 1, 1])
     status_text = turn_state.status_text or "idle"
+    animated_status_class = (
+        " llm-tools-status-text--animated"
+        if turn_state.busy and turn_state.pending_approval is None
+        else ""
+    )
     status_cols[0].markdown(
         (
             "<div class='llm-tools-status-line'>"
             "<span class='llm-tools-status-label'>Status:</span>"
-            f"<span class='llm-tools-status-text'>{status_text}</span>"
+            f"<span class='llm-tools-status-text{animated_status_class}'>"
+            f"{html.escape(status_text)}"
+            "</span>"
             "</div>"
         ),
         unsafe_allow_html=True,
     )
+    if turn_state.busy:
+        started_at = turn_state.started_at_monotonic
+        elapsed_seconds = (
+            int(max(0.0, time.monotonic() - started_at))
+            if started_at is not None
+            else None
+        )
+        status_hint = "Working on your request."
+        if elapsed_seconds is not None:
+            status_hint = f"Working on your request ({elapsed_seconds}s elapsed)."
+        if (
+            turn_state.pending_approval is None
+            and turn_state.last_event_at_monotonic is not None
+            and time.monotonic() - turn_state.last_event_at_monotonic
+            >= _TURN_STALL_NOTICE_SECONDS
+        ):
+            status_hint = (
+                "Still waiting on the model provider to finish. "
+                "If this keeps happening with Ollama, switch Instructor mode to Prompt text and retry."
+            )
+        status_cols[0].markdown(
+            f"<div class='llm-tools-status-hint'>{html.escape(status_hint)}</div>",
+            unsafe_allow_html=True,
+        )
     if turn_state.pending_approval is not None:
         if status_cols[1].button(
             "Approve",

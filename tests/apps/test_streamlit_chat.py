@@ -457,6 +457,10 @@ def test_streamlit_chat_initial_render_uses_new_title_and_no_root_defaults(
     active = app_state.sessions[app_state.active_session_id]
     assert active.runtime.root_path is None
     assert active.runtime.enabled_tools == []
+    assert (
+        active.runtime.provider_mode_strategy
+        is _STREAMLIT_MODULES.app.ProviderModeStrategy.MD_JSON
+    )
 
 
 def test_streamlit_chat_visible_transcript_hides_hidden_notices_only(
@@ -780,6 +784,12 @@ def test_streamlit_chat_theme_css_covers_widget_surfaces() -> None:
     assert '[data-baseweb="tab"]' in css
     assert '[data-testid="stDownloadButton"] > button' in css
     assert '[data-testid="stFormSubmitButton"] > button' in css
+    assert '[data-testid="stCode"]' in css
+    assert '[data-testid="stCodeBlock"]' in css
+    assert '[data-testid="stHeader"]' in css
+    assert ".stAppToolbar" in css
+    assert ".stMainBlockContainer" in css
+    assert ".stMain .block-container" in css
     assert '[data-testid="InputInstructions"]' in css
     assert "llm-tools-status-line" in css
 
@@ -864,6 +874,10 @@ def test_streamlit_chat_helper_defaults_and_model_validators(
     runtime = _STREAMLIT_MODULES.app._default_runtime_config(config, root_path=tmp_path)
     assert runtime.root_path == str(tmp_path)
     assert "read_file" in runtime.enabled_tools
+    assert (
+        runtime.provider_mode_strategy
+        is _STREAMLIT_MODULES.app.ProviderModeStrategy.MD_JSON
+    )
     llm_config = _STREAMLIT_MODULES.app._llm_config_for_runtime(config, runtime)
     assert llm_config.model_name == runtime.model_name
 
@@ -1261,6 +1275,43 @@ def test_streamlit_chat_event_reducers_and_drain(
         app_state, session_id="session-1", event=interrupted_no_message
     )
     assert record.transcript[-1].text == "stopped hard"
+
+
+def test_streamlit_chat_dead_worker_surfaces_error_and_clears_busy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setenv(_STREAMLIT_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
+
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+    turn_state = _STREAMLIT_MODULES.app._turn_state_for(app_state, session_id)
+    turn_state.busy = True
+    turn_state.status_text = "thinking"
+    turn_state.started_at_monotonic = 100.0
+    turn_state.last_event_at_monotonic = 100.0
+
+    fake_st.session_state[_STREAMLIT_MODULES.app._ACTIVE_TURN_STATE_SLOT] = (
+        _STREAMLIT_MODULES.app.StreamlitActiveTurnHandle(
+            session_id=session_id,
+            runner=_FakeRunnerHandle(),
+            event_queue=_STREAMLIT_MODULES.app.queue.Queue(),
+            thread=_DeadThread(),
+            turn_number=1,
+        )
+    )
+
+    pending_prompt = _STREAMLIT_MODULES.app._drain_active_turn_events(app_state)
+
+    assert pending_prompt is None
+    assert turn_state.busy is False
+    assert turn_state.status_text == ""
+    assert turn_state.started_at_monotonic is None
+    assert turn_state.last_event_at_monotonic is None
+    assert fake_st.session_state[_STREAMLIT_MODULES.app._ACTIVE_TURN_STATE_SLOT] is None
+    assert "Prompt text" in app_state.sessions[session_id].transcript[-1].text
 
 
 def test_streamlit_chat_composer_clears_on_next_render_without_mutating_widget_state(
