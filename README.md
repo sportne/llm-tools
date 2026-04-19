@@ -67,6 +67,10 @@ git worktrees at `~/.venvs/llm-tools`. Re-run `make install-dev` from the
 checkout you are actively using so the shared environment's editable install
 points at that tree.
 
+Native Microsoft Project (`.mpp`/`.mpt`) reads now use MPXJ. That dependency is
+installed with the base package, and a working Java runtime must be available
+wherever those file reads are expected to work.
+
 To install the optional Textual apps:
 
 ```bash

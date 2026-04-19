@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 DirectoryEntryType = Literal["file", "directory", "symlink", "other"]
-FileReadKind = Literal["text", "markitdown", "unsupported"]
+FileReadKind = Literal["text", "markitdown", "project", "unsupported"]
 FileInfoStatus = Literal["ok", "unsupported", "error"]
 FileReadStatus = Literal["ok", "too_large", "unsupported", "error"]
 
