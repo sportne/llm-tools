@@ -12,6 +12,7 @@ from llm_tools.harness_api.models import (
     HarnessStopReason,
     HarnessTurn,
     TaskLifecycleStatus,
+    TurnApprovalAuditRecord,
     TurnDecisionAction,
 )
 from llm_tools.tool_api import ErrorCode, ToolContext
@@ -315,17 +316,6 @@ def build_turn_trace(
     pending_approval_id = _canonical_pending_approval_id(turn)
 
     verification_status_by_task_id = dict(turn.verification_status_by_task_id)
-    if (
-        not verification_status_by_task_id
-        and context is not None
-        and tasks_state is not None
-    ):
-        selected_task_ids = set(turn.selected_task_ids)
-        verification_status_by_task_id = {
-            task.task_id: task.verification.status.value
-            for task in tasks_state.tasks
-            if task.task_id in selected_task_ids
-        }
     decision = turn.decision
     return HarnessTurnTrace(
         turn_index=turn.turn_index,
@@ -450,7 +440,7 @@ def _should_prepend_pending_approval(turn: HarnessTurn) -> bool:
 
 
 def _build_pending_approval_trace(
-    approval_request: ApprovalRequest,
+    approval_request: TurnApprovalAuditRecord,
 ) -> HarnessInvocationTrace:
     return HarnessInvocationTrace(
         invocation_index=approval_request.invocation_index,

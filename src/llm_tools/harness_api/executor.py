@@ -15,6 +15,7 @@ from llm_tools.harness_api.models import (
     HarnessStopReason,
     HarnessTurn,
     PendingApprovalRecord,
+    TurnApprovalAuditRecord,
     TurnDecision,
     TurnDecisionAction,
     rehydrate_pending_approval_context,
@@ -392,7 +393,9 @@ class HarnessExecutor:
                     started_at=started_at,
                     selected_task_ids=list(selected_task_ids),
                     workflow_result=workflow_result,
-                    pending_approval_request=approval_request,
+                    pending_approval_request=TurnApprovalAuditRecord.from_approval_request(
+                        approval_request
+                    ),
                     verification_status_by_task_id=self._turn_verification_statuses(
                         retry_state,
                         selected_task_ids,
@@ -577,7 +580,9 @@ class HarnessExecutor:
                     started_at=started_at,
                     selected_task_ids=list(selected_task_ids),
                     workflow_result=workflow_result,
-                    pending_approval_request=approval_request,
+                    pending_approval_request=TurnApprovalAuditRecord.from_approval_request(
+                        approval_request
+                    ),
                     verification_status_by_task_id=self._turn_verification_statuses(
                         retry_state,
                         selected_task_ids,

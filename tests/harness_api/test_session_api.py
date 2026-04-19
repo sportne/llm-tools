@@ -167,7 +167,15 @@ def test_session_service_handles_approval_wait_then_approve(tmp_path: Path) -> N
     )
 
     assert waiting.resumed.disposition.value == "waiting_for_approval"
+    assert waiting.snapshot.state.turns[0].pending_approval_request is not None
+    assert "request" not in waiting.snapshot.state.turns[
+        0
+    ].pending_approval_request.model_dump(mode="json")
     assert approved.snapshot.state.session.stop_reason is HarnessStopReason.COMPLETED
+    assert approved.snapshot.state.turns[0].pending_approval_request is not None
+    assert "request" not in approved.snapshot.state.turns[
+        0
+    ].pending_approval_request.model_dump(mode="json")
 
     inspection = service.inspect_session(
         HarnessSessionInspectRequest(
@@ -227,6 +235,10 @@ def test_session_service_handles_approval_deny(tmp_path: Path) -> None:
         denied.snapshot.state.session.stop_reason is HarnessStopReason.APPROVAL_DENIED
     )
     assert denied.snapshot.state.tasks[0].status is TaskLifecycleStatus.BLOCKED
+    assert denied.snapshot.state.turns[0].pending_approval_request is not None
+    assert "request" not in denied.snapshot.state.turns[
+        0
+    ].pending_approval_request.model_dump(mode="json")
 
     inspection = service.inspect_session(
         HarnessSessionInspectRequest(
@@ -519,6 +531,61 @@ def test_session_service_inspect_preserves_turn_verification_history(
     assert inspection.snapshot.artifacts.trace.turns[
         0
     ].verification_status_by_task_id == {"task-1": "not_run"}
+
+
+def test_session_service_inspect_omits_historical_verification_when_snapshot_missing(
+    tmp_path: Path,
+) -> None:
+    service = _service([ParsedModelResponse(final_response="done")], workspace=tmp_path)
+    created = service.create_session(
+        HarnessSessionCreateRequest(
+            title="Canonical verification omission",
+            intent="Do not backfill historical verification state.",
+            budget_policy=BudgetPolicy(max_turns=3),
+            session_id="session-canonical-verification-omission",
+        )
+    )
+    result = service.run_session(
+        HarnessSessionRunRequest(session_id=created.session_id)
+    )
+
+    mutated = result.snapshot.model_copy(
+        update={
+            "state": result.snapshot.state.model_copy(
+                update={
+                    "tasks": [
+                        result.snapshot.state.tasks[0].model_copy(
+                            update={
+                                "verification": VerificationOutcome(
+                                    status=VerificationStatus.PASSED,
+                                    checked_at="2026-01-01T00:00:00Z",
+                                )
+                            }
+                        )
+                    ],
+                    "turns": [
+                        result.snapshot.state.turns[0].model_copy(
+                            update={"verification_status_by_task_id": {}}
+                        )
+                    ],
+                },
+                deep=True,
+            )
+        },
+        deep=True,
+    )
+    service._store._snapshots[result.snapshot.session_id] = mutated
+
+    inspection = service.inspect_session(
+        HarnessSessionInspectRequest(session_id=result.snapshot.session_id)
+    )
+
+    assert inspection.summary.verification_status_counts == {"passed": 1}
+    assert inspection.snapshot.artifacts.trace is not None
+    assert (
+        inspection.snapshot.artifacts.trace.turns[0].verification_status_by_task_id
+        == {}
+    )
 
 
 def test_session_service_list_rebuilds_summary_from_canonical_state(

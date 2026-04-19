@@ -193,29 +193,33 @@ def test_session_trace_validators_reject_duplicate_turn_indices() -> None:
 
 
 def test_build_turn_trace_preserves_pending_approval_without_workflow_result() -> None:
-    trace = build_turn_trace(
-        turn=HarnessTurn(
-            turn_index=1,
-            started_at="2026-01-01T00:00:00Z",
-            selected_task_ids=["task-1"],
-            pending_approval_request=ApprovalRequest(
-                approval_id="approval-1",
-                invocation_index=1,
-                request=ToolInvocationRequest(
-                    tool_name="list_directory",
-                    arguments={"path": "."},
-                ),
+    turn = HarnessTurn(
+        turn_index=1,
+        started_at="2026-01-01T00:00:00Z",
+        selected_task_ids=["task-1"],
+        pending_approval_request=ApprovalRequest(
+            approval_id="approval-1",
+            invocation_index=1,
+            request=ToolInvocationRequest(
                 tool_name="list_directory",
-                tool_version="0.1.0",
-                policy_reason="approval required",
-                requested_at="2026-01-01T00:00:00Z",
-                expires_at="2026-01-01T01:00:00Z",
+                arguments={"path": "."},
             ),
+            tool_name="list_directory",
+            tool_version="0.1.0",
+            policy_reason="approval required",
+            requested_at="2026-01-01T00:00:00Z",
+            expires_at="2026-01-01T01:00:00Z",
         ),
+    )
+
+    trace = build_turn_trace(
+        turn=turn,
         context=None,
         tasks_state=None,
     )
 
+    assert turn.pending_approval_request is not None
+    assert "request" not in turn.pending_approval_request.model_dump(mode="json")
     assert trace.pending_approval_id == "approval-1"
     assert trace.workflow_outcome_statuses == [
         WorkflowInvocationStatus.APPROVAL_REQUESTED

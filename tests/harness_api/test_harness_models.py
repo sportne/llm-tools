@@ -20,6 +20,7 @@ from llm_tools.harness_api import (
     TaskLifecycleStatus,
     TaskOrigin,
     TaskRecord,
+    TurnApprovalAuditRecord,
     TurnDecision,
     TurnDecisionAction,
     VerificationEvidenceRecord,
@@ -78,6 +79,33 @@ def _pending_approval_record() -> PendingApprovalRecord:
         base_context=ToolContext(invocation_id="turn-1"),
         pending_index=1,
     )
+
+
+def test_harness_turn_coerces_legacy_pending_approval_request_payload() -> None:
+    approval_request = _pending_approval_record().approval_request
+
+    turn = HarnessTurn.model_validate(
+        {
+            "turn_index": 1,
+            "started_at": "2026-01-01T00:00:00Z",
+            "selected_task_ids": ["task-1"],
+            "pending_approval_request": approval_request.model_dump(mode="python"),
+        }
+    )
+
+    assert (
+        turn.pending_approval_request
+        == TurnApprovalAuditRecord.from_approval_request(approval_request)
+    )
+    assert turn.pending_approval_request is not None
+    assert turn.pending_approval_request.model_dump(mode="json") == {
+        "approval_id": "approval-1",
+        "invocation_index": 1,
+        "tool_name": "write_file",
+        "tool_version": "0.1.0",
+        "policy_reason": "approval required",
+        "policy_metadata": {},
+    }
 
 
 def test_pending_approval_context_helpers_scrub_and_rehydrate() -> None:

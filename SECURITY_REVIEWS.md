@@ -252,9 +252,11 @@ validation.
   typed corruption handling, and corrupt files are skipped during listing.
 - `Addressed`: negative regressions now cover tampered summaries, tampered
   traces, corrupt session files, and purge-propagation rendering paths.
-- `Addressed`: a follow-up fix restored approval-request audit history and
-  preserved per-turn verification snapshots in canonical trace rebuilds so the
-  normalized observability view does not rewrite history after resume.
+- `Addressed`: a follow-up fix restored approval-request audit history,
+  preserved per-turn verification snapshots in canonical trace rebuilds, and
+  replaced turn-level raw approval payload retention with minimized approval
+  audit metadata so normalized turn history does not rewrite history or retain
+  blocked invocation arguments after resume.
 
 ### 2026-04-19: architecture and security test coverage review
 

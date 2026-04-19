@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from enum import Enum
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from llm_tools.harness_api.verification import (
     NoProgressSignal,
@@ -57,6 +57,31 @@ class TurnDecisionAction(str, Enum):  # noqa: UP042
     CONTINUE = "continue"
     SELECT_TASKS = "select_tasks"
     STOP = "stop"
+
+
+class TurnApprovalAuditRecord(BaseModel):
+    """Minimal persisted approval metadata retained for turn-history audit."""
+
+    approval_id: str = Field(min_length=1)
+    invocation_index: int = Field(ge=1)
+    tool_name: str = Field(min_length=1)
+    tool_version: str = Field(min_length=1)
+    policy_reason: str
+    policy_metadata: dict[str, object] = Field(default_factory=dict)
+
+    @classmethod
+    def from_approval_request(
+        cls,
+        approval_request: ApprovalRequest,
+    ) -> TurnApprovalAuditRecord:
+        return cls(
+            approval_id=approval_request.approval_id,
+            invocation_index=approval_request.invocation_index,
+            tool_name=approval_request.tool_name,
+            tool_version=approval_request.tool_version,
+            policy_reason=approval_request.policy_reason,
+            policy_metadata=dict(approval_request.policy_metadata),
+        )
 
 
 class BudgetPolicy(BaseModel):
@@ -280,11 +305,33 @@ class HarnessTurn(BaseModel):
     started_at: str
     selected_task_ids: list[str] = Field(default_factory=list)
     workflow_result: WorkflowTurnResult | None = None
-    pending_approval_request: ApprovalRequest | None = None
+    pending_approval_request: TurnApprovalAuditRecord | None = None
     verification_status_by_task_id: dict[str, str] = Field(default_factory=dict)
     decision: TurnDecision | None = None
     no_progress_signals: list[NoProgressSignal] = Field(default_factory=list)
     ended_at: str | None = None
+
+    @field_validator("pending_approval_request", mode="before")
+    @classmethod
+    def coerce_pending_approval_request(
+        cls,
+        value: object,
+    ) -> object:
+        if value is None or isinstance(value, TurnApprovalAuditRecord):
+            return value
+        if isinstance(value, ApprovalRequest):
+            return TurnApprovalAuditRecord.from_approval_request(value)
+        if isinstance(value, dict):
+            allowed_keys = {
+                "approval_id",
+                "invocation_index",
+                "tool_name",
+                "tool_version",
+                "policy_reason",
+                "policy_metadata",
+            }
+            return {key: value[key] for key in allowed_keys if key in value}
+        return value
 
     @model_validator(mode="after")
     def validate_turn_timestamps(self) -> HarnessTurn:
