@@ -141,7 +141,7 @@ trust boundaries.
   amplification risks, parsing edge cases, and content-based denial of service.
 - [x] `git`: subprocess construction, cwd and root control, argument injection
   resistance, output handling, and approval expectations.
-- [ ] `gitlab` and `atlassian`: credential handling, request scoping,
+- [x] `gitlab` and `atlassian`: credential handling, request scoping,
   pagination and data exposure, network error handling, and unsafe remote
   content assumptions.
 - [ ] Cross-check every built-in tool spec against actual side effects,
@@ -150,6 +150,8 @@ trust boundaries.
   updates are merged.
 - [x] Landed hardening: git tool subprocess, output-retention, and integration
   safety updates are merged.
+- [x] Review log: GitLab and Atlassian tool-family security review documented
+  in `SECURITY_REVIEWS.md` on 2026-04-19.
 
 ### [~] Phase 3: Model mediation path (`llm_adapters`, `llm_providers`, `workflow_api`)
 
