@@ -124,8 +124,10 @@ class _FakeStreamlit:
         self.checkbox_values = checkbox_values or {}
         self.selectbox_values = selectbox_values or {}
         self.sidebar = _FakeBlock(self)
+        self.components = SimpleNamespace(v1=SimpleNamespace(html=self._component_html))
         self.page_config_kwargs: list[dict[str, object]] = []
         self.markdown_messages: list[str] = []
+        self.component_html_calls: list[tuple[str, int | None, int | None]] = []
         self.caption_messages: list[str] = []
         self.warning_messages: list[str] = []
         self.error_messages: list[str] = []
@@ -141,6 +143,17 @@ class _FakeStreamlit:
     def markdown(self, text: str, unsafe_allow_html: bool = False) -> None:
         del unsafe_allow_html
         self.markdown_messages.append(text)
+
+    def _component_html(
+        self,
+        html: str,
+        *,
+        height: int | None = None,
+        width: int | None = None,
+        scrolling: bool = False,
+    ) -> None:
+        del scrolling
+        self.component_html_calls.append((html, height, width))
 
     def caption(self, text: str) -> None:
         self.caption_messages.append(text)
@@ -545,6 +558,32 @@ def test_streamlit_chat_theme_state_applies_before_sidebar_and_persists_panel(
     )
     assert reloaded.preferences.theme_mode == "light"
     assert reloaded.preferences.settings_panel_open is True
+
+
+def test_streamlit_chat_injects_connection_error_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setenv(_STREAMLIT_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
+
+    _STREAMLIT_MODULES.app.run_streamlit_chat_app(
+        root_path=None,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+    )
+
+    assert fake_st.component_html_calls
+    html, height, width = fake_st.component_html_calls[0]
+    assert "Is the llm-tools chat client still running?" in html
+    assert "If you accidentally stopped the chat client" in html
+    assert "Relaunch the chat client command you normally use." not in html
+    assert (
+        "If you accidentally stopped Streamlit, just restart it in your terminal:"
+        not in html
+    )
+    assert height == 0
+    assert width == 0
 
 
 def test_streamlit_chat_persists_multiple_sessions_and_deletes_them(
