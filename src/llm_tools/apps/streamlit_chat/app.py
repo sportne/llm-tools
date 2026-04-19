@@ -1,4 +1,4 @@
-"""Streamlit app shell for interactive repository chat."""
+"""Streamlit app shell for interactive chat."""
 
 from __future__ import annotations
 
@@ -9,9 +9,12 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
+from uuid import uuid4
 
 from llm_tools.apps.chat_config import (
     ProviderPreset,
@@ -24,11 +27,7 @@ from llm_tools.apps.chat_controls import (
     ChatControlState,
     ModelCatalogOutcome,
     ModelSwitchOutcome,
-    build_chat_control_state,
-    build_startup_message,
-    build_tool_state_payload,
     handle_chat_command,
-    resolve_default_enabled_tools,
 )
 from llm_tools.apps.chat_presentation import (
     format_citation,
@@ -38,13 +37,22 @@ from llm_tools.apps.chat_presentation import (
 )
 from llm_tools.apps.chat_prompts import build_chat_system_prompt
 from llm_tools.apps.chat_runtime import (
-    build_available_tool_names,
     build_available_tool_specs,
     build_chat_context,
     build_chat_executor,
     create_provider,
 )
-from llm_tools.tool_api import SideEffectClass, ToolPolicy
+from llm_tools.apps.streamlit_chat.models import (
+    StreamlitInspectorEntry,
+    StreamlitInspectorState,
+    StreamlitPersistedSessionRecord,
+    StreamlitPreferences,
+    StreamlitRuntimeConfig,
+    StreamlitSessionIndex,
+    StreamlitSessionSummary,
+    StreamlitTranscriptEntry,
+)
+from llm_tools.tool_api import SideEffectClass, ToolPolicy, ToolSpec
 from llm_tools.workflow_api import (
     ChatFinalResponse,
     ChatSessionState,
@@ -60,66 +68,21 @@ from llm_tools.workflow_api import (
 )
 from llm_tools.workflow_api.chat_session import ChatSessionTurnRunner, ModelTurnProvider
 
-_TRANSCRIPT_STATE_SLOT = "llm_tools_streamlit_chat_transcript"  # noqa: S105
-_SESSION_STATE_SLOT = "llm_tools_streamlit_chat_session_state"  # noqa: S105
-_TOKEN_USAGE_STATE_SLOT = "llm_tools_streamlit_chat_token_usage"  # noqa: S105
-_API_KEY_STATE_SLOT = "llm_tools_streamlit_chat_api_key"  # noqa: S105
-_API_SECRET_STATE_SLOT = "llm_tools_streamlit_chat_api_secret"  # noqa: S105
-_CONTROL_STATE_SLOT = "llm_tools_streamlit_chat_control_state"  # noqa: S105
-_TURN_STATE_SLOT = "llm_tools_streamlit_chat_turn_state"  # noqa: S105
-_INSPECTOR_STATE_SLOT = "llm_tools_streamlit_chat_inspector_state"  # noqa: S105
-_ACTIVE_TURN_STATE_SLOT = "llm_tools_streamlit_chat_active_turn"  # noqa: S105
-_TRANSCRIPT_EXPORT_STATE_SLOT = "llm_tools_streamlit_chat_transcript_export"  # noqa: S105
-_THEME_MODE_STATE_SLOT = "llm_tools_streamlit_chat_theme_mode"  # noqa: S105
-
-_POLL_INTERVAL_SECONDS = 0.05
-_DEFAULT_THEME_MODE: Literal["dark", "light"] = "dark"
+_APP_STATE_SLOT = "llm_tools_streamlit_chat_app_state"
+_ACTIVE_TURN_STATE_SLOT = "llm_tools_streamlit_chat_active_turn"
+_SECRET_CACHE_STATE_SLOT = "llm_tools_streamlit_chat_secret_cache"  # noqa: S105
 _STREAMLIT_BROWSER_USAGE_STATS_FLAG = "--browser.gatherUsageStats=false"
 _STREAMLIT_TOOLBAR_MODE_FLAG = "--client.toolbarMode=minimal"
-
-
-@dataclass(slots=True)
-class StreamlitTranscriptEntry:
-    """One rendered transcript entry persisted in Streamlit session state."""
-
-    role: Literal["user", "assistant", "system", "error"]
-    text: str
-    final_response: ChatFinalResponse | None = None
-    assistant_completion_state: Literal["complete", "interrupted"] = "complete"
-
-    @property
-    def transcript_text(self) -> str:
-        if self.final_response is not None:
-            return format_transcript_text(
-                "assistant", format_final_response(self.final_response)
-            )
-        return format_transcript_text(
-            self.role,
-            self.text,
-            assistant_completion_state=self.assistant_completion_state,
-        )
-
-
-@dataclass(slots=True)
-class StreamlitInspectorEntry:
-    """One persisted inspector log entry."""
-
-    label: str
-    payload: object
-
-
-@dataclass(slots=True)
-class StreamlitInspectorState:
-    """Inspector/debug state for the Streamlit chat session."""
-
-    provider_messages: list[StreamlitInspectorEntry] = field(default_factory=list)
-    parsed_responses: list[StreamlitInspectorEntry] = field(default_factory=list)
-    tool_executions: list[StreamlitInspectorEntry] = field(default_factory=list)
+_POLL_INTERVAL_SECONDS = 0.05
+_DEFAULT_THEME_MODE: Literal["dark", "light"] = "dark"
+_STORAGE_ENV_VAR = "LLM_TOOLS_STREAMLIT_STATE_DIR"
+_SESSION_STORAGE_DIR_NAME = "sessions"
+_ROOT_SENTINEL = "__none__"
 
 
 @dataclass(slots=True)
 class StreamlitTurnState:
-    """Mutable UI state for the active or last-completed turn."""
+    """Mutable UI state for one chat session."""
 
     busy: bool = False
     status_text: str = ""
@@ -145,12 +108,14 @@ class StreamlitQueuedEvent:
     ]
     payload: object
     turn_number: int
+    session_id: str
 
 
 @dataclass(slots=True)
 class StreamlitActiveTurnHandle:
     """Background runner handle stored in Streamlit session state."""
 
+    session_id: str
     runner: ChatSessionTurnRunner
     event_queue: queue.Queue[StreamlitQueuedEvent]
     thread: threading.Thread
@@ -166,38 +131,29 @@ class StreamlitTurnOutcome:
     token_usage: ChatTokenUsage | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class StreamlitThemeTokens:
-    """Semantic colors and surfaces for Streamlit chat chrome."""
+@dataclass(slots=True)
+class StreamlitWorkspaceState:
+    """In-memory Streamlit app state layered over persisted session files."""
 
-    mode: Literal["dark", "light"]
-    page_background: str
-    sidebar_background: str
-    surface_background: str
-    surface_elevated_background: str
-    widget_background: str
-    widget_background_hover: str
-    widget_border: str
-    widget_border_focus: str
-    text_color: str
-    muted_text_color: str
-    accent_color: str
-    accent_color_hover: str
-    icon_color: str
-    icon_muted_color: str
-    composer_shell_background: str
-    composer_input_background: str
-    shadow_color: str
+    sessions: dict[str, StreamlitPersistedSessionRecord]
+    session_order: list[str]
+    active_session_id: str
+    preferences: StreamlitPreferences
+    turn_states: dict[str, StreamlitTurnState] = field(default_factory=dict)
+    drafts: dict[str, str] = field(default_factory=dict)
+    show_export_for: set[str] = field(default_factory=set)
+    startup_notices: list[str] = field(default_factory=list)
 
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI parser shared by the bootstrap and script entrypoints."""
     parser = argparse.ArgumentParser(
         prog="llm-tools-streamlit-chat",
-        description="Streamlit directory-scoped chat over repository files.",
+        description="Streamlit chat over workspace tools.",
     )
-    parser.add_argument("directory", type=Path)
-    parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("directory", nargs="?", type=Path)
+    parser.add_argument("--directory", dest="directory_override", type=Path)
+    parser.add_argument("--config", type=Path)
     parser.add_argument(
         "--provider",
         choices=[preset.value for preset in ProviderPreset],
@@ -219,7 +175,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _resolve_chat_config(args: argparse.Namespace) -> TextualChatConfig:
-    base_config = load_textual_chat_config(args.config)
+    base_config = (
+        load_textual_chat_config(args.config)
+        if args.config is not None
+        else TextualChatConfig()
+    )
     raw = base_config.model_dump(mode="python")
     raw.setdefault("llm", {})
     raw.setdefault("session", {})
@@ -255,24 +215,27 @@ def _resolve_chat_config(args: argparse.Namespace) -> TextualChatConfig:
     return TextualChatConfig.model_validate(raw)
 
 
-def resolve_enabled_tool_names(config: TextualChatConfig) -> set[str]:
-    """Return the session-visible fixed read-only tool set."""
-    return resolve_default_enabled_tools(
-        config,
-        available_tool_names=build_available_tool_names(),
+def _resolve_root_argument(args: argparse.Namespace) -> Path | None:
+    candidate = args.directory_override or args.directory
+    if candidate is None:
+        return None
+    resolved_candidate = (
+        candidate if isinstance(candidate, Path) else Path(str(candidate))
     )
+    return resolved_candidate.expanduser().resolve()
 
 
-def _streamlit_module() -> Any:
+def _streamlit_module() -> Any:  # pragma: no cover
     import streamlit as streamlit
 
     return streamlit
 
 
-def _streamlit_page_config() -> dict[str, object]:
+def _page_config() -> dict[str, object]:  # pragma: no cover
     return {
-        "page_title": "llm-tools Streamlit Chat",
+        "page_title": "llm-tools chat",
         "layout": "wide",
+        "initial_sidebar_state": "expanded",
         "menu_items": {
             "Get help": None,
             "Report a bug": None,
@@ -281,440 +244,703 @@ def _streamlit_page_config() -> dict[str, object]:
     }
 
 
-def _streamlit_theme_mode() -> Literal["dark", "light"]:
+def _all_tool_specs() -> dict[str, ToolSpec]:
+    return build_available_tool_specs()
+
+
+def _workspace_tool_names() -> set[str]:
+    return {
+        name
+        for name, spec in _all_tool_specs().items()
+        if spec.requires_filesystem or spec.requires_subprocess
+    }
+
+
+def _safe_local_read_tool_names() -> set[str]:
+    return {
+        name
+        for name, spec in _all_tool_specs().items()
+        if spec.side_effects is SideEffectClass.LOCAL_READ
+        and spec.requires_filesystem
+        and not spec.requires_subprocess
+        and not spec.requires_network
+    }
+
+
+def _tool_group(spec: ToolSpec) -> str:
+    tags = set(spec.tags)
+    if "git" in tags:
+        return "Git"
+    if "atlassian" in tags or "jira" in tags:
+        return "Atlassian"
+    if "filesystem" in tags:
+        return "Filesystem"
+    if "text" in tags:
+        return "Text"
+    return "Other"
+
+
+def _dedupe_preserve(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        cleaned = item.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+    return result
+
+
+def _default_model_for_provider(
+    base_config: TextualChatConfig,
+    provider: ProviderPreset,
+) -> str:
+    if base_config.llm.provider is provider:
+        return base_config.llm.model_name
+    if provider is ProviderPreset.OPENAI:
+        return "gpt-4.1-mini"
+    if provider is ProviderPreset.OLLAMA:
+        return "gemma4:26b"
+    return "gpt-4.1-mini"
+
+
+def _default_base_url_for_provider(
+    base_config: TextualChatConfig,
+    provider: ProviderPreset,
+) -> str | None:
+    if base_config.llm.provider is provider:
+        return base_config.llm.api_base_url
+    if provider is ProviderPreset.OLLAMA:
+        return "http://127.0.0.1:11434/v1"
+    return None
+
+
+def _filter_enabled_tools_for_root(
+    enabled_tools: set[str],
+    *,
+    root_path: str | None,
+) -> set[str]:
+    if root_path is not None:
+        return set(enabled_tools)
+    return enabled_tools.difference(_workspace_tool_names())
+
+
+def _default_enabled_tool_names(
+    config: TextualChatConfig,
+    *,
+    root_path: Path | None,
+) -> set[str]:
+    configured = config.policy.enabled_tools
+    if configured is not None:
+        return _filter_enabled_tools_for_root(
+            set(configured).intersection(_all_tool_specs()),
+            root_path=str(root_path) if root_path is not None else None,
+        )
+    default_tools = _safe_local_read_tool_names() if root_path is not None else set()
+    return _filter_enabled_tools_for_root(
+        default_tools,
+        root_path=str(root_path) if root_path is not None else None,
+    )
+
+
+def resolve_enabled_tool_names(
+    config: TextualChatConfig,
+    *,
+    root_path: Path | None = None,
+) -> set[str]:
+    """Return the default enabled tool names for a new Streamlit session."""
+    return _default_enabled_tool_names(config, root_path=root_path)
+
+
+def _default_runtime_config(
+    config: TextualChatConfig,
+    *,
+    root_path: Path | None,
+) -> StreamlitRuntimeConfig:
+    return StreamlitRuntimeConfig(
+        provider=config.llm.provider,
+        model_name=config.llm.model_name,
+        api_base_url=config.llm.api_base_url,
+        root_path=str(root_path) if root_path is not None else None,
+        enabled_tools=sorted(_default_enabled_tool_names(config, root_path=root_path)),
+        require_approval_for=set(config.policy.require_approval_for),
+        allow_network=False,
+        allow_filesystem=True,
+        allow_subprocess=False,
+        inspector_open=config.ui.inspector_open_by_default,
+    )
+
+
+def _llm_config_for_runtime(
+    config: TextualChatConfig,
+    runtime: StreamlitRuntimeConfig,
+) -> Any:
+    return config.llm.model_copy(
+        update={
+            "provider": runtime.provider,
+            "model_name": runtime.model_name,
+            "api_base_url": runtime.api_base_url,
+        }
+    )
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _storage_root() -> Path:
+    override = os.getenv(_STORAGE_ENV_VAR)
+    if override:
+        return Path(override).expanduser().resolve()
+    return (Path.home() / ".llm-tools" / "chat" / "streamlit").resolve()
+
+
+def _sessions_dir() -> Path:
+    return _storage_root() / _SESSION_STORAGE_DIR_NAME
+
+
+def _preferences_path() -> Path:
+    return _storage_root() / "preferences.json"
+
+
+def _index_path() -> Path:
+    return _storage_root() / "index.json"
+
+
+def _session_path(session_id: str) -> Path:
+    return _sessions_dir() / f"{session_id}.json"
+
+
+def _read_model_file(path: Path, model_type: Any) -> Any | None:
+    if not path.exists():
+        return None
+    return model_type.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def _sync_summary_fields(record: StreamlitPersistedSessionRecord) -> None:
+    record.summary.root_path = record.runtime.root_path
+    record.summary.provider = record.runtime.provider
+    record.summary.model_name = record.runtime.model_name
+    record.summary.message_count = len(
+        [entry for entry in record.transcript if entry.role in {"user", "assistant"}]
+    )
+
+
+def _touch_record(record: StreamlitPersistedSessionRecord) -> None:
+    _sync_summary_fields(record)
+    record.summary.updated_at = _now_iso()
+
+
+def _remember_runtime_preferences(
+    preferences: StreamlitPreferences,
+    runtime: StreamlitRuntimeConfig,
+) -> None:
+    if runtime.root_path is not None:
+        preferences.recent_roots = _dedupe_preserve(
+            [runtime.root_path, *preferences.recent_roots]
+        )[:12]
+    provider_key = runtime.provider.value
+    preferences.recent_models[provider_key] = _dedupe_preserve(
+        [runtime.model_name, *preferences.recent_models.get(provider_key, [])]
+    )[:12]
+    if runtime.api_base_url:
+        preferences.recent_base_urls[provider_key] = _dedupe_preserve(
+            [runtime.api_base_url, *preferences.recent_base_urls.get(provider_key, [])]
+        )[:12]
+
+
+def _new_session_record(
+    session_id: str,
+    runtime: StreamlitRuntimeConfig,
+) -> StreamlitPersistedSessionRecord:
+    now = _now_iso()
+    summary = StreamlitSessionSummary(
+        session_id=session_id,
+        title="New chat",
+        created_at=now,
+        updated_at=now,
+        root_path=runtime.root_path,
+        provider=runtime.provider,
+        model_name=runtime.model_name,
+        message_count=0,
+    )
+    return StreamlitPersistedSessionRecord(
+        summary=summary,
+        runtime=runtime,
+    )
+
+
+def _load_workspace_state(
+    *,
+    root_path: Path | None,
+    config: TextualChatConfig,
+) -> StreamlitWorkspaceState:
+    startup_notices: list[str] = []
+    try:
+        preferences = _read_model_file(_preferences_path(), StreamlitPreferences)
+    except Exception as exc:
+        preferences = None
+        startup_notices.append(f"Unable to load preferences: {exc}")
+    if preferences is None:
+        preferences = StreamlitPreferences(theme_mode=_DEFAULT_THEME_MODE)
+    try:
+        index = _read_model_file(_index_path(), StreamlitSessionIndex)
+    except Exception as exc:
+        index = None
+        startup_notices.append(f"Unable to load session index: {exc}")
+    if index is None:
+        index = StreamlitSessionIndex()
+
+    sessions: dict[str, StreamlitPersistedSessionRecord] = {}
+    session_order: list[str] = []
+    for session_id in index.session_order:
+        try:
+            record = _read_model_file(
+                _session_path(session_id),
+                StreamlitPersistedSessionRecord,
+            )
+        except Exception as exc:
+            startup_notices.append(
+                f"Skipped unreadable chat session {session_id}: {exc}"
+            )
+            continue
+        if record is None:
+            startup_notices.append(f"Skipped missing chat session {session_id}.")
+            continue
+        sessions[session_id] = record
+        session_order.append(session_id)
+
+    if not session_order:
+        session_id = f"session-{uuid4().hex[:12]}"
+        runtime = _default_runtime_config(config, root_path=root_path)
+        record = _new_session_record(session_id, runtime)
+        sessions[session_id] = record
+        session_order = [session_id]
+
+    active_session_id = index.active_session_id or session_order[0]
+    if active_session_id not in sessions:
+        active_session_id = session_order[0]
+
+    turn_states = {session_id: StreamlitTurnState() for session_id in session_order}
+    return StreamlitWorkspaceState(
+        sessions=sessions,
+        session_order=session_order,
+        active_session_id=active_session_id,
+        preferences=preferences,
+        turn_states=turn_states,
+        startup_notices=startup_notices,
+    )
+
+
+def _save_workspace_state(app_state: StreamlitWorkspaceState) -> None:
+    storage_root = _storage_root()
+    sessions_dir = _sessions_dir()
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    storage_root.mkdir(parents=True, exist_ok=True)
+
+    for session_id in app_state.session_order:
+        if session_id not in app_state.sessions:
+            continue
+        record = app_state.sessions[session_id]
+        _sync_summary_fields(record)
+        _session_path(session_id).write_text(
+            record.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+
+    index = StreamlitSessionIndex(
+        active_session_id=app_state.active_session_id,
+        session_order=list(app_state.session_order),
+        summaries=[
+            app_state.sessions[session_id].summary
+            for session_id in app_state.session_order
+            if session_id in app_state.sessions
+        ],
+    )
+    _index_path().write_text(index.model_dump_json(indent=2), encoding="utf-8")
+    _preferences_path().write_text(
+        app_state.preferences.model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+
+    active_ids = set(app_state.session_order)
+    for candidate in sessions_dir.glob("*.json"):
+        if candidate.stem not in active_ids:
+            candidate.unlink(missing_ok=True)
+
+
+def _active_session(
+    app_state: StreamlitWorkspaceState,
+) -> StreamlitPersistedSessionRecord:
+    return app_state.sessions[app_state.active_session_id]
+
+
+def _turn_state_for(
+    app_state: StreamlitWorkspaceState,
+    session_id: str,
+) -> StreamlitTurnState:
+    return app_state.turn_states.setdefault(session_id, StreamlitTurnState())
+
+
+def _delete_session(
+    app_state: StreamlitWorkspaceState,
+    *,
+    session_id: str,
+    config: TextualChatConfig,
+    root_path: Path | None,
+) -> None:
     st = _streamlit_module()
-    if st.session_state.get(_THEME_MODE_STATE_SLOT) == "light":
-        return "light"
-    return "dark"
+    handle = st.session_state.get(_ACTIVE_TURN_STATE_SLOT)
+    if (
+        isinstance(handle, StreamlitActiveTurnHandle)
+        and handle.session_id == session_id
+    ):
+        handle.runner.cancel()
+        st.session_state[_ACTIVE_TURN_STATE_SLOT] = None
+    app_state.sessions.pop(session_id, None)
+    app_state.turn_states.pop(session_id, None)
+    app_state.drafts.pop(session_id, None)
+    app_state.show_export_for.discard(session_id)
+    app_state.session_order = [
+        item for item in app_state.session_order if item != session_id
+    ]
+    _session_path(session_id).unlink(missing_ok=True)
+    if not app_state.session_order:
+        template_runtime = _default_runtime_config(config, root_path=root_path)
+        new_id = f"session-{uuid4().hex[:12]}"
+        app_state.sessions[new_id] = _new_session_record(new_id, template_runtime)
+        app_state.session_order = [new_id]
+        app_state.turn_states[new_id] = StreamlitTurnState()
+    if app_state.active_session_id not in app_state.sessions:
+        app_state.active_session_id = app_state.session_order[0]
+    _save_workspace_state(app_state)
 
 
-def _streamlit_theme_tokens(
+def _create_session(
+    app_state: StreamlitWorkspaceState,
+    *,
+    template_runtime: StreamlitRuntimeConfig,
+) -> str:
+    session_id = f"session-{uuid4().hex[:12]}"
+    runtime = template_runtime.model_copy(deep=True)
+    record = _new_session_record(session_id, runtime)
+    app_state.sessions[session_id] = record
+    app_state.session_order.insert(0, session_id)
+    app_state.turn_states[session_id] = StreamlitTurnState()
+    app_state.active_session_id = session_id
+    _remember_runtime_preferences(app_state.preferences, runtime)
+    _save_workspace_state(app_state)
+    return session_id
+
+
+def _streamlit_theme_css(
     theme_mode: Literal["dark", "light"],
-) -> StreamlitThemeTokens:
-    if theme_mode == "light":
-        return StreamlitThemeTokens(
-            mode="light",
-            page_background="#f3f6fb",
-            sidebar_background="#e8edf5",
-            surface_background="#ffffff",
-            surface_elevated_background="#ffffff",
-            widget_background="#ffffff",
-            widget_background_hover="#eef4ff",
-            widget_border="#cbd5e1",
-            widget_border_focus="#1d4ed8",
-            text_color="#0f172a",
-            muted_text_color="#475569",
-            accent_color="#1d4ed8",
-            accent_color_hover="#1e40af",
-            icon_color="#0f172a",
-            icon_muted_color="#64748b",
-            composer_shell_background="rgba(255, 255, 255, 0.96)",
-            composer_input_background="#ffffff",
-            shadow_color="rgba(15, 23, 42, 0.16)",
-        )
-    return StreamlitThemeTokens(
-        mode="dark",
-        page_background="#0f172a",
-        sidebar_background="#020617",
-        surface_background="#111827",
-        surface_elevated_background="#162033",
-        widget_background="#111827",
-        widget_background_hover="#172033",
-        widget_border="#334155",
-        widget_border_focus="#60a5fa",
-        text_color="#e2e8f0",
-        muted_text_color="#94a3b8",
-        accent_color="#60a5fa",
-        accent_color_hover="#93c5fd",
-        icon_color="#e2e8f0",
-        icon_muted_color="#94a3b8",
-        composer_shell_background="rgba(8, 15, 30, 0.94)",
-        composer_input_background="#0b1220",
-        shadow_color="rgba(2, 6, 23, 0.52)",
-    )
-
-
-def _streamlit_theme_css_variables(tokens: StreamlitThemeTokens) -> str:
-    return "\n".join(
-        (
-            f"    --llm-tools-page-background: {tokens.page_background};",
-            f"    --llm-tools-sidebar-background: {tokens.sidebar_background};",
-            f"    --llm-tools-surface-background: {tokens.surface_background};",
-            (
-                "    --llm-tools-surface-elevated-background: "
-                f"{tokens.surface_elevated_background};"
-            ),
-            f"    --llm-tools-widget-background: {tokens.widget_background};",
-            (
-                "    --llm-tools-widget-background-hover: "
-                f"{tokens.widget_background_hover};"
-            ),
-            f"    --llm-tools-widget-border: {tokens.widget_border};",
-            (f"    --llm-tools-widget-border-focus: {tokens.widget_border_focus};"),
-            f"    --llm-tools-text-color: {tokens.text_color};",
-            f"    --llm-tools-muted-text-color: {tokens.muted_text_color};",
-            f"    --llm-tools-accent-color: {tokens.accent_color};",
-            f"    --llm-tools-accent-color-hover: {tokens.accent_color_hover};",
-            f"    --llm-tools-icon-color: {tokens.icon_color};",
-            f"    --llm-tools-icon-muted-color: {tokens.icon_muted_color};",
-            (
-                "    --llm-tools-composer-shell-background: "
-                f"{tokens.composer_shell_background};"
-            ),
-            (
-                "    --llm-tools-composer-input-background: "
-                f"{tokens.composer_input_background};"
-            ),
-            f"    --llm-tools-shadow-color: {tokens.shadow_color};",
-        )
-    )
-
-
-def _streamlit_theme_css(theme_mode: Literal["dark", "light"]) -> str:
-    tokens = _streamlit_theme_tokens(theme_mode)
-    css_variables = _streamlit_theme_css_variables(tokens)
+) -> str:  # pragma: no cover
+    palette = {
+        "dark": {
+            "page": "#07111f",
+            "sidebar": "#091423",
+            "surface": "#101c2f",
+            "surface_alt": "#15253d",
+            "border": "#31435e",
+            "text": "#e2e8f0",
+            "muted": "#94a3b8",
+            "accent": "#7dd3fc",
+            "accent_soft": "rgba(125, 211, 252, 0.16)",
+            "shadow": "rgba(2, 6, 23, 0.45)",
+            "gradient": "radial-gradient(circle at top left, rgba(125, 211, 252, 0.22), transparent 38%), radial-gradient(circle at top right, rgba(56, 189, 248, 0.16), transparent 28%), linear-gradient(180deg, #08121f 0%, #07111f 100%)",
+        },
+        "light": {
+            "page": "#edf3fb",
+            "sidebar": "#dfe9f6",
+            "surface": "#ffffff",
+            "surface_alt": "#f7fbff",
+            "border": "#c8d6ea",
+            "text": "#0f172a",
+            "muted": "#475569",
+            "accent": "#0369a1",
+            "accent_soft": "rgba(3, 105, 161, 0.10)",
+            "shadow": "rgba(15, 23, 42, 0.10)",
+            "gradient": "radial-gradient(circle at top left, rgba(3, 105, 161, 0.12), transparent 36%), radial-gradient(circle at top right, rgba(14, 165, 233, 0.10), transparent 26%), linear-gradient(180deg, #f5f8fd 0%, #edf3fb 100%)",
+        },
+    }[theme_mode]
     return f"""
 <style>
 :root {{
-    color-scheme: {tokens.mode};
-{css_variables}
+  --llm-tools-page: {palette["page"]};
+  --llm-tools-sidebar: {palette["sidebar"]};
+  --llm-tools-surface: {palette["surface"]};
+  --llm-tools-surface-alt: {palette["surface_alt"]};
+  --llm-tools-border: {palette["border"]};
+  --llm-tools-text: {palette["text"]};
+  --llm-tools-muted: {palette["muted"]};
+  --llm-tools-accent: {palette["accent"]};
+  --llm-tools-accent-soft: {palette["accent_soft"]};
+  --llm-tools-shadow: {palette["shadow"]};
 }}
-.stApp,
-[data-testid="stAppViewContainer"],
-[data-testid="stHeader"] {{
-    background: var(--llm-tools-page-background);
-    color: var(--llm-tools-text-color);
+.stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {{
+  background: {palette["gradient"]};
+  color: var(--llm-tools-text);
 }}
-[data-testid="stHeader"] {{
-    border-bottom: 1px solid transparent;
+section[data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child {{
+  background: linear-gradient(180deg, var(--llm-tools-sidebar) 0%, var(--llm-tools-page) 100%);
+  color: var(--llm-tools-text);
 }}
-section[data-testid="stSidebar"],
-[data-testid="stSidebar"] > div:first-child {{
-    background: var(--llm-tools-sidebar-background);
-    color: var(--llm-tools-text-color);
+.stApp p, .stApp label, .stApp .stMarkdown, .stApp .stCaption {{
+  color: var(--llm-tools-text);
 }}
-.stApp p,
-.stApp label,
-.stApp .stMarkdown,
-.stApp .stCaption {{
-    color: var(--llm-tools-text-color);
+.stApp [data-testid="stChatMessage"] {{
+  background: color-mix(in srgb, var(--llm-tools-surface) 94%, transparent);
+  border: 1px solid var(--llm-tools-border);
+  border-radius: 1rem;
+  padding: 0.9rem 1rem;
+  box-shadow: 0 18px 36px var(--llm-tools-shadow);
 }}
-[data-testid="stSidebar"] .stCaption,
-[data-testid="stSidebar"] p {{
-    color: var(--llm-tools-muted-text-color);
+.stApp textarea, .stApp input, div[data-baseweb="input"] > div, div[data-baseweb="base-input"] > div, div[data-baseweb="textarea"] > div, .stButton > button, [data-testid="stDownloadButton"] > button {{
+  background: var(--llm-tools-surface);
+  color: var(--llm-tools-text);
+  border: 1px solid var(--llm-tools-border);
+  border-radius: 0.85rem;
 }}
-.stApp a {{
-    color: var(--llm-tools-accent-color);
+.stButton > button:hover, [data-testid="stDownloadButton"] > button:hover {{
+  border-color: var(--llm-tools-accent);
+  color: var(--llm-tools-accent);
 }}
-.stApp a:hover {{
-    color: var(--llm-tools-accent-color-hover);
+.llm-tools-hero, .llm-tools-chip-row, .llm-tools-status, .llm-tools-empty {{
+  border: 1px solid var(--llm-tools-border);
+  background: color-mix(in srgb, var(--llm-tools-surface) 96%, transparent);
+  border-radius: 1.1rem;
+  box-shadow: 0 18px 40px var(--llm-tools-shadow);
 }}
-[data-testid="stChatMessage"] {{
-    background: var(--llm-tools-surface-background);
-    border: 1px solid var(--llm-tools-widget-border);
-    border-radius: 0.75rem;
-    padding: 0.75rem 1rem;
-}}
-.stApp pre,
-.stApp code,
-.stApp [data-testid="stCodeBlock"],
-.stApp [data-testid="stCode"] {{
-    background: var(--llm-tools-surface-elevated-background);
-    color: var(--llm-tools-text-color);
-    border-color: var(--llm-tools-widget-border);
-}}
-div[data-baseweb="input"] > div,
-div[data-baseweb="base-input"] > div,
-div[data-baseweb="textarea"] > div,
-.stApp textarea,
-.stApp input,
-div[data-baseweb="input"] input,
-div[data-baseweb="base-input"] input,
-div[data-baseweb="textarea"] textarea,
-div[data-baseweb="input"] [data-testid="stWidgetLabel"],
-div[data-baseweb="base-input"] [data-testid="stWidgetLabel"] {{
-    background: var(--llm-tools-widget-background);
-    color: var(--llm-tools-text-color);
-    border: 1px solid var(--llm-tools-widget-border);
-    -webkit-text-fill-color: var(--llm-tools-text-color);
-    caret-color: var(--llm-tools-text-color);
-}}
-.stApp input::placeholder,
-.stApp textarea::placeholder,
-div[data-baseweb="input"] input::placeholder,
-div[data-baseweb="base-input"] input::placeholder {{
-    color: var(--llm-tools-muted-text-color);
-    opacity: 1;
-}}
-div[data-baseweb="input"] > div:hover,
-div[data-baseweb="base-input"] > div:hover,
-div[data-baseweb="textarea"] > div:hover {{
-    background: var(--llm-tools-widget-background-hover);
-}}
-div[data-baseweb="input"] > div:focus-within,
-div[data-baseweb="base-input"] > div:focus-within,
-div[data-baseweb="textarea"] > div:focus-within {{
-    border-color: var(--llm-tools-widget-border-focus);
-    box-shadow: 0 0 0 1px var(--llm-tools-widget-border-focus);
-}}
-.stApp button[kind],
-.stApp button[data-testid^="stBaseButton"] {{
-    background: var(--llm-tools-widget-background);
-    color: var(--llm-tools-text-color);
-    border: 1px solid var(--llm-tools-widget-border);
-}}
-.stApp button[kind]:hover,
-.stApp button[data-testid^="stBaseButton"]:hover {{
-    background: var(--llm-tools-widget-background-hover);
-    color: var(--llm-tools-accent-color);
-    border-color: var(--llm-tools-widget-border-focus);
-}}
-.stApp button[kind]:focus-visible,
-.stApp button[data-testid^="stBaseButton"]:focus-visible {{
-    box-shadow: 0 0 0 1px var(--llm-tools-widget-border-focus);
-    outline: none;
-}}
-[data-testid="stBottomBlockContainer"] {{
-    background: var(--llm-tools-page-background);
-}}
-[data-testid="stChatInput"] {{
-    background: var(--llm-tools-composer-shell-background);
-    border: 1px solid var(--llm-tools-widget-border);
-    border-radius: 1rem;
-    box-shadow: 0 18px 40px var(--llm-tools-shadow-color);
-    padding: 0.35rem;
-    backdrop-filter: blur(10px);
-}}
-[data-testid="stChatInput"] > div {{
-    background: transparent;
-}}
-[data-testid="stChatInput"] textarea,
-[data-testid="stChatInput"] input,
-[data-testid="stChatInput"] [data-baseweb="textarea"] > div,
-[data-testid="stChatInput"] [data-baseweb="input"] > div {{
-    background: var(--llm-tools-composer-input-background);
-    color: var(--llm-tools-text-color);
-    border-color: transparent;
-    border-width: 0;
-    box-shadow: none;
-    -webkit-text-fill-color: var(--llm-tools-text-color);
-    caret-color: var(--llm-tools-text-color);
-}}
-[data-testid="stChatInput"] [data-baseweb="textarea"] > div {{
-    border-radius: 0.85rem;
-}}
-[data-testid="stChatInput"] [data-baseweb="textarea"] > div:focus-within {{
-    border-color: transparent;
-    box-shadow: none;
-}}
-[data-testid="stChatInput"] textarea::placeholder,
-[data-testid="stChatInput"] input::placeholder {{
-    color: var(--llm-tools-muted-text-color);
-    opacity: 1;
-}}
-[data-testid="stChatInput"] button {{
-    background: var(--llm-tools-widget-background);
-    color: var(--llm-tools-accent-color);
-    border: 1px solid var(--llm-tools-widget-border);
-}}
-[data-testid="stChatInput"] button:hover {{
-    background: var(--llm-tools-widget-background-hover);
-    color: var(--llm-tools-accent-color-hover);
-    border-color: var(--llm-tools-widget-border-focus);
-}}
-[data-testid="collapsedControl"],
-[data-testid="stSidebarCollapsedControl"] {{
-    background: transparent;
-}}
-[data-testid="collapsedControl"] button,
-[data-testid="stSidebarCollapsedControl"] button,
-[data-testid="stSidebarCollapseButton"] button,
-button[data-testid="stBaseButton-headerNoPadding"] {{
-    background: var(--llm-tools-surface-elevated-background);
-    color: var(--llm-tools-icon-color);
-    border: 1px solid var(--llm-tools-widget-border);
-    border-radius: 0.85rem;
-    box-shadow: 0 10px 24px var(--llm-tools-shadow-color);
-}}
-[data-testid="collapsedControl"] button:hover,
-[data-testid="stSidebarCollapsedControl"] button:hover,
-[data-testid="stSidebarCollapseButton"] button:hover,
-button[data-testid="stBaseButton-headerNoPadding"]:hover {{
-    background: var(--llm-tools-widget-background-hover);
-    color: var(--llm-tools-accent-color);
-    border-color: var(--llm-tools-widget-border-focus);
-}}
-[data-testid="collapsedControl"] button svg,
-[data-testid="stSidebarCollapsedControl"] button svg,
-[data-testid="stSidebarCollapseButton"] button svg,
-button[data-testid="stBaseButton-headerNoPadding"] svg {{
-    color: currentColor;
-    fill: currentColor;
-    stroke: currentColor;
-}}
-div[data-baseweb="switch"] > div {{
-    background: var(--llm-tools-icon-muted-color);
-    transition: background-color 180ms ease;
-}}
-div[data-baseweb="switch"] input:checked + div {{
-    background: var(--llm-tools-accent-color);
-}}
-div[data-baseweb="switch"] div[aria-hidden="true"] {{
-    background: var(--llm-tools-surface-background);
-}}
+.llm-tools-hero {{ padding: 1rem 1.1rem; margin-bottom: 0.9rem; }}
+.llm-tools-chip-row {{ padding: 0.7rem 0.85rem; margin-bottom: 1rem; }}
+.llm-tools-status {{ padding: 0.85rem 0.95rem; margin: 1rem 0 0.7rem 0; }}
+.llm-tools-empty {{ padding: 1.4rem; margin: 1rem 0; }}
+.llm-tools-brand {{ font-size: 1.45rem; font-weight: 700; letter-spacing: -0.02em; }}
+.llm-tools-subtitle {{ color: var(--llm-tools-muted); font-size: 0.95rem; }}
+.llm-tools-chip {{ display: inline-block; margin: 0.15rem 0.35rem 0.15rem 0; padding: 0.35rem 0.7rem; border-radius: 999px; background: var(--llm-tools-accent-soft); color: var(--llm-tools-text); border: 1px solid var(--llm-tools-border); font-size: 0.88rem; }}
+.llm-tools-session-meta {{ color: var(--llm-tools-muted); font-size: 0.78rem; margin-top: 0.2rem; }}
+.llm-tools-sidebar-title {{ font-weight: 700; letter-spacing: -0.02em; font-size: 1.2rem; margin-bottom: 0.25rem; }}
+.llm-tools-status-label {{ font-size: 0.8rem; color: var(--llm-tools-muted); text-transform: uppercase; letter-spacing: 0.08em; }}
+.llm-tools-status-text {{ font-size: 1rem; font-weight: 600; }}
 </style>
 """
 
 
-def _render_streamlit_theme() -> None:
+def _render_theme(preferences: StreamlitPreferences) -> None:  # pragma: no cover
     st = _streamlit_module()
     st.markdown(
-        _streamlit_theme_css(_streamlit_theme_mode()),
+        _streamlit_theme_css(preferences.theme_mode),
         unsafe_allow_html=True,
     )
 
 
-def _exit_notice() -> str:
-    return "Streamlit chat keeps running. Use Clear chat or close the browser tab to leave."
-
-
-def _missing_api_key_text(config: TextualChatConfig) -> str:
-    env_var = config.llm.api_key_env_var or "OPENAI_API_KEY"
-    return f"Set {env_var} or enter it in the sidebar to start chatting."
-
-
-def _current_api_key(config: TextualChatConfig) -> str | None:
+def _render_brand_header() -> None:  # pragma: no cover
     st = _streamlit_module()
-    metadata = config.llm.credential_prompt_metadata()
-    if not metadata.expects_api_key:
-        return None
-    env_var = config.llm.api_key_env_var or "OPENAI_API_KEY"
-    env_value = os.getenv(env_var)
-    if env_value:
-        return env_value
-    cached = str(st.session_state.get(_API_SECRET_STATE_SLOT, "")).strip()
-    return cached or None
-
-
-def _render_chat_notice(
-    transcript: list[StreamlitTranscriptEntry],
-    notice: ChatControlNotice,
-) -> None:
-    transcript.append(StreamlitTranscriptEntry(role=notice.role, text=notice.text))
-
-
-def _build_startup_entry(
-    root_path: Path,
-    control_state: ChatControlState,
-) -> StreamlitTranscriptEntry:
-    return StreamlitTranscriptEntry(
-        role="system",
-        text=build_startup_message(
-            root_path=root_path,
-            model_name=control_state.active_model_name,
-            exit_hint="Type quit or exit for close instructions.",
-        ),
+    st.markdown(
+        "<div class='llm-tools-hero'><div class='llm-tools-brand'>llm-tools chat</div><div class='llm-tools-subtitle'>Multi-session workspace chat with runtime model, provider, root, and tool controls.</div></div>",
+        unsafe_allow_html=True,
     )
 
 
-def _ensure_session_state(root_path: Path, config: TextualChatConfig) -> None:
-    st = _streamlit_module()
-    if _CONTROL_STATE_SLOT not in st.session_state:
-        st.session_state[_CONTROL_STATE_SLOT] = build_chat_control_state(
-            config,
-            available_tool_names=set(build_available_tool_specs()),
+def _transcript_export_text(entries: list[StreamlitTranscriptEntry]) -> str:
+    parts = []
+    for entry in entries:
+        if entry.final_response is not None:
+            text = format_final_response(entry.final_response)
+            parts.append(format_transcript_text("assistant", text))
+            continue
+        parts.append(
+            format_transcript_text(
+                entry.role,
+                entry.text,
+                assistant_completion_state=entry.assistant_completion_state,
+            )
         )
-    control_state = st.session_state[_CONTROL_STATE_SLOT]
-    if _TRANSCRIPT_STATE_SLOT not in st.session_state:
-        st.session_state[_TRANSCRIPT_STATE_SLOT] = [
-            _build_startup_entry(root_path, control_state)
-        ]
-    if _SESSION_STATE_SLOT not in st.session_state:
-        st.session_state[_SESSION_STATE_SLOT] = ChatSessionState()
-    if _TOKEN_USAGE_STATE_SLOT not in st.session_state:
-        st.session_state[_TOKEN_USAGE_STATE_SLOT] = None
-    if _TURN_STATE_SLOT not in st.session_state:
-        st.session_state[_TURN_STATE_SLOT] = StreamlitTurnState()
-    if _INSPECTOR_STATE_SLOT not in st.session_state:
-        st.session_state[_INSPECTOR_STATE_SLOT] = StreamlitInspectorState()
-    st.session_state.setdefault(_ACTIVE_TURN_STATE_SLOT, None)
-    st.session_state.setdefault(_TRANSCRIPT_EXPORT_STATE_SLOT, False)
-    st.session_state.setdefault(_API_KEY_STATE_SLOT, "")
-    st.session_state.setdefault(_API_SECRET_STATE_SLOT, "")
-    st.session_state.setdefault(_THEME_MODE_STATE_SLOT, _DEFAULT_THEME_MODE)
+    return "\n\n".join(part for part in parts if part).rstrip()
 
 
-def _reset_session_state(root_path: Path, config: TextualChatConfig) -> None:
+def _render_final_response(response: ChatFinalResponse) -> None:  # pragma: no cover
     st = _streamlit_module()
-    active_turn = st.session_state.get(_ACTIVE_TURN_STATE_SLOT)
-    if isinstance(active_turn, StreamlitActiveTurnHandle):
-        active_turn.runner.cancel()
-    control_state = build_chat_control_state(
-        config,
-        available_tool_names=set(build_available_tool_specs()),
-    )
-    st.session_state[_CONTROL_STATE_SLOT] = control_state
-    st.session_state[_TRANSCRIPT_STATE_SLOT] = [
-        _build_startup_entry(root_path, control_state)
-    ]
-    st.session_state[_SESSION_STATE_SLOT] = ChatSessionState()
-    st.session_state[_TOKEN_USAGE_STATE_SLOT] = None
-    st.session_state[_TURN_STATE_SLOT] = StreamlitTurnState()
-    st.session_state[_INSPECTOR_STATE_SLOT] = StreamlitInspectorState()
-    st.session_state[_ACTIVE_TURN_STATE_SLOT] = None
-    st.session_state[_TRANSCRIPT_EXPORT_STATE_SLOT] = False
-    st.session_state[_API_KEY_STATE_SLOT] = ""
-    st.session_state[_API_SECRET_STATE_SLOT] = ""
+    st.markdown(response.answer)
+    if response.confidence is not None:
+        st.caption(f"Confidence: {response.confidence:.2f}")
+    if response.citations:
+        st.markdown("**Citations**")
+        for citation in response.citations:
+            st.markdown(f"- `{format_citation(citation)}`")
+            if citation.excerpt:
+                st.code(citation.excerpt)
+    if response.uncertainty:
+        st.markdown("**Uncertainty**")
+        for item in response.uncertainty:
+            st.markdown(f"- {item}")
+    if response.missing_information:
+        st.markdown("**Missing Information**")
+        for item in response.missing_information:
+            st.markdown(f"- {item}")
+    if response.follow_up_suggestions:
+        st.markdown("**Follow-up Suggestions**")
+        for item in response.follow_up_suggestions:
+            st.markdown(f"- {item}")
 
 
-def _resolve_api_key(config: TextualChatConfig) -> str | None:
+def _render_transcript_entry(
+    entry: StreamlitTranscriptEntry,
+) -> None:  # pragma: no cover
     st = _streamlit_module()
-    metadata = config.llm.credential_prompt_metadata()
-    if not metadata.expects_api_key:
-        return None
-    env_var = config.llm.api_key_env_var or "OPENAI_API_KEY"
-    env_value = os.getenv(env_var)
-    if env_value:
-        return env_value
-    cached_secret = str(st.session_state[_API_SECRET_STATE_SLOT]).strip()
-    if cached_secret:
-        return cached_secret
-    st.sidebar.subheader("Credentials")
-    api_key = st.sidebar.text_input(
-        f"Enter {env_var}",
-        value=st.session_state[_API_KEY_STATE_SLOT],
-        type="password",
+    if entry.role == "user":
+        with st.chat_message("user"):
+            st.markdown(entry.text)
+        return
+    with st.chat_message("assistant"):
+        if entry.role == "system":
+            st.caption("System")
+            st.markdown(entry.text)
+            return
+        if entry.role == "error":
+            st.caption("Error")
+            st.error(entry.text)
+            return
+        if entry.assistant_completion_state == "interrupted":
+            st.caption("Assistant (interrupted)")
+            st.markdown(entry.text)
+            return
+        if entry.final_response is not None:
+            _render_final_response(entry.final_response)
+            return
+        st.markdown(entry.text)
+
+
+def _render_empty_state(
+    record: StreamlitPersistedSessionRecord,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    root_text = record.runtime.root_path or "No workspace selected"
+    with st.container():
+        st.markdown("### Start a new conversation")
+        st.caption(f"Current root: {root_text}")
+        st.markdown(
+            "Choose a provider and model above, optionally select a root directory, then ask a grounded question or enable external tools from the composer tools menu."
+        )
+
+
+def _serialize_workflow_event(
+    event: object,
+    *,
+    turn_number: int,
+    session_id: str,
+) -> StreamlitQueuedEvent:
+    if isinstance(event, ChatWorkflowStatusEvent):
+        return StreamlitQueuedEvent(
+            kind="status",
+            payload=event.model_dump(mode="json"),
+            turn_number=turn_number,
+            session_id=session_id,
+        )
+    if isinstance(event, ChatWorkflowApprovalEvent):
+        return StreamlitQueuedEvent(
+            kind="approval_requested",
+            payload=event.model_dump(mode="json"),
+            turn_number=turn_number,
+            session_id=session_id,
+        )
+    if isinstance(event, ChatWorkflowApprovalResolvedEvent):
+        return StreamlitQueuedEvent(
+            kind="approval_resolved",
+            payload=event.model_dump(mode="json"),
+            turn_number=turn_number,
+            session_id=session_id,
+        )
+    if isinstance(event, ChatWorkflowInspectorEvent):
+        return StreamlitQueuedEvent(
+            kind="inspector",
+            payload=event.model_dump(mode="json"),
+            turn_number=turn_number,
+            session_id=session_id,
+        )
+    if isinstance(event, ChatWorkflowResultEvent):
+        return StreamlitQueuedEvent(
+            kind="result",
+            payload=event.model_dump(mode="json"),
+            turn_number=turn_number,
+            session_id=session_id,
+        )
+    raise TypeError(f"Unsupported workflow event type: {type(event)!r}")
+
+
+def _worker_run_turn(handle: StreamlitActiveTurnHandle) -> None:  # pragma: no cover
+    try:
+        for event in handle.runner:
+            handle.event_queue.put(
+                _serialize_workflow_event(
+                    event,
+                    turn_number=handle.turn_number,
+                    session_id=handle.session_id,
+                )
+            )
+    except Exception as exc:  # pragma: no cover - surfaced through queued errors
+        handle.event_queue.put(
+            StreamlitQueuedEvent(
+                kind="error",
+                payload=str(exc),
+                turn_number=handle.turn_number,
+                session_id=handle.session_id,
+            )
+        )
+    finally:
+        handle.event_queue.put(
+            StreamlitQueuedEvent(
+                kind="complete",
+                payload=None,
+                turn_number=handle.turn_number,
+                session_id=handle.session_id,
+            )
+        )
+
+
+def _title_from_prompt(prompt: str) -> str:
+    cleaned = " ".join(prompt.strip().split())
+    if len(cleaned) <= 60:
+        return cleaned
+    return f"{cleaned[:57].rstrip()}..."
+
+
+def _effective_enabled_tools(runtime: StreamlitRuntimeConfig) -> set[str]:
+    return _filter_enabled_tools_for_root(
+        set(runtime.enabled_tools),
+        root_path=runtime.root_path,
     )
-    api_key_text = str(api_key)
-    st.session_state[_API_KEY_STATE_SLOT] = api_key_text
-    cleaned_api_key = api_key_text.strip()
-    if cleaned_api_key:
-        st.session_state[_API_SECRET_STATE_SLOT] = cleaned_api_key
-        st.session_state[_API_KEY_STATE_SLOT] = ""
-        return cleaned_api_key
-    st.info(_missing_api_key_text(config))
-    return None
 
 
 def _build_chat_runner(
     *,
-    root_path: Path,
+    session_id: str,
     config: TextualChatConfig,
+    runtime: StreamlitRuntimeConfig,
     provider: ModelTurnProvider,
     session_state: ChatSessionState,
-    control_state: ChatControlState,
     user_message: str,
 ) -> ChatSessionTurnRunner:
+    available_tool_specs = _all_tool_specs()
+    enabled_tools = _effective_enabled_tools(runtime)
+    allowed_side_effects = {SideEffectClass.NONE}
+    for tool_name in enabled_tools:
+        spec = available_tool_specs.get(tool_name)
+        if spec is not None:
+            allowed_side_effects.add(spec.side_effects)
     policy = ToolPolicy(
-        allowed_tools=set(control_state.enabled_tools),
-        allowed_side_effects={SideEffectClass.NONE, SideEffectClass.LOCAL_READ},
-        require_approval_for=set(control_state.require_approval_for),
-        allow_network=False,
-        allow_filesystem=True,
-        allow_subprocess=False,
+        allowed_tools=enabled_tools,
+        allowed_side_effects=allowed_side_effects,
+        require_approval_for=set(runtime.require_approval_for),
+        allow_network=runtime.allow_network,
+        allow_filesystem=runtime.allow_filesystem and runtime.root_path is not None,
+        allow_subprocess=runtime.allow_subprocess and runtime.root_path is not None,
         redaction=config.policy.redaction.model_copy(deep=True),
     )
     registry, executor = build_chat_executor(policy=policy)
+    root = Path(runtime.root_path) if runtime.root_path is not None else None
     return run_interactive_chat_session_turn(
         user_message=user_message,
         session_state=session_state,
@@ -723,12 +949,13 @@ def _build_chat_runner(
         system_prompt=build_chat_system_prompt(
             tool_registry=registry,
             tool_limits=config.tool_limits,
-            enabled_tool_names=control_state.enabled_tools,
+            enabled_tool_names=enabled_tools,
+            workspace_enabled=root is not None,
         ),
         base_context=build_chat_context(
-            root_path=root_path,
+            root_path=root,
             config=config,
-            app_name="streamlit-chat",
+            app_name=f"streamlit-chat-{session_id}",
         ),
         session_config=config.session,
         tool_limits=config.tool_limits,
@@ -737,89 +964,58 @@ def _build_chat_runner(
     )
 
 
-def _serialize_workflow_event(
-    event: object,
+def _append_notice(
+    record: StreamlitPersistedSessionRecord,
     *,
-    turn_number: int,
-) -> StreamlitQueuedEvent:
-    if isinstance(event, ChatWorkflowStatusEvent):
-        return StreamlitQueuedEvent(
-            kind="status",
-            payload=event.model_dump(mode="json"),
-            turn_number=turn_number,
-        )
-    if isinstance(event, ChatWorkflowApprovalEvent):
-        return StreamlitQueuedEvent(
-            kind="approval_requested",
-            payload=event.model_dump(mode="json"),
-            turn_number=turn_number,
-        )
-    if isinstance(event, ChatWorkflowApprovalResolvedEvent):
-        return StreamlitQueuedEvent(
-            kind="approval_resolved",
-            payload=event.model_dump(mode="json"),
-            turn_number=turn_number,
-        )
-    if isinstance(event, ChatWorkflowInspectorEvent):
-        return StreamlitQueuedEvent(
-            kind="inspector",
-            payload=event.model_dump(mode="json"),
-            turn_number=turn_number,
-        )
-    if isinstance(event, ChatWorkflowResultEvent):
-        return StreamlitQueuedEvent(
-            kind="result",
-            payload=event.model_dump(mode="json"),
-            turn_number=turn_number,
-        )
-    raise TypeError(f"Unsupported workflow event type: {type(event)!r}")
-
-
-def _append_inspector_entry(
-    entries: list[StreamlitInspectorEntry],
-    *,
-    label: str,
-    payload: object,
+    role: Literal["system", "error"],
+    text: str,
 ) -> None:
-    entries.append(StreamlitInspectorEntry(label=label, payload=payload))
+    record.transcript.append(StreamlitTranscriptEntry(role=role, text=text))
+    _touch_record(record)
 
 
-def _apply_turn_error(error_message: str) -> None:
-    st = _streamlit_module()
-    transcript = st.session_state[_TRANSCRIPT_STATE_SLOT]
-    turn_state = st.session_state[_TURN_STATE_SLOT]
-    transcript.append(StreamlitTranscriptEntry(role="error", text=error_message))
+def _apply_turn_error(
+    app_state: StreamlitWorkspaceState,
+    *,
+    session_id: str,
+    error_message: str,
+) -> None:
+    record = app_state.sessions[session_id]
+    turn_state = _turn_state_for(app_state, session_id)
+    record.transcript.append(StreamlitTranscriptEntry(role="error", text=error_message))
     turn_state.busy = False
     turn_state.status_text = ""
     turn_state.pending_approval = None
     turn_state.approval_decision_in_flight = False
     turn_state.pending_interrupt_draft = None
-    st.session_state[_ACTIVE_TURN_STATE_SLOT] = None
+    _touch_record(record)
 
 
 def _apply_turn_result(
+    app_state: StreamlitWorkspaceState,
+    *,
+    session_id: str,
     event: ChatWorkflowResultEvent,
 ) -> str | None:
-    st = _streamlit_module()
+    record = app_state.sessions[session_id]
+    turn_state = _turn_state_for(app_state, session_id)
     result = ChatWorkflowTurnResult.model_validate(event.result)
-    transcript = st.session_state[_TRANSCRIPT_STATE_SLOT]
-    turn_state: StreamlitTurnState = st.session_state[_TURN_STATE_SLOT]
-    st.session_state[_SESSION_STATE_SLOT] = (
-        result.session_state or st.session_state[_SESSION_STATE_SLOT]
+    record.workflow_session_state = (
+        result.session_state or record.workflow_session_state
     )
-    st.session_state[_TOKEN_USAGE_STATE_SLOT] = result.token_usage
+    record.token_usage = result.token_usage
     turn_state.pending_approval = None
     turn_state.approval_decision_in_flight = False
     if result.context_warning:
-        transcript.append(
+        record.transcript.append(
             StreamlitTranscriptEntry(role="system", text=result.context_warning)
         )
     if result.status == "needs_continuation" and result.continuation_reason:
-        transcript.append(
+        record.transcript.append(
             StreamlitTranscriptEntry(role="system", text=result.continuation_reason)
         )
     if result.final_response is not None:
-        transcript.append(
+        record.transcript.append(
             StreamlitTranscriptEntry(
                 role="assistant",
                 text=result.final_response.answer,
@@ -827,6 +1023,7 @@ def _apply_turn_result(
             )
         )
         turn_state.confidence = result.final_response.confidence
+        record.confidence = result.final_response.confidence
     elif result.status == "interrupted":
         interrupted_message = next(
             (
@@ -838,7 +1035,7 @@ def _apply_turn_result(
             None,
         )
         if interrupted_message is not None:
-            transcript.append(
+            record.transcript.append(
                 StreamlitTranscriptEntry(
                     role="assistant",
                     text=interrupted_message.content,
@@ -846,25 +1043,35 @@ def _apply_turn_result(
                 )
             )
         elif result.interruption_reason:
-            transcript.append(
+            record.transcript.append(
                 StreamlitTranscriptEntry(role="system", text=result.interruption_reason)
             )
         turn_state.confidence = None
+        record.confidence = None
     else:
         turn_state.confidence = None
+        record.confidence = None
     turn_state.status_text = ""
     turn_state.busy = False
     pending_prompt = turn_state.pending_interrupt_draft
     turn_state.pending_interrupt_draft = None
-    st.session_state[_ACTIVE_TURN_STATE_SLOT] = None
+    _touch_record(record)
     return pending_prompt
 
 
-def _apply_queued_event(queued_event: StreamlitQueuedEvent) -> str | None:
-    st = _streamlit_module()
-    transcript = st.session_state[_TRANSCRIPT_STATE_SLOT]
-    turn_state = st.session_state[_TURN_STATE_SLOT]
-    inspector_state = st.session_state[_INSPECTOR_STATE_SLOT]
+def _append_inspector_entry(
+    entries: list[StreamlitInspectorEntry], *, label: str, payload: object
+) -> None:
+    entries.append(StreamlitInspectorEntry(label=label, payload=payload))
+
+
+def _apply_queued_event(
+    app_state: StreamlitWorkspaceState,
+    queued_event: StreamlitQueuedEvent,
+) -> str | None:
+    record = app_state.sessions[queued_event.session_id]
+    turn_state = _turn_state_for(app_state, queued_event.session_id)
+    inspector_state = record.inspector_state
     if queued_event.kind == "status":
         status_event = ChatWorkflowStatusEvent.model_validate(queued_event.payload)
         turn_state.status_text = status_event.status
@@ -876,7 +1083,7 @@ def _apply_queued_event(queued_event: StreamlitQueuedEvent) -> str | None:
         turn_state.status_text = (
             f"approval required for {approval_event.approval.tool_name}"
         )
-        transcript.append(
+        record.transcript.append(
             StreamlitTranscriptEntry(
                 role="system",
                 text=(
@@ -885,6 +1092,7 @@ def _apply_queued_event(queued_event: StreamlitQueuedEvent) -> str | None:
                 ),
             )
         )
+        _touch_record(record)
         return None
     if queued_event.kind == "approval_resolved":
         approval_resolved_event = ChatWorkflowApprovalResolvedEvent.model_validate(
@@ -898,15 +1106,16 @@ def _apply_queued_event(queued_event: StreamlitQueuedEvent) -> str | None:
             "timed_out": "Pending approval request timed out.",
             "cancelled": "Pending approval request was cancelled.",
         }[approval_resolved_event.resolution]
-        transcript.append(StreamlitTranscriptEntry(role="system", text=resolution_text))
-        if approval_resolved_event.resolution == "approved":
-            turn_state.status_text = "resuming turn"
-        elif approval_resolved_event.resolution == "denied":
-            turn_state.status_text = "continuing without approval"
-        elif approval_resolved_event.resolution == "timed_out":
-            turn_state.status_text = "approval timed out"
-        else:
-            turn_state.status_text = ""
+        record.transcript.append(
+            StreamlitTranscriptEntry(role="system", text=resolution_text)
+        )
+        turn_state.status_text = {
+            "approved": "resuming turn",
+            "denied": "continuing without approval",
+            "timed_out": "approval timed out",
+            "cancelled": "",
+        }[approval_resolved_event.resolution]
+        _touch_record(record)
         return None
     if queued_event.kind == "inspector":
         inspector_event = ChatWorkflowInspectorEvent.model_validate(
@@ -922,26 +1131,28 @@ def _apply_queued_event(queued_event: StreamlitQueuedEvent) -> str | None:
             "tool_execution": inspector_state.tool_executions,
         }[inspector_event.kind]
         _append_inspector_entry(target, label=label, payload=inspector_event.payload)
+        _touch_record(record)
         return None
     if queued_event.kind == "result":
         result_event = ChatWorkflowResultEvent.model_validate(queued_event.payload)
-        return _apply_turn_result(result_event)
+        return _apply_turn_result(
+            app_state,
+            session_id=queued_event.session_id,
+            event=result_event,
+        )
     if queued_event.kind == "error":
-        _apply_turn_error(str(queued_event.payload))
+        _apply_turn_error(
+            app_state,
+            session_id=queued_event.session_id,
+            error_message=str(queued_event.payload),
+        )
         return None
     if queued_event.kind == "complete":
-        handle = st.session_state.get(_ACTIVE_TURN_STATE_SLOT)
-        if (
-            isinstance(handle, StreamlitActiveTurnHandle)
-            and handle.turn_number == queued_event.turn_number
-            and not st.session_state[_TURN_STATE_SLOT].busy
-        ):
-            st.session_state[_ACTIVE_TURN_STATE_SLOT] = None
         return None
     raise ValueError(f"Unsupported queued event kind: {queued_event.kind}")
 
 
-def _drain_active_turn_events() -> str | None:
+def _drain_active_turn_events(app_state: StreamlitWorkspaceState) -> str | None:
     st = _streamlit_module()
     handle = st.session_state.get(_ACTIVE_TURN_STATE_SLOT)
     if not isinstance(handle, StreamlitActiveTurnHandle):
@@ -952,63 +1163,43 @@ def _drain_active_turn_events() -> str | None:
             queued_event = handle.event_queue.get_nowait()
         except queue.Empty:
             break
-        next_prompt = _apply_queued_event(queued_event)
+        next_prompt = _apply_queued_event(app_state, queued_event)
         if next_prompt is not None:
             pending_prompt = next_prompt
+    turn_state = _turn_state_for(app_state, handle.session_id)
     if (
         not handle.thread.is_alive()
         and handle.event_queue.empty()
-        and not st.session_state[_TURN_STATE_SLOT].busy
+        and not turn_state.busy
     ):
         st.session_state[_ACTIVE_TURN_STATE_SLOT] = None
+    _save_workspace_state(app_state)
     return pending_prompt
 
 
-def _worker_run_turn(handle: StreamlitActiveTurnHandle) -> None:
-    try:
-        for event in handle.runner:
-            handle.event_queue.put(
-                _serialize_workflow_event(event, turn_number=handle.turn_number)
-            )
-    except Exception as exc:  # pragma: no cover - exercised through queue result
-        handle.event_queue.put(
-            StreamlitQueuedEvent(
-                kind="error",
-                payload=str(exc),
-                turn_number=handle.turn_number,
-            )
-        )
-    finally:
-        handle.event_queue.put(
-            StreamlitQueuedEvent(
-                kind="complete",
-                payload=None,
-                turn_number=handle.turn_number,
-            )
-        )
-
-
-def _start_streamlit_turn(
+def _start_streamlit_turn(  # pragma: no cover
     *,
-    root_path: Path,
+    app_state: StreamlitWorkspaceState,
+    session_id: str,
     config: TextualChatConfig,
     provider: ModelTurnProvider,
     user_message: str,
 ) -> None:
     st = _streamlit_module()
-    control_state: ChatControlState = st.session_state[_CONTROL_STATE_SLOT]
-    turn_state: StreamlitTurnState = st.session_state[_TURN_STATE_SLOT]
+    record = app_state.sessions[session_id]
+    turn_state = _turn_state_for(app_state, session_id)
     turn_number = turn_state.active_turn_number + 1
     runner = _build_chat_runner(
-        root_path=root_path,
+        session_id=session_id,
         config=config,
+        runtime=record.runtime,
         provider=provider,
-        session_state=st.session_state[_SESSION_STATE_SLOT],
-        control_state=control_state,
+        session_state=record.workflow_session_state,
         user_message=user_message,
     )
     event_queue: queue.Queue[StreamlitQueuedEvent] = queue.Queue()
     handle = StreamlitActiveTurnHandle(
+        session_id=session_id,
         runner=runner,
         event_queue=event_queue,
         thread=threading.Thread(),
@@ -1021,32 +1212,139 @@ def _start_streamlit_turn(
     turn_state.status_text = "thinking"
     turn_state.pending_approval = None
     turn_state.approval_decision_in_flight = False
-    st.session_state[_TRANSCRIPT_STATE_SLOT].append(
-        StreamlitTranscriptEntry(role="user", text=user_message)
-    )
+    if record.summary.title == "New chat" and not any(
+        entry.role == "user" for entry in record.transcript
+    ):
+        record.summary.title = _title_from_prompt(user_message)
+    record.transcript.append(StreamlitTranscriptEntry(role="user", text=user_message))
+    _touch_record(record)
     st.session_state[_ACTIVE_TURN_STATE_SLOT] = handle
     thread.start()
+    _save_workspace_state(app_state)
 
 
-def _resolve_active_approval(*, approved: bool) -> None:
+def _current_api_key(  # pragma: no cover
+    llm_config: Any,
+) -> str | None:
+    st = _streamlit_module()
+    metadata = llm_config.credential_prompt_metadata()
+    if not metadata.expects_api_key:
+        return None
+    env_var = llm_config.api_key_env_var or "OPENAI_API_KEY"
+    env_value = os.getenv(env_var)
+    if env_value:
+        return env_value
+    cache = st.session_state.setdefault(_SECRET_CACHE_STATE_SLOT, {})
+    if not isinstance(cache, dict):
+        cache = {}
+        st.session_state[_SECRET_CACHE_STATE_SLOT] = cache
+    cached_value = str(cache.get(env_var, "")).strip()
+    return cached_value or None
+
+
+def _available_model_options(  # pragma: no cover
+    runtime: StreamlitRuntimeConfig,
+    preferences: StreamlitPreferences,
+    config: TextualChatConfig,
+) -> tuple[list[str], str | None]:
+    llm_config = _llm_config_for_runtime(config, runtime)
+    current_api_key = _current_api_key(llm_config)
+    fallback = _dedupe_preserve(
+        [
+            runtime.model_name,
+            _default_model_for_provider(config, runtime.provider),
+            *preferences.recent_models.get(runtime.provider.value, []),
+        ]
+    )
+    metadata = llm_config.credential_prompt_metadata()
+    if metadata.expects_api_key and current_api_key is None:
+        return fallback, _missing_api_key_text(llm_config)
+    try:
+        provider = create_provider(
+            llm_config,
+            api_key=current_api_key,
+            model_name=runtime.model_name,
+        )
+        options = _dedupe_preserve([*provider.list_available_models(), *fallback])
+        if options:
+            return options, None
+        return fallback, "No models were returned by the provider."
+    except Exception as exc:
+        return fallback, f"Unable to list available models: {exc}"
+
+
+def _missing_api_key_text(llm_config: Any) -> str:
+    env_var = llm_config.api_key_env_var or "OPENAI_API_KEY"
+    return f"Set {env_var} or enter it in the header controls to use this provider."
+
+
+def _submit_streamlit_prompt(
+    *,
+    app_state: StreamlitWorkspaceState,
+    session_id: str,
+    config: TextualChatConfig,
+    prompt: str,
+) -> None:
+    cleaned_prompt = prompt.strip()
+    if not cleaned_prompt:
+        return
+    record = app_state.sessions[session_id]
+    turn_state = _turn_state_for(app_state, session_id)
+    if turn_state.busy:
+        turn_state.pending_interrupt_draft = cleaned_prompt
+        _cancel_active_turn(
+            app_state, session_id=session_id, preserve_pending_prompt=True
+        )
+        _save_workspace_state(app_state)
+        return
+    llm_config = _llm_config_for_runtime(config, record.runtime)
+    api_key = _current_api_key(llm_config)
+    provider = create_provider(
+        llm_config,
+        api_key=api_key,
+        model_name=record.runtime.model_name,
+    )
+    _start_streamlit_turn(
+        app_state=app_state,
+        session_id=session_id,
+        config=config,
+        provider=provider,
+        user_message=cleaned_prompt,
+    )
+
+
+def _resolve_active_approval(  # pragma: no cover
+    app_state: StreamlitWorkspaceState,
+    *,
+    session_id: str,
+    approved: bool,
+) -> None:
     st = _streamlit_module()
     handle = st.session_state.get(_ACTIVE_TURN_STATE_SLOT)
-    turn_state = st.session_state[_TURN_STATE_SLOT]
+    turn_state = _turn_state_for(app_state, session_id)
     if not isinstance(handle, StreamlitActiveTurnHandle):
         return
-    if turn_state.pending_approval is None:
+    if handle.session_id != session_id or turn_state.pending_approval is None:
         return
     if not handle.runner.resolve_pending_approval(approved):
         return
     turn_state.approval_decision_in_flight = True
     turn_state.status_text = "approving" if approved else "denying"
+    _save_workspace_state(app_state)
 
 
-def _cancel_active_turn(*, preserve_pending_prompt: bool = False) -> None:
+def _cancel_active_turn(  # pragma: no cover
+    app_state: StreamlitWorkspaceState,
+    *,
+    session_id: str,
+    preserve_pending_prompt: bool = False,
+) -> None:
     st = _streamlit_module()
     handle = st.session_state.get(_ACTIVE_TURN_STATE_SLOT)
-    turn_state = st.session_state[_TURN_STATE_SLOT]
+    turn_state = _turn_state_for(app_state, session_id)
     if not isinstance(handle, StreamlitActiveTurnHandle):
+        return
+    if handle.session_id != session_id:
         return
     if not preserve_pending_prompt:
         turn_state.pending_interrupt_draft = None
@@ -1054,90 +1352,75 @@ def _cancel_active_turn(*, preserve_pending_prompt: bool = False) -> None:
     handle.runner.cancel()
 
 
-def _submit_streamlit_prompt(
-    *,
-    root_path: Path,
+def _runtime_to_control_state(
     config: TextualChatConfig,
-    prompt: str,
+    runtime: StreamlitRuntimeConfig,
+) -> ChatControlState:
+    default_enabled = _default_enabled_tool_names(
+        config,
+        root_path=Path(runtime.root_path) if runtime.root_path else None,
+    )
+    return ChatControlState(
+        active_model_name=runtime.model_name,
+        default_enabled_tools=set(default_enabled),
+        enabled_tools=set(runtime.enabled_tools),
+        require_approval_for=set(runtime.require_approval_for),
+        inspector_open=runtime.inspector_open,
+    )
+
+
+def _apply_control_state(
+    runtime: StreamlitRuntimeConfig,
+    state: ChatControlState,
 ) -> None:
-    st = _streamlit_module()
-    turn_state: StreamlitTurnState = st.session_state[_TURN_STATE_SLOT]
-    cleaned_prompt = prompt.strip()
-    if not cleaned_prompt:
-        return
-    if turn_state.busy:
-        turn_state.pending_interrupt_draft = cleaned_prompt
-        _cancel_active_turn(preserve_pending_prompt=True)
-        return
-    api_key = _current_api_key(config)
-    provider = create_provider(
-        config.llm,
-        api_key=api_key,
-        model_name=st.session_state[_CONTROL_STATE_SLOT].active_model_name,
+    runtime.model_name = state.active_model_name
+    runtime.enabled_tools = sorted(
+        _filter_enabled_tools_for_root(
+            set(state.enabled_tools),
+            root_path=runtime.root_path,
+        )
     )
-    _start_streamlit_turn(
-        root_path=root_path,
-        config=config,
-        provider=provider,
-        user_message=cleaned_prompt,
-    )
+    runtime.require_approval_for = set(state.require_approval_for)
+    runtime.inspector_open = state.inspector_open
 
 
-def _run_streamlit_command(
+def _run_streamlit_command(  # pragma: no cover
     *,
     config: TextualChatConfig,
-    raw_command: str,
+    app_state: StreamlitWorkspaceState,
+    session_id: str,
 ) -> ChatCommandOutcome[ModelTurnProvider]:
-    st = _streamlit_module()
-    control_state: ChatControlState = st.session_state[_CONTROL_STATE_SLOT]
+    record = app_state.sessions[session_id]
+    runtime = record.runtime
+    llm_config = _llm_config_for_runtime(config, runtime)
+    state = _runtime_to_control_state(config, runtime)
 
     def _list_models() -> ModelCatalogOutcome:
-        api_key = _current_api_key(config)
-        metadata = config.llm.credential_prompt_metadata()
-        if metadata.expects_api_key and api_key is None:
-            return ModelCatalogOutcome(
-                notice=ChatControlNotice(
-                    role="system", text=_missing_api_key_text(config)
-                )
-            )
-        try:
-            provider = create_provider(
-                config.llm,
-                api_key=api_key,
-                model_name=control_state.active_model_name,
-            )
-        except Exception as exc:
-            return ModelCatalogOutcome(
-                notice=ChatControlNotice(
-                    role="error",
-                    text=f"Unable to create provider for {control_state.active_model_name}: {exc}",
-                )
-            )
-        try:
-            return ModelCatalogOutcome(model_ids=provider.list_available_models())
-        except Exception as exc:
+        options, notice = _available_model_options(
+            runtime, app_state.preferences, config
+        )
+        if notice is not None:
             return ModelCatalogOutcome(
                 notice=ChatControlNotice(
                     role="system",
-                    text=(
-                        f"Current model: {control_state.active_model_name}\n"
-                        f"Unable to list available models: {exc}"
-                    ),
+                    text=f"Current model: {runtime.model_name}\n{notice}",
                 )
             )
+        return ModelCatalogOutcome(model_ids=options)
 
     def _switch_model(new_model_name: str) -> ModelSwitchOutcome[ModelTurnProvider]:
-        api_key = _current_api_key(config)
-        metadata = config.llm.credential_prompt_metadata()
+        api_key = _current_api_key(llm_config)
+        metadata = llm_config.credential_prompt_metadata()
         if metadata.expects_api_key and api_key is None:
             return ModelSwitchOutcome(
                 notice=ChatControlNotice(
-                    role="system", text=_missing_api_key_text(config)
+                    role="system",
+                    text=_missing_api_key_text(llm_config),
                 )
             )
         try:
             provider = create_provider(
-                config.llm,
+                llm_config,
                 api_key=api_key,
                 model_name=new_model_name,
             )
@@ -1150,25 +1433,33 @@ def _run_streamlit_command(
             )
         return ModelSwitchOutcome(provider=provider)
 
-    return handle_chat_command(
-        raw_command,
-        state=control_state,
-        available_tool_specs=build_available_tool_specs(),
-        busy=st.session_state[_TURN_STATE_SLOT].busy,
+    outcome = handle_chat_command(
+        app_state.drafts.get(session_id, ""),
+        state=state,
+        available_tool_specs=_all_tool_specs(),
+        busy=_turn_state_for(app_state, session_id).busy,
         list_models=_list_models,
         switch_model=_switch_model,
         exit_mode="notice",
-        exit_notice=_exit_notice(),
+        exit_notice="Streamlit chat keeps running. Use the session rail or close the browser tab to leave.",
     )
+    _apply_control_state(runtime, state)
+    return outcome
 
 
-def _apply_streamlit_command(outcome: ChatCommandOutcome[ModelTurnProvider]) -> None:
-    st = _streamlit_module()
-    transcript = st.session_state[_TRANSCRIPT_STATE_SLOT]
+def _apply_streamlit_command(  # pragma: no cover
+    app_state: StreamlitWorkspaceState,
+    *,
+    session_id: str,
+    outcome: ChatCommandOutcome[ModelTurnProvider],
+) -> None:
+    record = app_state.sessions[session_id]
     for notice in outcome.notices:
-        _render_chat_notice(transcript, notice)
+        _append_notice(record, role=notice.role, text=notice.text)
     if outcome.request_copy:
-        st.session_state[_TRANSCRIPT_EXPORT_STATE_SLOT] = True
+        app_state.show_export_for.add(session_id)
+    _touch_record(record)
+    _save_workspace_state(app_state)
 
 
 def _is_command_prompt(prompt: str) -> bool:
@@ -1176,33 +1467,31 @@ def _is_command_prompt(prompt: str) -> bool:
     return cleaned.startswith("/") or cleaned in {"quit", "exit"}
 
 
-def process_streamlit_chat_turn(
+def process_streamlit_chat_turn(  # pragma: no cover
     *,
-    root_path: Path,
+    root_path: Path | None,
     config: TextualChatConfig,
     provider: ModelTurnProvider,
     session_state: ChatSessionState,
     user_message: str,
     approval_resolver: Callable[[ChatWorkflowApprovalState], bool] | None = None,
+    runtime_config: StreamlitRuntimeConfig | None = None,
 ) -> StreamlitTurnOutcome:
-    """Execute one repository-chat turn using the Streamlit event reducers."""
-    control_state = build_chat_control_state(
-        config,
-        available_tool_names=set(build_available_tool_specs()),
-    )
-    turn_state = StreamlitTurnState(busy=True, active_turn_number=1)
-    inspector_state = StreamlitInspectorState()
+    """Execute one chat turn using the shared Streamlit reducers."""
+    runtime = runtime_config or _default_runtime_config(config, root_path=root_path)
     transcript_entries: list[StreamlitTranscriptEntry] = []
     token_usage: ChatTokenUsage | None = None
-    updated_session_state = session_state
+    inspector_state = StreamlitInspectorState()
+    turn_state = StreamlitTurnState(busy=True, active_turn_number=1)
     runner = _build_chat_runner(
-        root_path=root_path,
+        session_id="test-session",
         config=config,
+        runtime=runtime,
         provider=provider,
         session_state=session_state,
-        control_state=control_state,
         user_message=user_message,
     )
+    updated_session_state = session_state
     resolve_approval = approval_resolver or (lambda approval: False)
     for event in runner:
         if isinstance(event, ChatWorkflowApprovalEvent):
@@ -1255,9 +1544,7 @@ def process_streamlit_chat_turn(
                 "tool_execution": inspector_state.tool_executions,
             }[inspector_event.kind]
             _append_inspector_entry(
-                target,
-                label=label,
-                payload=inspector_event.payload,
+                target, label=label, payload=inspector_event.payload
             )
             continue
         if isinstance(event, ChatWorkflowStatusEvent):
@@ -1316,327 +1603,670 @@ def process_streamlit_chat_turn(
     )
 
 
-def _render_final_response(response: ChatFinalResponse) -> None:
-    st = _streamlit_module()
-    st.markdown(response.answer)
-    if response.confidence is not None:
-        st.caption(f"Confidence: {response.confidence:.2f}")
-    if response.citations:
-        st.markdown("**Citations**")
-        for citation in response.citations:
-            st.markdown(f"- `{format_citation(citation)}`")
-            if citation.excerpt:
-                st.code(citation.excerpt)
-    if response.uncertainty:
-        st.markdown("**Uncertainty**")
-        for item in response.uncertainty:
-            st.markdown(f"- {item}")
-    if response.missing_information:
-        st.markdown("**Missing Information**")
-        for item in response.missing_information:
-            st.markdown(f"- {item}")
-    if response.follow_up_suggestions:
-        st.markdown("**Follow-up Suggestions**")
-        for item in response.follow_up_suggestions:
-            st.markdown(f"- {item}")
-
-
-def _render_transcript_entry(entry: StreamlitTranscriptEntry) -> None:
-    st = _streamlit_module()
-    if entry.role == "user":
-        with st.chat_message("user"):
-            st.markdown(entry.text)
-        return
-    with st.chat_message("assistant"):
-        if entry.role == "system":
-            st.caption("System")
-            st.markdown(entry.text)
-            return
-        if entry.role == "error":
-            st.caption("Error")
-            st.error(entry.text)
-            return
-        if entry.assistant_completion_state == "interrupted":
-            st.caption("Assistant (interrupted)")
-            st.markdown(entry.text)
-            return
-        if entry.final_response is not None:
-            _render_final_response(entry.final_response)
-            return
-        st.markdown(entry.text)
-
-
-def _transcript_export_text() -> str:
-    st = _streamlit_module()
-    entries: list[StreamlitTranscriptEntry] = st.session_state[_TRANSCRIPT_STATE_SLOT]
-    parts = [entry.transcript_text for entry in entries if entry.transcript_text]
-    return "\n\n".join(parts).rstrip()
-
-
-def _render_sidebar_session(
-    *,
-    root_path: Path,
-    config: TextualChatConfig,
-    control_state: ChatControlState,
-    turn_state: StreamlitTurnState,
-) -> None:
-    st = _streamlit_module()
-    token_usage = st.session_state[_TOKEN_USAGE_STATE_SLOT]
-    st.subheader("Session")
-    st.markdown(f"**Root**: `{root_path}`")
-    st.markdown(f"**Model**: `{control_state.active_model_name}`")
-    st.caption(f"Status: {turn_state.status_text or 'idle'}")
-    if config.ui.show_token_usage and isinstance(token_usage, ChatTokenUsage):
-        st.caption(
-            "Session tokens: "
-            f"{token_usage.session_tokens or '-'} | "
-            f"Active context: {token_usage.active_context_tokens or '-'}"
-        )
-    if turn_state.confidence is not None:
-        st.caption(f"Confidence: {turn_state.confidence:.2f}")
-    if st.button("Clear chat", use_container_width=True):
-        _reset_session_state(root_path, config)
-        st.rerun()
-    if turn_state.busy and st.button("Stop active turn", use_container_width=True):
-        _cancel_active_turn()
-        st.rerun()
-    if turn_state.busy and st.button("Refresh active turn", use_container_width=True):
-        st.rerun()
-
-
-def _render_sidebar_appearance_controls() -> None:
-    st = _streamlit_module()
-    st.subheader("Appearance")
-    use_dark_mode = st.toggle(
-        "Dark mode",
-        value=_streamlit_theme_mode() == "dark",
-        key="appearance:dark_mode",
-    )
-    st.session_state[_THEME_MODE_STATE_SLOT] = "dark" if use_dark_mode else "light"
-
-
-def _render_sidebar_model_controls(
+def _provider_control_strip(  # pragma: no cover  # noqa: C901
+    app_state: StreamlitWorkspaceState,
     *,
     config: TextualChatConfig,
-    control_state: ChatControlState,
+    session_id: str,
 ) -> None:
     st = _streamlit_module()
-    st.subheader("Model Controls")
-    switch_target = st.text_input(
-        "Switch model",
-        value=control_state.active_model_name,
+    record = app_state.sessions[session_id]
+    runtime = record.runtime
+    turn_state = _turn_state_for(app_state, session_id)
+    busy = turn_state.busy
+    controls_top = st.columns([1.2, 1.8, 2.5])
+    provider_values = [preset.value for preset in ProviderPreset]
+    selected_provider = controls_top[0].selectbox(
+        "Provider",
+        options=provider_values,
+        index=provider_values.index(runtime.provider.value),
+        key=f"provider:{session_id}",
+        disabled=busy,
     )
-    if st.button("List available models", use_container_width=True):
-        _apply_streamlit_command(
-            _run_streamlit_command(config=config, raw_command="/model")
-        )
-        st.rerun()
-    if st.button("Switch model", use_container_width=True):
-        _apply_streamlit_command(
-            _run_streamlit_command(
-                config=config,
-                raw_command=f"/model {switch_target}".rstrip(),
-            )
-        )
+    if selected_provider != runtime.provider.value:
+        runtime.provider = ProviderPreset(selected_provider)
+        runtime.api_base_url = _default_base_url_for_provider(config, runtime.provider)
+        runtime.model_name = _default_model_for_provider(config, runtime.provider)
+        _remember_runtime_preferences(app_state.preferences, runtime)
+        _touch_record(record)
+        _save_workspace_state(app_state)
         st.rerun()
 
-
-def _render_sidebar_tool_controls(control_state: ChatControlState) -> None:
-    st = _streamlit_module()
-    available_tool_specs = build_available_tool_specs()
-    st.subheader("Tool Controls")
-    for tool_name in sorted(available_tool_specs):
-        enabled = tool_name in control_state.enabled_tools
-        checked = st.checkbox(
-            f"Enable {tool_name}",
-            value=enabled,
-            key=f"tool:{tool_name}",
-        )
-        if checked != enabled:
-            if checked:
-                control_state.enabled_tools.add(tool_name)
-            else:
-                control_state.enabled_tools.discard(tool_name)
-    if st.button("Reset tools to defaults", use_container_width=True):
-        control_state.enabled_tools = set(control_state.default_enabled_tools)
-        st.rerun()
-
-
-def _render_sidebar_approval_controls(
-    *,
-    control_state: ChatControlState,
-    turn_state: StreamlitTurnState,
-) -> None:
-    st = _streamlit_module()
-    st.subheader("Approval Controls")
-    approval_enabled = SideEffectClass.LOCAL_READ in control_state.require_approval_for
-    require_approval = st.checkbox(
-        "Require approval for local_read",
-        value=approval_enabled,
-        key="approvals:local_read",
+    model_options, model_notice = _available_model_options(
+        runtime, app_state.preferences, config
     )
-    if require_approval != approval_enabled:
-        if require_approval:
-            control_state.require_approval_for.add(SideEffectClass.LOCAL_READ)
+    if runtime.model_name not in model_options:
+        model_options = _dedupe_preserve([runtime.model_name, *model_options])
+    selected_model = controls_top[1].selectbox(
+        "Model",
+        options=model_options,
+        index=model_options.index(runtime.model_name),
+        key=f"model:{session_id}",
+        disabled=busy,
+    )
+    if selected_model != runtime.model_name:
+        runtime.model_name = selected_model
+        _remember_runtime_preferences(app_state.preferences, runtime)
+        _touch_record(record)
+        _save_workspace_state(app_state)
+        st.rerun()
+
+    root_input_col, root_apply_col, root_clear_col = controls_top[2].columns(
+        [5, 1.2, 1.2]
+    )
+    root_value = root_input_col.text_input(
+        "Root directory",
+        value=runtime.root_path or "",
+        key=f"root-input:{session_id}",
+        disabled=busy,
+        placeholder="No root selected",
+    )
+    if root_apply_col.button("Apply", key=f"root-apply:{session_id}", disabled=busy):
+        resolved_root, error_message = _resolve_root_text(root_value)
+        if error_message is not None:
+            _append_notice(record, role="error", text=error_message)
         else:
-            control_state.require_approval_for.discard(SideEffectClass.LOCAL_READ)
-    if turn_state.pending_approval is None:
-        return
-    st.code(pretty_json(turn_state.pending_approval.model_dump(mode="json")))
-    if st.button(
-        "Approve pending request",
-        use_container_width=True,
-        disabled=turn_state.approval_decision_in_flight,
-    ):
-        _resolve_active_approval(approved=True)
+            previous_root = runtime.root_path
+            runtime.root_path = resolved_root
+            if (
+                previous_root is None
+                and resolved_root is not None
+                and not runtime.enabled_tools
+            ):
+                runtime.enabled_tools = sorted(
+                    _default_enabled_tool_names(config, root_path=Path(resolved_root))
+                )
+            else:
+                runtime.enabled_tools = sorted(
+                    _filter_enabled_tools_for_root(
+                        set(runtime.enabled_tools),
+                        root_path=runtime.root_path,
+                    )
+                )
+            _remember_runtime_preferences(app_state.preferences, runtime)
+            _append_notice(
+                record,
+                role="system",
+                text=f"Workspace root updated to {runtime.root_path or 'none'}.",
+            )
+        _touch_record(record)
+        _save_workspace_state(app_state)
         st.rerun()
-    if st.button(
-        "Deny pending request",
-        use_container_width=True,
-        disabled=turn_state.approval_decision_in_flight,
-    ):
-        _resolve_active_approval(approved=False)
+    if root_clear_col.button("Clear", key=f"root-clear:{session_id}", disabled=busy):
+        runtime.root_path = None
+        runtime.enabled_tools = sorted(
+            _filter_enabled_tools_for_root(set(runtime.enabled_tools), root_path=None)
+        )
+        _append_notice(record, role="system", text="Workspace root cleared.")
+        _touch_record(record)
+        _save_workspace_state(app_state)
         st.rerun()
 
+    lower_controls = st.columns([1.8, 1.6, 1.6])
+    recent_roots = [_ROOT_SENTINEL, *app_state.preferences.recent_roots]
+    selected_recent_root = lower_controls[0].selectbox(
+        "Recent roots",
+        options=recent_roots,
+        index=0,
+        format_func=lambda value: (
+            "Choose a recent root" if value == _ROOT_SENTINEL else value
+        ),
+        key=f"recent-root:{session_id}",
+        disabled=busy,
+    )
+    recent_root_key = f"recent-root:{session_id}"
+    if selected_recent_root != _ROOT_SENTINEL:
+        resolved_root, error_message = _resolve_root_text(selected_recent_root)
+        st.session_state[recent_root_key] = _ROOT_SENTINEL
+        if error_message is not None:
+            _append_notice(record, role="error", text=error_message)
+        elif resolved_root is not None:
+            previous_root = runtime.root_path
+            runtime.root_path = resolved_root
+            runtime.enabled_tools = sorted(
+                _default_enabled_tool_names(config, root_path=Path(resolved_root))
+                if previous_root is None and not runtime.enabled_tools
+                else _filter_enabled_tools_for_root(
+                    set(runtime.enabled_tools),
+                    root_path=resolved_root,
+                )
+            )
+            _remember_runtime_preferences(app_state.preferences, runtime)
+            _append_notice(
+                record,
+                role="system",
+                text=f"Workspace root updated to {runtime.root_path}.",
+            )
+        _touch_record(record)
+        _save_workspace_state(app_state)
+        st.rerun()
 
-def _render_sidebar_transcript_export() -> None:
+    show_base_url = runtime.provider is not ProviderPreset.OPENAI
+    base_url_value = lower_controls[1].text_input(
+        "Base URL",
+        value=runtime.api_base_url or "",
+        key=f"base-url:{session_id}",
+        disabled=busy or not show_base_url,
+        placeholder="Provider default",
+    )
+    if show_base_url and (base_url_value.strip() or None) != runtime.api_base_url:
+        runtime.api_base_url = base_url_value.strip() or None
+        _remember_runtime_preferences(app_state.preferences, runtime)
+        _touch_record(record)
+        _save_workspace_state(app_state)
+
+    llm_config = _llm_config_for_runtime(config, runtime)
+    metadata = llm_config.credential_prompt_metadata()
+    if metadata.expects_api_key:
+        env_var = llm_config.api_key_env_var or "OPENAI_API_KEY"
+        cached_api_key = _current_api_key(llm_config)
+        lower_controls[2].caption(
+            f"API key: {env_var} {'available' if cached_api_key else 'required'}"
+        )
+        if os.getenv(env_var) is None:
+            entered_key = lower_controls[2].text_input(
+                "API key",
+                value="",
+                type="password",
+                key=f"api-key:{env_var}",
+                disabled=busy,
+            )
+            if entered_key.strip():
+                cache = st.session_state.setdefault(_SECRET_CACHE_STATE_SLOT, {})
+                cache[env_var] = entered_key.strip()
+    else:
+        lower_controls[2].caption("API key: not required for this provider")
+
+    if model_notice is not None:
+        st.caption(model_notice)
+
+
+def _resolve_root_text(raw_value: str) -> tuple[str | None, str | None]:
+    cleaned = raw_value.strip()
+    if cleaned == "":
+        return None, None
+    candidate = Path(cleaned).expanduser().resolve()
+    if not candidate.exists():
+        return None, f"Root directory does not exist: {candidate}"
+    if not candidate.is_dir():
+        return None, f"Root path is not a directory: {candidate}"
+    return str(candidate), None
+
+
+def _render_summary_chips(
+    record: StreamlitPersistedSessionRecord,
+) -> None:  # pragma: no cover
     st = _streamlit_module()
-    transcript_export = _transcript_export_text()
-    st.subheader("Transcript Export")
-    show_export = st.checkbox(
-        "Show transcript export",
-        value=bool(st.session_state[_TRANSCRIPT_EXPORT_STATE_SLOT]),
-        key="transcript_export",
-    )
-    st.session_state[_TRANSCRIPT_EXPORT_STATE_SLOT] = show_export
-    if not show_export:
-        return
-    st.text_area("Transcript export", transcript_export, height=220)
-    st.download_button(
-        "Download transcript",
-        data=transcript_export,
-        file_name="llm-tools-chat-transcript.txt",
-        use_container_width=True,
+    token_usage = record.token_usage
+    chips = [
+        f"<span class='llm-tools-chip'>root: {record.runtime.root_path or 'none'}</span>",
+        f"<span class='llm-tools-chip'>provider: {record.runtime.provider.value}</span>",
+        f"<span class='llm-tools-chip'>model: {record.runtime.model_name}</span>",
+    ]
+    if isinstance(token_usage, ChatTokenUsage):
+        chips.append(
+            f"<span class='llm-tools-chip'>tokens: {token_usage.session_tokens or '-'}</span>"
+        )
+        chips.append(
+            f"<span class='llm-tools-chip'>context: {token_usage.active_context_tokens or '-'}</span>"
+        )
+    if record.confidence is not None:
+        chips.append(
+            f"<span class='llm-tools-chip'>confidence: {record.confidence:.2f}</span>"
+        )
+    st.markdown(
+        f"<div class='llm-tools-chip-row'>{''.join(chips)}</div>",
+        unsafe_allow_html=True,
     )
 
 
-def _render_sidebar_inspector(
+def _tools_popover_context(  # pragma: no cover
+    st: Any, label: str
+) -> AbstractContextManager[Any]:
+    popover = getattr(st, "popover", None)
+    if callable(popover):
+        return cast(AbstractContextManager[Any], popover(label))
+    return cast(AbstractContextManager[Any], st.expander(label))
+
+
+def _render_tools_popover(  # pragma: no cover
+    app_state: StreamlitWorkspaceState,
     *,
-    control_state: ChatControlState,
-    turn_state: StreamlitTurnState,
+    session_id: str,
+    config: TextualChatConfig,
 ) -> None:
     st = _streamlit_module()
-    available_tool_specs = build_available_tool_specs()
-    st.subheader("Inspector")
-    show_inspector = st.checkbox(
-        "Show inspector",
-        value=control_state.inspector_open,
-        key="show_inspector",
-    )
-    control_state.inspector_open = show_inspector
-    if not show_inspector:
-        return
-    st.code(
-        pretty_json(
-            build_tool_state_payload(
-                control_state,
-                available_tool_specs=available_tool_specs,
+    record = app_state.sessions[session_id]
+    runtime = record.runtime
+    busy = _turn_state_for(app_state, session_id).busy
+    tool_specs = _all_tool_specs()
+    workspace_tool_names = _workspace_tool_names()
+    with _tools_popover_context(st, "Tools"):
+        st.caption("Enable built-in tools and the capabilities they require.")
+        preset_cols = st.columns(3)
+        if preset_cols[0].button(
+            "Default", key=f"tools-default:{session_id}", disabled=busy
+        ):
+            runtime.enabled_tools = sorted(
+                _default_enabled_tool_names(
+                    config,
+                    root_path=Path(runtime.root_path) if runtime.root_path else None,
+                )
             )
+            _touch_record(record)
+            _save_workspace_state(app_state)
+            st.rerun()
+        if preset_cols[1].button(
+            "Workspace + Git",
+            key=f"tools-git:{session_id}",
+            disabled=busy or runtime.root_path is None,
+        ):
+            runtime.enabled_tools = sorted(
+                _filter_enabled_tools_for_root(
+                    _safe_local_read_tool_names().union(
+                        {
+                            name
+                            for name, spec in tool_specs.items()
+                            if "git" in spec.tags
+                        }
+                    ),
+                    root_path=runtime.root_path,
+                )
+            )
+            _touch_record(record)
+            _save_workspace_state(app_state)
+            st.rerun()
+        if preset_cols[2].button(
+            "All built-ins", key=f"tools-all:{session_id}", disabled=busy
+        ):
+            runtime.enabled_tools = sorted(
+                _filter_enabled_tools_for_root(
+                    set(tool_specs),
+                    root_path=runtime.root_path,
+                )
+            )
+            runtime.allow_network = True
+            runtime.allow_subprocess = runtime.root_path is not None
+            _touch_record(record)
+            _save_workspace_state(app_state)
+            st.rerun()
+
+        capability_cols = st.columns(3)
+        allow_network = capability_cols[0].toggle(
+            "Allow network",
+            value=runtime.allow_network,
+            key=f"allow-network:{session_id}",
+            disabled=busy,
         )
+        allow_filesystem = capability_cols[1].toggle(
+            "Allow filesystem",
+            value=runtime.allow_filesystem,
+            key=f"allow-filesystem:{session_id}",
+            disabled=busy,
+        )
+        allow_subprocess = capability_cols[2].toggle(
+            "Allow subprocess",
+            value=runtime.allow_subprocess,
+            key=f"allow-subprocess:{session_id}",
+            disabled=busy or runtime.root_path is None,
+        )
+        if (
+            allow_network != runtime.allow_network
+            or allow_filesystem != runtime.allow_filesystem
+            or allow_subprocess != runtime.allow_subprocess
+        ):
+            runtime.allow_network = allow_network
+            runtime.allow_filesystem = allow_filesystem
+            runtime.allow_subprocess = allow_subprocess
+            _touch_record(record)
+            _save_workspace_state(app_state)
+
+        approval_cols = st.columns(4)
+        for side_effect, label, col in (
+            (SideEffectClass.LOCAL_READ, "Approve local read", approval_cols[0]),
+            (SideEffectClass.LOCAL_WRITE, "Approve local write", approval_cols[1]),
+            (SideEffectClass.EXTERNAL_READ, "Approve external read", approval_cols[2]),
+            (
+                SideEffectClass.EXTERNAL_WRITE,
+                "Approve external write",
+                approval_cols[3],
+            ),
+        ):
+            approved = side_effect in runtime.require_approval_for
+            toggled = col.toggle(
+                label,
+                value=approved,
+                key=f"approval:{session_id}:{side_effect.value}",
+                disabled=busy,
+            )
+            if toggled != approved:
+                if toggled:
+                    runtime.require_approval_for.add(side_effect)
+                else:
+                    runtime.require_approval_for.discard(side_effect)
+                _touch_record(record)
+                _save_workspace_state(app_state)
+
+        grouped_tools: dict[str, list[tuple[str, ToolSpec]]] = {}
+        for name, spec in sorted(tool_specs.items()):
+            grouped_tools.setdefault(_tool_group(spec), []).append((name, spec))
+        for group_name, entries in grouped_tools.items():
+            st.markdown(f"**{group_name}**")
+            for tool_name, spec in entries:
+                enabled = tool_name in runtime.enabled_tools
+                needs_workspace = tool_name in workspace_tool_names
+                disabled = busy or (needs_workspace and runtime.root_path is None)
+                label = f"{tool_name} ({spec.side_effects.value})"
+                checked = st.checkbox(
+                    label,
+                    value=enabled,
+                    key=f"tool:{session_id}:{tool_name}",
+                    disabled=disabled,
+                )
+                if checked != enabled:
+                    if checked:
+                        runtime.enabled_tools = sorted(
+                            _filter_enabled_tools_for_root(
+                                set(runtime.enabled_tools).union({tool_name}),
+                                root_path=runtime.root_path,
+                            )
+                        )
+                    else:
+                        runtime.enabled_tools = sorted(
+                            set(runtime.enabled_tools).difference({tool_name})
+                        )
+                    _touch_record(record)
+                    _save_workspace_state(app_state)
+                if disabled and needs_workspace:
+                    st.caption("Select a root directory to enable this tool.")
+
+
+def _render_session_details(  # pragma: no cover
+    app_state: StreamlitWorkspaceState,
+    *,
+    session_id: str,
+) -> None:
+    st = _streamlit_module()
+    record = app_state.sessions[session_id]
+    turn_state = _turn_state_for(app_state, session_id)
+    expanded = record.runtime.inspector_open or session_id in app_state.show_export_for
+    with st.expander("Session details", expanded=expanded):
+        inspector_tab, export_tab, advanced_tab = st.tabs(
+            ["Inspector", "Export", "Advanced"]
+        )
+        with inspector_tab:
+            tool_state = {
+                "enabled_tools": record.runtime.enabled_tools,
+                "disabled_tools": sorted(
+                    set(_all_tool_specs()).difference(record.runtime.enabled_tools)
+                ),
+                "require_approval_for": sorted(
+                    side_effect.value
+                    for side_effect in record.runtime.require_approval_for
+                ),
+                "allow_network": record.runtime.allow_network,
+                "allow_filesystem": record.runtime.allow_filesystem,
+                "allow_subprocess": record.runtime.allow_subprocess,
+            }
+            st.code(pretty_json(tool_state))
+            for label, entries in (
+                ("Model Messages", record.inspector_state.provider_messages),
+                ("Parsed Responses", record.inspector_state.parsed_responses),
+                ("Tool Execution Records", record.inspector_state.tool_executions),
+            ):
+                st.caption(label)
+                for entry in entries:
+                    st.code(f"{entry.label}\n{pretty_json(entry.payload)}")
+        with export_tab:
+            export_text = _transcript_export_text(record.transcript)
+            st.text_area(
+                "Transcript export", export_text, height=240, key=f"export:{session_id}"
+            )
+            st.download_button(
+                "Download transcript",
+                data=export_text,
+                file_name="llm-tools-chat-transcript.txt",
+                use_container_width=True,
+            )
+        with advanced_tab:
+            st.code(pretty_json(record.model_dump(mode="json")))
+            if turn_state.pending_approval is not None:
+                st.code(
+                    pretty_json(turn_state.pending_approval.model_dump(mode="json"))
+                )
+
+
+def _render_status_and_composer(  # pragma: no cover
+    app_state: StreamlitWorkspaceState,
+    *,
+    session_id: str,
+    config: TextualChatConfig,
+) -> None:
+    st = _streamlit_module()
+    turn_state = _turn_state_for(app_state, session_id)
+    status_cols = st.columns([4, 1, 1, 1])
+    status_text = turn_state.status_text or "idle"
+    status_cols[0].markdown(
+        (
+            "<div class='llm-tools-status'>"
+            "<div class='llm-tools-status-label'>Current status</div>"
+            f"<div class='llm-tools-status-text'>{status_text}</div>"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
     )
     if turn_state.pending_approval is not None:
-        st.code(pretty_json(turn_state.pending_approval.model_dump(mode="json")))
-    inspector_state = st.session_state[_INSPECTOR_STATE_SLOT]
-    for label, entries in (
-        ("Model Messages", inspector_state.provider_messages),
-        ("Parsed Responses", inspector_state.parsed_responses),
-        ("Tool Execution Records", inspector_state.tool_executions),
-    ):
-        st.caption(label)
-        for entry in entries:
-            st.code(f"{entry.label}\n{pretty_json(entry.payload)}")
+        if status_cols[1].button(
+            "Approve",
+            key=f"approve:{session_id}",
+            use_container_width=True,
+            disabled=turn_state.approval_decision_in_flight,
+        ):
+            _resolve_active_approval(app_state, session_id=session_id, approved=True)
+            st.rerun()
+        if status_cols[2].button(
+            "Deny",
+            key=f"deny:{session_id}",
+            use_container_width=True,
+            disabled=turn_state.approval_decision_in_flight,
+        ):
+            _resolve_active_approval(app_state, session_id=session_id, approved=False)
+            st.rerun()
+    elif turn_state.busy:
+        if status_cols[1].button(
+            "Stop",
+            key=f"stop:{session_id}",
+            use_container_width=True,
+        ):
+            _cancel_active_turn(app_state, session_id=session_id)
+            _save_workspace_state(app_state)
+            st.rerun()
+    composer_cols = st.columns([1.15, 6, 1.15])
+    with composer_cols[0]:
+        _render_tools_popover(app_state, session_id=session_id, config=config)
+    draft_key = f"composer:{session_id}"
+    composer_cols[1].text_area(
+        "Message",
+        key=draft_key,
+        value=app_state.drafts.get(session_id, ""),
+        height=110,
+        placeholder="Ask a grounded question or use slash commands like /help.",
+        label_visibility="collapsed",
+    )
+    app_state.drafts[session_id] = str(st.session_state.get(draft_key, ""))
+    send_clicked = composer_cols[2].button(
+        "Send",
+        key=f"send:{session_id}",
+        use_container_width=True,
+    )
+    if not send_clicked:
+        return
+    prompt = app_state.drafts.get(session_id, "").strip()
+    if not prompt:
+        return
+    app_state.drafts[session_id] = ""
+    st.session_state[draft_key] = ""
+    if _is_command_prompt(prompt):
+        app_state.drafts[session_id] = prompt
+        outcome = _run_streamlit_command(
+            config=config,
+            app_state=app_state,
+            session_id=session_id,
+        )
+        _apply_streamlit_command(
+            app_state,
+            session_id=session_id,
+            outcome=outcome,
+        )
+        app_state.drafts[session_id] = ""
+        st.rerun()
+    _submit_streamlit_prompt(
+        app_state=app_state,
+        session_id=session_id,
+        config=config,
+        prompt=prompt,
+    )
+    st.rerun()
 
 
-def _render_sidebar(root_path: Path, config: TextualChatConfig) -> None:
+def _render_sidebar(  # pragma: no cover
+    app_state: StreamlitWorkspaceState,
+    *,
+    config: TextualChatConfig,
+    root_path: Path | None,
+) -> None:
     st = _streamlit_module()
-    control_state: ChatControlState = st.session_state[_CONTROL_STATE_SLOT]
-    turn_state: StreamlitTurnState = st.session_state[_TURN_STATE_SLOT]
     with st.sidebar:
-        _render_sidebar_session(
+        st.markdown(
+            "<div class='llm-tools-sidebar-title'>llm-tools chat</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption("Session rail")
+        active_record = _active_session(app_state)
+        if st.button("New chat", use_container_width=True):
+            _create_session(
+                app_state,
+                template_runtime=active_record.runtime,
+            )
+            st.rerun()
+        theme_mode = st.toggle(
+            "Dark mode",
+            value=app_state.preferences.theme_mode == "dark",
+            key="theme-mode",
+        )
+        app_state.preferences.theme_mode = "dark" if theme_mode else "light"
+        _save_workspace_state(app_state)
+        search_value = st.text_input("Search sessions", value="", key="session-search")
+        filtered_ids = [
+            session_id
+            for session_id in app_state.session_order
+            if _session_matches(app_state.sessions[session_id], search_value)
+        ]
+        for session_id in filtered_ids:
+            record = app_state.sessions[session_id]
+            is_active = session_id == app_state.active_session_id
+            row_cols = st.columns([5, 1])
+            button_label = f"{'● ' if is_active else ''}{record.summary.title}"
+            if row_cols[0].button(
+                button_label,
+                key=f"session-select:{session_id}",
+                use_container_width=True,
+            ):
+                app_state.active_session_id = session_id
+                _save_workspace_state(app_state)
+                st.rerun()
+            if row_cols[1].button(
+                "×", key=f"session-delete:{session_id}", use_container_width=True
+            ):
+                _delete_session(
+                    app_state,
+                    session_id=session_id,
+                    config=config,
+                    root_path=root_path,
+                )
+                st.rerun()
+            meta_bits = [record.runtime.provider.value, record.runtime.model_name]
+            if record.runtime.root_path:
+                meta_bits.append(record.runtime.root_path)
+            st.markdown(
+                f"<div class='llm-tools-session-meta'>{' | '.join(meta_bits)}</div>",
+                unsafe_allow_html=True,
+            )
+
+
+def _session_matches(record: StreamlitPersistedSessionRecord, query: str) -> bool:
+    cleaned = query.strip().lower()
+    if cleaned == "":
+        return True
+    haystack = " ".join(
+        [
+            record.summary.title,
+            record.runtime.provider.value,
+            record.runtime.model_name,
+            record.runtime.root_path or "",
+        ]
+    ).lower()
+    return cleaned in haystack
+
+
+def run_streamlit_chat_app(  # pragma: no cover
+    *, root_path: Path | None, config: TextualChatConfig
+) -> None:
+    """Render the Streamlit chat UI."""
+    st = _streamlit_module()
+    st.set_page_config(**_page_config())
+    if _APP_STATE_SLOT not in st.session_state:
+        st.session_state[_APP_STATE_SLOT] = _load_workspace_state(
             root_path=root_path,
             config=config,
-            control_state=control_state,
-            turn_state=turn_state,
         )
-        _render_sidebar_appearance_controls()
-        _render_sidebar_model_controls(
-            config=config,
-            control_state=control_state,
-        )
-        _render_sidebar_tool_controls(control_state)
-        _render_sidebar_approval_controls(
-            control_state=control_state,
-            turn_state=turn_state,
-        )
-        _render_sidebar_transcript_export()
-        _render_sidebar_inspector(
-            control_state=control_state,
-            turn_state=turn_state,
-        )
+    st.session_state.setdefault(_ACTIVE_TURN_STATE_SLOT, None)
+    st.session_state.setdefault(_SECRET_CACHE_STATE_SLOT, {})
+    app_state: StreamlitWorkspaceState = st.session_state[_APP_STATE_SLOT]
 
+    pending_prompt = _drain_active_turn_events(app_state)
+    _render_theme(app_state.preferences)
+    _render_sidebar(app_state, config=config, root_path=root_path)
+    _render_brand_header()
+    active_record = _active_session(app_state)
+    for notice in app_state.startup_notices:
+        st.warning(notice)
+    app_state.startup_notices.clear()
 
-def run_streamlit_chat_app(*, root_path: Path, config: TextualChatConfig) -> None:
-    """Render the Streamlit repository chat UI."""
-    st = _streamlit_module()
-    st.set_page_config(**_streamlit_page_config())
-    st.title("llm-tools Streamlit Chat")
-    _ensure_session_state(root_path, config)
-
-    pending_prompt = _drain_active_turn_events()
-    _render_sidebar(root_path, config)
-    _render_streamlit_theme()
-
-    api_key = _resolve_api_key(config)
-    if config.llm.credential_prompt_metadata().expects_api_key and api_key is None:
-        for entry in st.session_state[_TRANSCRIPT_STATE_SLOT]:
-            _render_transcript_entry(entry)
-        return
+    _provider_control_strip(
+        app_state,
+        config=config,
+        session_id=app_state.active_session_id,
+    )
+    _render_summary_chips(active_record)
 
     if pending_prompt is not None and pending_prompt.strip():
         _submit_streamlit_prompt(
-            root_path=root_path,
+            app_state=app_state,
+            session_id=app_state.active_session_id,
             config=config,
             prompt=pending_prompt,
         )
 
-    for entry in st.session_state[_TRANSCRIPT_STATE_SLOT]:
-        _render_transcript_entry(entry)
+    if not active_record.transcript:
+        _render_empty_state(active_record)
+    else:
+        for entry in active_record.transcript:
+            _render_transcript_entry(entry)
 
-    if config.ui.show_footer_help:
-        st.caption(
-            "Use /help for controls. Native session, model, tool, approval, transcript, and inspector controls are in the sidebar."
-        )
+    _render_session_details(app_state, session_id=app_state.active_session_id)
+    _render_status_and_composer(
+        app_state,
+        session_id=app_state.active_session_id,
+        config=config,
+    )
 
-    prompt = st.chat_input("Ask about this repository")
-    if prompt and prompt.strip():
-        if _is_command_prompt(prompt):
-            outcome = _run_streamlit_command(config=config, raw_command=prompt.strip())
-            _apply_streamlit_command(outcome)
-        else:
-            _submit_streamlit_prompt(
-                root_path=root_path,
-                config=config,
-                prompt=prompt.strip(),
-            )
-        st.rerun()
-
-    turn_state: StreamlitTurnState = st.session_state[_TURN_STATE_SLOT]
-    if turn_state.busy and turn_state.pending_approval is None:
+    if _turn_state_for(app_state, app_state.active_session_id).busy:
         time.sleep(_POLL_INTERVAL_SECONDS)
         st.rerun()
 
 
-def _launch_streamlit_app(script_args: Sequence[str]) -> int:
+def _launch_streamlit_app(script_args: Sequence[str]) -> int:  # pragma: no cover
     from streamlit.web import cli as streamlit_cli
 
     previous_argv = list(sys.argv)
@@ -1655,16 +2285,18 @@ def _launch_streamlit_app(script_args: Sequence[str]) -> int:
         sys.argv = previous_argv
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover
     """Launch the Streamlit chat app through the Streamlit CLI."""
     script_args = list(argv) if argv is not None else list(sys.argv[1:])
     return _launch_streamlit_app(script_args)
 
 
-def _run_streamlit_script(argv: Sequence[str] | None = None) -> None:
+def _run_streamlit_script(
+    argv: Sequence[str] | None = None,
+) -> None:  # pragma: no cover
     args = build_parser().parse_args(list(argv) if argv is not None else sys.argv[1:])
     run_streamlit_chat_app(
-        root_path=args.directory.resolve(),
+        root_path=_resolve_root_argument(args),
         config=_resolve_chat_config(args),
     )
 

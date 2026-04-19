@@ -1,10 +1,13 @@
 # Implementation Docs
 
-This section tracks repository execution status and implementation planning.
+This section tracks implementation-specific planning artifacts that complement
+the repository-wide backlog.
 
-- [Tasks](tasks.md)
+The root [`TASKS.md`](../../TASKS.md) is the authoritative backlog and status
+document for repository work.
+
 - [Harness App Integration Plan](harness-app-integration-plan.md)
 
-Use these docs when you want to understand what has already been implemented,
-what remains open, and how the project has been staged over time.
+Use these docs when you want supporting implementation plans that sit beside,
+but do not replace, the root backlog.
 

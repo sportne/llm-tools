@@ -2,12 +2,12 @@
 
 ## Purpose
 
-`harness_api` is the future home for durable, multi-turn orchestration above
+`harness_api` is the durable, multi-turn orchestration layer above
 `workflow_api`.
 
 `workflow_api` stays the one-turn bridge: it prepares a model-facing contract,
 accepts parsed model output, and executes the returned tool invocations
-sequentially. `harness_api` will own session-level control flow that persists
+sequentially. `harness_api` owns the session-level control flow that persists
 across turns.
 
 ## Responsibilities
@@ -26,12 +26,12 @@ in the one-turn workflow bridge:
 
 It should consume the lower-layer typed contracts rather than redefining them.
 
-## Proposed module map
+## Module map
 
-The package is intentionally scaffolded first as a boundary, then expanded with
-explicit modules as the harness implementation lands.
+The package started as a boundary scaffold and now has concrete modules for the
+implemented harness surface, plus room for future extension.
 
-Proposed modules:
+Implemented modules:
 
 - `models` for canonical session, turn, task, state, and decision models
 - `tasks` for explicit task lifecycle transitions and state-machine helpers
@@ -42,23 +42,12 @@ Proposed modules:
 - `planning` for task decomposition and replanning hooks
 - `context` for derived turn-context construction
 - `replay` for trace reconstruction and debugging support
+- `session` for the public Python session service and the minimal built-in
+  runner surfaces
 
-The package boundary now has two concrete harness submodules:
-
-- `harness_api.models` for canonical persisted session, task, turn, and state
-  records
-- `harness_api.verification` for verifier contracts, task-level expectations,
-  evidence records, and no-progress signals
-
-The remaining modules above stay planned and can be added incrementally as the
-implementation lands.
-
-Two additional harness submodules are now concrete:
-
-- `harness_api.planning` for deterministic task selection and explicit
-  replanning-trigger derivation
-- `harness_api.context` for provider-neutral turn-context projection and
-  budgeted context construction
+Future extensions can still add richer planning, decomposition, verification,
+and app-facing helpers without changing the role of the implemented modules
+above.
 
 ## Canonical model inventory
 
@@ -243,8 +232,8 @@ not required to resume a session.
 
 ## Resume semantics
 
-`harness_api.resume` classifies persisted snapshots before any future
-multi-turn executor continues work.
+`harness_api.resume` classifies persisted snapshots before the multi-turn
+executor continues work.
 
 `ResumeDisposition` currently distinguishes:
 
@@ -455,7 +444,7 @@ by default before storage or presentation.
 `workflow_api` remains the one-turn bridge between parsed model output and
 tool execution.
 
-`harness_api` will own:
+`harness_api` owns:
 
 - durable session state
 - multi-turn progress decisions

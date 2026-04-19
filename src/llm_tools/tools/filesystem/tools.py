@@ -13,7 +13,7 @@ from llm_tools.tool_api import (
     ToolRegistry,
     ToolSpec,
 )
-from llm_tools.tools._path_utils import resolve_workspace_path
+from llm_tools.tools._path_utils import get_workspace_root, resolve_workspace_path
 from llm_tools.tools.filesystem._content import (
     _get_cached_conversion_paths,
     _get_read_file_cache_root,
@@ -40,7 +40,7 @@ from llm_tools.tools.filesystem.models import (
 def _require_repository_metadata(
     context: ToolContext,
 ) -> tuple[Path, SourceFilters, ToolLimits]:
-    workspace = Path(context.workspace or Path.cwd()).resolve()
+    workspace = get_workspace_root(context)
     metadata = context.metadata
     source_filters = SourceFilters.model_validate(metadata.get("source_filters", {}))
     tool_limits = ToolLimits.model_validate(metadata.get("tool_limits", {}))
