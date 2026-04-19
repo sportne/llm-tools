@@ -443,32 +443,100 @@ def test_streamlit_chat_initial_render_uses_new_title_and_no_root_defaults(
 
     assert fake_st.page_config_kwargs[0]["page_title"] == "llm-tools chat"
     assert any("llm-tools chat" in text for text in fake_st.markdown_messages)
+    assert "Settings" in fake_st.button_labels
+    assert any(
+        "<div class='llm-tools-settings-title'>Settings</div>" in text
+        for text in fake_st.markdown_messages
+    )
+    assert any(
+        "enable external tools from the same sidebar" in text
+        for text in fake_st.markdown_messages
+    )
+    assert not any("settings rail" in text for text in fake_st.markdown_messages)
     app_state = fake_st.session_state[_STREAMLIT_MODULES.app._APP_STATE_SLOT]
     active = app_state.sessions[app_state.active_session_id]
     assert active.runtime.root_path is None
     assert active.runtime.enabled_tools == []
 
 
+def test_streamlit_chat_visible_transcript_hides_hidden_notices_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    app_state = _make_app_state(root_path=str(tmp_path))
+    record = app_state.sessions[app_state.active_session_id]
+    record.transcript.extend(
+        [
+            _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(role="user", text="Hi"),
+            _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(
+                role="system",
+                text="Workspace root updated",
+                show_in_transcript=False,
+            ),
+            _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(
+                role="error", text="Problem"
+            ),
+            _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(
+                role="assistant", text="Hello"
+            ),
+        ]
+    )
+    fake_st.session_state[_STREAMLIT_MODULES.app._APP_STATE_SLOT] = app_state
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setenv(_STREAMLIT_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
+
+    _STREAMLIT_MODULES.app.run_streamlit_chat_app(
+        root_path=tmp_path,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+    )
+
+    assert fake_st.chat_roles.count("user") == 1
+    assert fake_st.chat_roles.count("assistant") == 2
+    assert "System" not in fake_st.caption_messages
+    assert "Error" in fake_st.caption_messages
+
+
+def test_streamlit_chat_settings_render_inside_sidebar_expander(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    app_state = _make_app_state(root_path=None)
+    app_state.preferences.settings_panel_open = False
+    fake_st.session_state[_STREAMLIT_MODULES.app._APP_STATE_SLOT] = app_state
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setenv(_STREAMLIT_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
+
+    _STREAMLIT_MODULES.app.run_streamlit_chat_app(
+        root_path=None,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+    )
+
+    assert "Settings" in fake_st.button_labels
+    assert not any(
+        "llm-tools-settings-rail-shell" in text for text in fake_st.markdown_messages
+    )
+    assert app_state.preferences.settings_panel_open is False
+
+
 def test_streamlit_chat_theme_state_applies_before_sidebar_and_persists_panel(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    fake_st = _FakeStreamlit(
-        button_values={"settings-panel-toggle": True},
-    )
+    fake_st = _FakeStreamlit()
     fake_st.session_state[_STREAMLIT_MODULES.app._THEME_TOGGLE_KEY] = False
     monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
     monkeypatch.setenv(_STREAMLIT_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
 
-    with pytest.raises(_RerunRequestError):
-        _STREAMLIT_MODULES.app.run_streamlit_chat_app(
-            root_path=None,
-            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
-        )
+    _STREAMLIT_MODULES.app.run_streamlit_chat_app(
+        root_path=None,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+    )
 
     app_state = fake_st.session_state[_STREAMLIT_MODULES.app._APP_STATE_SLOT]
     assert app_state.preferences.theme_mode == "light"
-    assert app_state.preferences.settings_panel_open is False
+    assert app_state.preferences.settings_panel_open is True
     assert any("#edf3fb" in text for text in fake_st.markdown_messages)
 
     reloaded = _STREAMLIT_MODULES.app._load_workspace_state(
@@ -476,7 +544,7 @@ def test_streamlit_chat_theme_state_applies_before_sidebar_and_persists_panel(
         config=_STREAMLIT_MODULES.package.TextualChatConfig(),
     )
     assert reloaded.preferences.theme_mode == "light"
-    assert reloaded.preferences.settings_panel_open is False
+    assert reloaded.preferences.settings_panel_open is True
 
 
 def test_streamlit_chat_persists_multiple_sessions_and_deletes_them(
@@ -711,6 +779,7 @@ def test_streamlit_chat_theme_css_covers_widget_surfaces() -> None:
     assert '[data-testid="stExpander"]' in css
     assert '[data-baseweb="tab"]' in css
     assert '[data-testid="stDownloadButton"] > button' in css
+    assert '[data-testid="stFormSubmitButton"] > button' in css
     assert '[data-testid="InputInstructions"]' in css
     assert "llm-tools-status-line" in css
 
@@ -927,11 +996,21 @@ def test_streamlit_chat_build_runner_and_render_helpers(
         [
             _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(role="user", text="Hi"),
             _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(
+                role="system",
+                text="Root changed",
+                show_in_transcript=False,
+            ),
+            _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(
+                role="error", text="Problem"
+            ),
+            _STREAMLIT_MODULES.app.StreamlitTranscriptEntry(
                 role="assistant", text="Answer", final_response=response
             ),
         ]
     )
     assert "Hi" in export_text and "Answer" in export_text
+    assert "Root changed" not in export_text
+    assert "Problem" in export_text
 
     _STREAMLIT_MODULES.app._render_theme(
         _STREAMLIT_MODULES.app.StreamlitPreferences(theme_mode="light")
@@ -962,6 +1041,9 @@ def test_streamlit_chat_build_runner_and_render_helpers(
         )
     )
     record = _make_record(root_path=str(tmp_path))
+    record.runtime.provider_mode_strategy = (
+        _STREAMLIT_MODULES.app.ProviderModeStrategy.JSON
+    )
     record.token_usage = ChatTokenUsage(session_tokens=123, active_context_tokens=45)
     record.confidence = 0.75
     _STREAMLIT_MODULES.app._render_summary_chips(record)
@@ -978,6 +1060,9 @@ def test_streamlit_chat_build_runner_and_render_helpers(
     _STREAMLIT_MODULES.app._render_session_details(app_state, session_id="session-1")
 
     assert any("llm-tools chat" in text for text in fake_st.markdown_messages)
+    assert any(
+        "instructor: Structured response" in text for text in fake_st.markdown_messages
+    )
     assert "Confidence: 0.90" in fake_st.caption_messages
     assert "System" in fake_st.caption_messages
     assert "Error" in fake_st.caption_messages
@@ -1651,7 +1736,8 @@ def test_streamlit_chat_provider_controls_tools_popover_and_composer(
     ][f"recent-root:{stale_session}"] == (_STREAMLIT_MODULES.app._ROOT_SENTINEL)
 
     fake_tools = _FakeStreamlit(
-        button_values={f"tools-all:{session_id}": True},
+        button_values={f"apply-tool-preset:{session_id}": True},
+        selectbox_values={f"tool-preset:{session_id}": "all_builtins"},
     )
     monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_tools)
     with pytest.raises(_RerunRequestError):
@@ -1662,7 +1748,36 @@ def test_streamlit_chat_provider_controls_tools_popover_and_composer(
         )
     assert "search_jira" in record.runtime.enabled_tools
     assert record.runtime.allow_network is True
+    assert record.runtime.allow_filesystem is True
     assert record.runtime.allow_subprocess is True
+    assert "Apply preset" in fake_tools.button_labels
+    overrides = fake_tools.session_state[
+        _STREAMLIT_MODULES.app._WIDGET_OVERRIDES_STATE_SLOT
+    ]
+    assert overrides[f"allow-network:{session_id}"] is True
+    assert overrides[f"tool:{session_id}:search_jira"] is True
+
+    record.runtime.require_approval_for = {
+        _STREAMLIT_MODULES.app.SideEffectClass.LOCAL_READ,
+        _STREAMLIT_MODULES.app.SideEffectClass.LOCAL_WRITE,
+    }
+    fake_default_tools = _FakeStreamlit(
+        button_values={f"apply-tool-preset:{session_id}": True},
+        selectbox_values={f"tool-preset:{session_id}": "default"},
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_default_tools
+    )
+    with pytest.raises(_RerunRequestError):
+        _STREAMLIT_MODULES.app._render_tools_popover(
+            app_state,
+            session_id=session_id,
+            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+        )
+    assert record.runtime.allow_network is False
+    assert record.runtime.allow_filesystem is True
+    assert record.runtime.allow_subprocess is False
+    assert record.runtime.require_approval_for == set()
 
     fake_tools_toggle = _FakeStreamlit(
         checkbox_values={

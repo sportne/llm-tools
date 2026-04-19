@@ -636,6 +636,34 @@ def _queue_widget_override(key: str, value: object) -> None:
     _widget_overrides_state()[key] = value
 
 
+def _queue_tool_widget_overrides(
+    session_id: str,
+    runtime: StreamlitRuntimeConfig,
+    *,
+    tool_specs: dict[str, ToolSpec] | None = None,
+) -> None:
+    specs = tool_specs or _all_tool_specs()
+    _queue_widget_override(f"allow-network:{session_id}", runtime.allow_network)
+    _queue_widget_override(f"allow-filesystem:{session_id}", runtime.allow_filesystem)
+    _queue_widget_override(f"allow-subprocess:{session_id}", runtime.allow_subprocess)
+    for side_effect in (
+        SideEffectClass.LOCAL_READ,
+        SideEffectClass.LOCAL_WRITE,
+        SideEffectClass.EXTERNAL_READ,
+        SideEffectClass.EXTERNAL_WRITE,
+    ):
+        _queue_widget_override(
+            f"approval:{session_id}:{side_effect.value}",
+            side_effect in runtime.require_approval_for,
+        )
+    enabled_tools = set(runtime.enabled_tools)
+    for tool_name in specs:
+        _queue_widget_override(
+            f"tool:{session_id}:{tool_name}",
+            tool_name in enabled_tools,
+        )
+
+
 def _delete_session(
     app_state: StreamlitWorkspaceState,
     *,
@@ -785,7 +813,8 @@ section[data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child {{
 .stApp div[data-baseweb="select"] > div,
 .stApp [data-baseweb="tab"],
 .stApp .stButton > button,
-.stApp [data-testid="stDownloadButton"] > button {{
+.stApp [data-testid="stDownloadButton"] > button,
+.stApp [data-testid="stFormSubmitButton"] > button {{
   background: var(--llm-tools-surface);
   color: var(--llm-tools-text);
   border: 1px solid var(--llm-tools-border);
@@ -797,6 +826,7 @@ section[data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child {{
 }}
 .stApp .stButton > button:hover,
 .stApp [data-testid="stDownloadButton"] > button:hover,
+.stApp [data-testid="stFormSubmitButton"] > button:hover,
 .stApp [data-baseweb="tab"]:hover {{
   border-color: var(--llm-tools-accent);
   color: var(--llm-tools-accent);
@@ -824,14 +854,6 @@ section[data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child {{
   border-radius: 1rem;
   box-shadow: 0 18px 40px var(--llm-tools-shadow);
 }}
-.llm-tools-settings-shell {{
-  border: 1px solid var(--llm-tools-border);
-  background: var(--llm-tools-sidebar);
-  border-radius: 1rem;
-  box-shadow: 0 18px 40px var(--llm-tools-shadow);
-  padding: 0.5rem 0.45rem 0.65rem 0.45rem;
-  min-height: 8rem;
-}}
 .llm-tools-hero {{ padding: 1rem 1.1rem; margin-bottom: 0.9rem; }}
 .llm-tools-summary-bar {{ padding: 0.65rem 0.85rem; margin-bottom: 1rem; }}
 .llm-tools-status-line {{ padding: 0.55rem 0.8rem; margin: 1rem 0 0.55rem 0; }}
@@ -845,8 +867,6 @@ section[data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child {{
 .llm-tools-status-label {{ color: var(--llm-tools-muted); margin-right: 0.35rem; }}
 .llm-tools-settings-title {{ font-size: 1.05rem; font-weight: 700; letter-spacing: -0.02em; margin: 0; color: var(--llm-tools-text); }}
 .llm-tools-settings-meta {{ color: var(--llm-tools-muted); font-size: 0.78rem; margin-bottom: 0.5rem; }}
-.llm-tools-settings-rail-label {{ font-size: 0.78rem; color: var(--llm-tools-muted); margin: 0.25rem 0 0.55rem 0; text-transform: uppercase; letter-spacing: 0.06em; text-align: center; }}
-.llm-tools-chevron-button button {{ min-width: 2.25rem; font-weight: 700; }}
 .stApp [data-testid="InputInstructions"] {{ pointer-events: none; }}
 </style>
 """
@@ -898,9 +918,15 @@ def _render_fatal_error(exc: Exception) -> None:  # pragma: no cover
         )
 
 
+def _visible_transcript_entries(
+    entries: list[StreamlitTranscriptEntry],
+) -> list[StreamlitTranscriptEntry]:
+    return [entry for entry in entries if entry.show_in_transcript]
+
+
 def _transcript_export_text(entries: list[StreamlitTranscriptEntry]) -> str:
     parts = []
-    for entry in entries:
+    for entry in _visible_transcript_entries(entries):
         if entry.final_response is not None:
             text = format_final_response(entry.final_response)
             parts.append(format_transcript_text("assistant", text))
@@ -976,7 +1002,7 @@ def _render_empty_state(
         st.markdown("### Start a new conversation")
         st.caption(f"Current root: {root_text}")
         st.markdown(
-            "Choose a provider and model in the settings rail, optionally select a root directory, then ask a grounded question or enable external tools from the settings panel."
+            "Choose a provider and model in the settings section in the sidebar, optionally select a root directory, then ask a grounded question or enable external tools from the same sidebar."
         )
 
 
@@ -1123,9 +1149,37 @@ def _append_notice(
     *,
     role: Literal["system", "error"],
     text: str,
+    show_in_transcript: bool = True,
 ) -> None:
-    record.transcript.append(StreamlitTranscriptEntry(role=role, text=text))
+    record.transcript.append(
+        StreamlitTranscriptEntry(
+            role=role,
+            text=text,
+            show_in_transcript=show_in_transcript,
+        )
+    )
     _touch_record(record)
+
+
+def _sync_runtime_capabilities_for_enabled_tools(
+    runtime: StreamlitRuntimeConfig,
+    *,
+    tool_specs: dict[str, ToolSpec],
+    default_require_approval_for: set[SideEffectClass],
+) -> None:
+    enabled_specs = [
+        tool_specs[tool_name]
+        for tool_name in runtime.enabled_tools
+        if tool_name in tool_specs
+    ]
+    runtime.allow_network = any(spec.requires_network for spec in enabled_specs)
+    runtime.allow_filesystem = any(spec.requires_filesystem for spec in enabled_specs)
+    runtime.allow_subprocess = any(spec.requires_subprocess for spec in enabled_specs)
+    runtime.require_approval_for = set(default_require_approval_for)
+
+
+def _command_notice_visible_in_transcript(notice: ChatControlNotice) -> bool:
+    return notice.role == "error"
 
 
 def _apply_turn_error(
@@ -1647,7 +1701,12 @@ def _apply_streamlit_command(  # pragma: no cover
 ) -> None:
     record = app_state.sessions[session_id]
     for notice in outcome.notices:
-        _append_notice(record, role=notice.role, text=notice.text)
+        _append_notice(
+            record,
+            role=notice.role,
+            text=notice.text,
+            show_in_transcript=_command_notice_visible_in_transcript(notice),
+        )
     if outcome.request_copy:
         app_state.show_export_for.add(session_id)
     _touch_record(record)
@@ -1886,7 +1945,12 @@ def _apply_runtime_root(
                 root_path=None,
             )
         )
-        _append_notice(record, role="system", text="Workspace root cleared.")
+        _append_notice(
+            record,
+            role="system",
+            text="Workspace root cleared.",
+            show_in_transcript=False,
+        )
         _touch_record(record)
         return
     if previous_root is None and not runtime.enabled_tools:
@@ -1905,6 +1969,7 @@ def _apply_runtime_root(
         record,
         role="system",
         text=f"Workspace root updated to {runtime.root_path}.",
+        show_in_transcript=False,
     )
     _touch_record(record)
 
@@ -2153,6 +2218,10 @@ def _render_summary_chips(
         f"<span class='llm-tools-chip'>root: {record.runtime.root_path or 'none'}</span>",
         f"<span class='llm-tools-chip'>provider: {record.runtime.provider.value}</span>",
         f"<span class='llm-tools-chip'>model: {record.runtime.model_name}</span>",
+        (
+            "<span class='llm-tools-chip'>instructor: "
+            f"{_MODE_LABELS[record.runtime.provider_mode_strategy]}</span>"
+        ),
     ]
     if isinstance(token_usage, ChatTokenUsage):
         chips.append(
@@ -2168,6 +2237,255 @@ def _render_summary_chips(
     )
 
 
+def _apply_tool_preset(
+    selected_preset: str,
+    *,
+    app_state: StreamlitWorkspaceState,
+    session_id: str,
+    config: TextualChatConfig,
+    runtime: StreamlitRuntimeConfig,
+    record: StreamlitPersistedSessionRecord,
+    tool_specs: dict[str, ToolSpec],
+) -> None:
+    if selected_preset == "default":
+        runtime.enabled_tools = sorted(
+            _default_enabled_tool_names(
+                config,
+                root_path=Path(runtime.root_path) if runtime.root_path else None,
+            )
+        )
+    elif selected_preset == "workspace_git":
+        runtime.enabled_tools = sorted(
+            _filter_enabled_tools_for_root(
+                _safe_local_read_tool_names().union(
+                    {name for name, spec in tool_specs.items() if "git" in spec.tags}
+                ),
+                root_path=runtime.root_path,
+            )
+        )
+    else:
+        runtime.enabled_tools = sorted(
+            _filter_enabled_tools_for_root(
+                set(tool_specs),
+                root_path=runtime.root_path,
+            )
+        )
+    _sync_runtime_capabilities_for_enabled_tools(
+        runtime,
+        tool_specs=tool_specs,
+        default_require_approval_for=set(config.policy.require_approval_for),
+    )
+    _queue_tool_widget_overrides(session_id, runtime, tool_specs=tool_specs)
+    _touch_record(record)
+    _save_workspace_state(app_state)
+
+
+def _render_tool_preset_controls(
+    *,
+    app_state: StreamlitWorkspaceState,
+    session_id: str,
+    config: TextualChatConfig,
+    runtime: StreamlitRuntimeConfig,
+    record: StreamlitPersistedSessionRecord,
+    tool_specs: dict[str, ToolSpec],
+    busy: bool,
+) -> None:
+    st = _streamlit_module()
+    preset_labels = {
+        "default": "Read-only defaults",
+        "workspace_git": "Workspace + Git",
+        "all_builtins": "Enable every built-in",
+    }
+    preset_help = {
+        "default": "Reset to the default safe tool set for this session.",
+        "workspace_git": "Enable read-only workspace tools plus Git commands.",
+        "all_builtins": "Enable every built-in tool and turn on the capabilities they need.",
+    }
+    selected_preset = st.selectbox(
+        "Quick setup",
+        options=["default", "workspace_git", "all_builtins"],
+        key=f"tool-preset:{session_id}",
+        disabled=busy,
+        format_func=lambda value: preset_labels[str(value)],
+    )
+    st.caption(preset_help[str(selected_preset)])
+    if st.button(
+        "Apply preset",
+        key=f"apply-tool-preset:{session_id}",
+        use_container_width=True,
+        disabled=busy
+        or (selected_preset == "workspace_git" and runtime.root_path is None),
+    ):
+        _apply_tool_preset(
+            selected_preset,
+            app_state=app_state,
+            session_id=session_id,
+            config=config,
+            runtime=runtime,
+            record=record,
+            tool_specs=tool_specs,
+        )
+        st.rerun()
+    if runtime.root_path is None:
+        st.caption(
+            "Select a root directory before applying the Workspace + Git preset."
+        )
+
+
+def _render_tool_permission_controls(
+    *,
+    app_state: StreamlitWorkspaceState,
+    session_id: str,
+    runtime: StreamlitRuntimeConfig,
+    record: StreamlitPersistedSessionRecord,
+    busy: bool,
+) -> None:
+    st = _streamlit_module()
+    st.markdown("**Session permissions**")
+    st.caption(
+        "These checkboxes control which kinds of tool actions are allowed after you enable an individual tool."
+    )
+    allow_network_key = f"allow-network:{session_id}"
+    _prime_widget_value(allow_network_key, runtime.allow_network)
+    allow_network = st.checkbox(
+        "Network access",
+        value=bool(st.session_state[allow_network_key]),
+        key=allow_network_key,
+        disabled=busy,
+    )
+    st.caption("Needed for tools that call remote services.")
+    allow_filesystem_key = f"allow-filesystem:{session_id}"
+    _prime_widget_value(allow_filesystem_key, runtime.allow_filesystem)
+    allow_filesystem = st.checkbox(
+        "Filesystem access",
+        value=bool(st.session_state[allow_filesystem_key]),
+        key=allow_filesystem_key,
+        disabled=busy,
+    )
+    st.caption("Needed for tools that read from or write to the workspace.")
+    allow_subprocess_key = f"allow-subprocess:{session_id}"
+    _prime_widget_value(allow_subprocess_key, runtime.allow_subprocess)
+    allow_subprocess = st.checkbox(
+        "Subprocess access",
+        value=bool(st.session_state[allow_subprocess_key]),
+        key=allow_subprocess_key,
+        disabled=busy or runtime.root_path is None,
+    )
+    subprocess_caption = "Needed for tools that run commands such as Git."
+    if runtime.root_path is None:
+        subprocess_caption = "Needed for tools that run commands such as Git. Select a root directory to enable it."
+    st.caption(subprocess_caption)
+    if (
+        allow_network != runtime.allow_network
+        or allow_filesystem != runtime.allow_filesystem
+        or allow_subprocess != runtime.allow_subprocess
+    ):
+        runtime.allow_network = allow_network
+        runtime.allow_filesystem = allow_filesystem
+        runtime.allow_subprocess = allow_subprocess
+        _touch_record(record)
+        _save_workspace_state(app_state)
+
+
+def _render_tool_approval_controls(
+    *,
+    app_state: StreamlitWorkspaceState,
+    session_id: str,
+    runtime: StreamlitRuntimeConfig,
+    record: StreamlitPersistedSessionRecord,
+    busy: bool,
+) -> None:
+    st = _streamlit_module()
+    st.markdown("**Require approval before allowing**")
+    approval_labels = {
+        SideEffectClass.LOCAL_READ: "Local reads",
+        SideEffectClass.LOCAL_WRITE: "Local writes",
+        SideEffectClass.EXTERNAL_READ: "External reads",
+        SideEffectClass.EXTERNAL_WRITE: "External writes",
+    }
+    for side_effect in (
+        SideEffectClass.LOCAL_READ,
+        SideEffectClass.LOCAL_WRITE,
+        SideEffectClass.EXTERNAL_READ,
+        SideEffectClass.EXTERNAL_WRITE,
+    ):
+        approved = side_effect in runtime.require_approval_for
+        approval_key = f"approval:{session_id}:{side_effect.value}"
+        _prime_widget_value(approval_key, approved)
+        checked = st.checkbox(
+            approval_labels[side_effect],
+            value=bool(st.session_state[approval_key]),
+            key=approval_key,
+            disabled=busy,
+        )
+        if checked != approved:
+            if checked:
+                runtime.require_approval_for.add(side_effect)
+            else:
+                runtime.require_approval_for.discard(side_effect)
+            _touch_record(record)
+            _save_workspace_state(app_state)
+
+
+def _render_per_tool_access_controls(
+    *,
+    app_state: StreamlitWorkspaceState,
+    session_id: str,
+    runtime: StreamlitRuntimeConfig,
+    record: StreamlitPersistedSessionRecord,
+    tool_specs: dict[str, ToolSpec],
+    workspace_tool_names: set[str],
+    busy: bool,
+) -> None:
+    st = _streamlit_module()
+    st.markdown("**Per-tool access**")
+    grouped_tools: dict[str, list[tuple[str, ToolSpec]]] = {}
+    for name, spec in sorted(tool_specs.items()):
+        grouped_tools.setdefault(_tool_group(spec), []).append((name, spec))
+    for group_name, entries in grouped_tools.items():
+        st.markdown(f"**{group_name}**")
+        for tool_name, spec in entries:
+            enabled = tool_name in runtime.enabled_tools
+            needs_workspace = tool_name in workspace_tool_names
+            workspace_missing = needs_workspace and runtime.root_path is None
+            disabled = busy or workspace_missing
+            tool_key = f"tool:{session_id}:{tool_name}"
+            _prime_widget_value(tool_key, enabled)
+            checked = st.checkbox(
+                tool_name,
+                value=bool(st.session_state[tool_key]),
+                key=tool_key,
+                disabled=disabled,
+            )
+            requirements: list[str] = []
+            if needs_workspace:
+                requirements.append("workspace")
+            if spec.requires_subprocess:
+                requirements.append("subprocess")
+            if spec.requires_network:
+                requirements.append("network")
+            requirement_text = ", ".join(requirements) if requirements else "none"
+            st.caption(
+                f"{spec.description} Side effect: {spec.side_effects.value}. Requires: {requirement_text}."
+            )
+            if checked != enabled:
+                if checked:
+                    runtime.enabled_tools = sorted(
+                        _filter_enabled_tools_for_root(
+                            set(runtime.enabled_tools).union({tool_name}),
+                            root_path=runtime.root_path,
+                        )
+                    )
+                else:
+                    runtime.enabled_tools = sorted(
+                        set(runtime.enabled_tools).difference({tool_name})
+                    )
+                _touch_record(record)
+                _save_workspace_state(app_state)
+            if workspace_missing:
+                st.caption("Select a root directory to enable this tool.")
+
+
 def _render_tools_popover(  # pragma: no cover
     app_state: StreamlitWorkspaceState,
     *,
@@ -2181,144 +2499,41 @@ def _render_tools_popover(  # pragma: no cover
     tool_specs = _all_tool_specs()
     workspace_tool_names = _workspace_tool_names()
     with st.expander("Tools and approvals", expanded=False):
-        st.caption("Enable built-in tools and the capabilities they require.")
-        preset_cols = st.columns(3)
-        if preset_cols[0].button(
-            "Default", key=f"tools-default:{session_id}", disabled=busy
-        ):
-            runtime.enabled_tools = sorted(
-                _default_enabled_tool_names(
-                    config,
-                    root_path=Path(runtime.root_path) if runtime.root_path else None,
-                )
-            )
-            _touch_record(record)
-            _save_workspace_state(app_state)
-            st.rerun()
-        if preset_cols[1].button(
-            "Workspace + Git",
-            key=f"tools-git:{session_id}",
-            disabled=busy or runtime.root_path is None,
-        ):
-            runtime.enabled_tools = sorted(
-                _filter_enabled_tools_for_root(
-                    _safe_local_read_tool_names().union(
-                        {
-                            name
-                            for name, spec in tool_specs.items()
-                            if "git" in spec.tags
-                        }
-                    ),
-                    root_path=runtime.root_path,
-                )
-            )
-            _touch_record(record)
-            _save_workspace_state(app_state)
-            st.rerun()
-        if preset_cols[2].button(
-            "All built-ins", key=f"tools-all:{session_id}", disabled=busy
-        ):
-            runtime.enabled_tools = sorted(
-                _filter_enabled_tools_for_root(
-                    set(tool_specs),
-                    root_path=runtime.root_path,
-                )
-            )
-            runtime.allow_network = True
-            runtime.allow_subprocess = runtime.root_path is not None
-            _touch_record(record)
-            _save_workspace_state(app_state)
-            st.rerun()
-
-        capability_cols = st.columns(3)
-        allow_network = capability_cols[0].toggle(
-            "Allow network",
-            value=runtime.allow_network,
-            key=f"allow-network:{session_id}",
-            disabled=busy,
+        st.caption(
+            "Checked tools may be used by the model in this session. Unchecked tools are blocked."
         )
-        allow_filesystem = capability_cols[1].toggle(
-            "Allow filesystem",
-            value=runtime.allow_filesystem,
-            key=f"allow-filesystem:{session_id}",
-            disabled=busy,
+        _render_tool_preset_controls(
+            app_state=app_state,
+            session_id=session_id,
+            config=config,
+            runtime=runtime,
+            record=record,
+            tool_specs=tool_specs,
+            busy=busy,
         )
-        allow_subprocess = capability_cols[2].toggle(
-            "Allow subprocess",
-            value=runtime.allow_subprocess,
-            key=f"allow-subprocess:{session_id}",
-            disabled=busy or runtime.root_path is None,
+        _render_tool_permission_controls(
+            app_state=app_state,
+            session_id=session_id,
+            runtime=runtime,
+            record=record,
+            busy=busy,
         )
-        if (
-            allow_network != runtime.allow_network
-            or allow_filesystem != runtime.allow_filesystem
-            or allow_subprocess != runtime.allow_subprocess
-        ):
-            runtime.allow_network = allow_network
-            runtime.allow_filesystem = allow_filesystem
-            runtime.allow_subprocess = allow_subprocess
-            _touch_record(record)
-            _save_workspace_state(app_state)
-
-        approval_cols = st.columns(4)
-        for side_effect, label, col in (
-            (SideEffectClass.LOCAL_READ, "Approve local read", approval_cols[0]),
-            (SideEffectClass.LOCAL_WRITE, "Approve local write", approval_cols[1]),
-            (SideEffectClass.EXTERNAL_READ, "Approve external read", approval_cols[2]),
-            (
-                SideEffectClass.EXTERNAL_WRITE,
-                "Approve external write",
-                approval_cols[3],
-            ),
-        ):
-            approved = side_effect in runtime.require_approval_for
-            toggled = col.toggle(
-                label,
-                value=approved,
-                key=f"approval:{session_id}:{side_effect.value}",
-                disabled=busy,
-            )
-            if toggled != approved:
-                if toggled:
-                    runtime.require_approval_for.add(side_effect)
-                else:
-                    runtime.require_approval_for.discard(side_effect)
-                _touch_record(record)
-                _save_workspace_state(app_state)
-
-        grouped_tools: dict[str, list[tuple[str, ToolSpec]]] = {}
-        for name, spec in sorted(tool_specs.items()):
-            grouped_tools.setdefault(_tool_group(spec), []).append((name, spec))
-        for group_name, entries in grouped_tools.items():
-            st.markdown(f"**{group_name}**")
-            for tool_name, spec in entries:
-                enabled = tool_name in runtime.enabled_tools
-                needs_workspace = tool_name in workspace_tool_names
-                workspace_missing = needs_workspace and runtime.root_path is None
-                disabled = busy or workspace_missing
-                label = f"{tool_name} ({spec.side_effects.value})"
-                checked = st.checkbox(
-                    label,
-                    value=enabled,
-                    key=f"tool:{session_id}:{tool_name}",
-                    disabled=disabled,
-                )
-                if checked != enabled:
-                    if checked:
-                        runtime.enabled_tools = sorted(
-                            _filter_enabled_tools_for_root(
-                                set(runtime.enabled_tools).union({tool_name}),
-                                root_path=runtime.root_path,
-                            )
-                        )
-                    else:
-                        runtime.enabled_tools = sorted(
-                            set(runtime.enabled_tools).difference({tool_name})
-                        )
-                    _touch_record(record)
-                    _save_workspace_state(app_state)
-                if workspace_missing:
-                    st.caption("Select a root directory to enable this tool.")
+        _render_tool_approval_controls(
+            app_state=app_state,
+            session_id=session_id,
+            runtime=runtime,
+            record=record,
+            busy=busy,
+        )
+        _render_per_tool_access_controls(
+            app_state=app_state,
+            session_id=session_id,
+            runtime=runtime,
+            record=record,
+            tool_specs=tool_specs,
+            workspace_tool_names=workspace_tool_names,
+            busy=busy,
+        )
 
 
 def _render_session_details(  # pragma: no cover
@@ -2484,56 +2699,18 @@ def _render_settings_panel(  # pragma: no cover
 ) -> None:
     st = _streamlit_module()
     record = app_state.sessions[session_id]
-    st.markdown("<div class='llm-tools-settings-shell'>", unsafe_allow_html=True)
-    if not app_state.preferences.settings_panel_open:
-        st.markdown(
-            "<div class='llm-tools-settings-rail-label'>Settings</div>",
-            unsafe_allow_html=True,
-        )
-        with st.container():
-            st.markdown(
-                "<div class='llm-tools-chevron-button'>", unsafe_allow_html=True
-            )
-            if st.button(
-                "«",
-                key="settings-panel-toggle",
-                use_container_width=True,
-            ):
-                app_state.preferences.settings_panel_open = True
-                _save_workspace_state(app_state)
-                st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
-
-    header_cols = st.columns([4.2, 1])
-    header_cols[0].markdown(
-        "<div class='llm-tools-settings-title'>Settings</div>",
-        unsafe_allow_html=True,
-    )
     st.markdown(
         (
+            "<div class='llm-tools-settings-title'>Settings</div>"
             "<div class='llm-tools-settings-meta'>"
             f"{record.runtime.provider.value} | {record.runtime.model_name}"
             "</div>"
         ),
         unsafe_allow_html=True,
     )
-    with header_cols[1]:
-        st.markdown("<div class='llm-tools-chevron-button'>", unsafe_allow_html=True)
-        if st.button(
-            "»",
-            key="settings-panel-toggle",
-            use_container_width=True,
-        ):
-            app_state.preferences.settings_panel_open = False
-            _save_workspace_state(app_state)
-            st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
     _provider_control_strip(app_state, config=config, session_id=session_id)
     _render_tools_popover(app_state, session_id=session_id, config=config)
     _render_session_details(app_state, session_id=session_id)
-    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _render_sidebar(  # pragma: no cover
@@ -2602,6 +2779,15 @@ def _render_sidebar(  # pragma: no cover
                 f"<div class='llm-tools-session-meta'>{' | '.join(meta_bits)}</div>",
                 unsafe_allow_html=True,
             )
+        with st.expander(
+            "Settings",
+            expanded=app_state.preferences.settings_panel_open,
+        ):
+            _render_settings_panel(
+                app_state,
+                session_id=app_state.active_session_id,
+                config=config,
+            )
 
 
 def _session_matches(record: StreamlitPersistedSessionRecord, query: str) -> bool:
@@ -2658,29 +2844,17 @@ def run_streamlit_chat_app(  # pragma: no cover
             prompt=pending_prompt,
         )
 
-    if app_state.preferences.settings_panel_open:
-        main_col, settings_col = st.columns([4.45, 1.75])
+    visible_entries = _visible_transcript_entries(active_record.transcript)
+    if not visible_entries:
+        _render_empty_state(active_record)
     else:
-        main_col, settings_col = st.columns([5.85, 0.35])
-
-    with main_col:
-        if not active_record.transcript:
-            _render_empty_state(active_record)
-        else:
-            for entry in active_record.transcript:
-                _render_transcript_entry(entry)
-        _render_status_and_composer(
-            app_state,
-            session_id=app_state.active_session_id,
-            config=config,
-        )
-
-    with settings_col:
-        _render_settings_panel(
-            app_state,
-            session_id=app_state.active_session_id,
-            config=config,
-        )
+        for entry in visible_entries:
+            _render_transcript_entry(entry)
+    _render_status_and_composer(
+        app_state,
+        session_id=app_state.active_session_id,
+        config=config,
+    )
 
     if _turn_state_for(app_state, app_state.active_session_id).busy:
         time.sleep(_POLL_INTERVAL_SECONDS)

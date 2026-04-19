@@ -13,7 +13,7 @@ same session features:
 - live-ish active-turn polling with stop and approval actions
 - model inspection and switching
 - session-scoped tool enable/disable and approval toggles
-- transcript export and inspector/debug panels
+- transcript export and inspector/debug panels in the sidebar settings section
 - slash-command aliases for `/help`, `/model`, `/tools`, `/approvals`,
   `/inspect`, `/copy`, `quit`, and `exit`
 - grounded final answers with citations, confidence, uncertainty, missing
@@ -103,17 +103,14 @@ fixed read-only repository tool set:
 - `get_file_info`
 - `read_file`
 
-The Streamlit lane keeps session history in memory only. It mirrors the Textual
-chat session controls through sidebar widgets plus slash-command aliases:
+The Streamlit lane keeps session history in memory only. It uses the native left
+sidebar for both the session rail and a collapsible settings section,
+alongside the same slash-command aliases:
 
-- `Session`: root, active model, token usage, active status, clear/refresh/stop
-- `Model Controls`: list available models and switch the active model
-- `Tool Controls`: enable, disable, or reset the session tool set
-- `Approval Controls`: toggle local-read approvals and approve or deny pending
-  requests
-- `Transcript Export`: selectable export text and a download button
-- `Inspector`: current tool state, pending approval payload, model messages,
-  parsed responses, and tool execution records
+- `Session Rail`: chat switching, theme, search, and session management at
+  the top of the left sidebar
+- `Settings`: root, provider, model, tool, approval, export, and inspector
+  controls in a collapsible sidebar section below the session list
 
 `quit` and `exit` do not stop the Streamlit server. They add a system notice
 telling you to clear the chat or close the browser tab instead.

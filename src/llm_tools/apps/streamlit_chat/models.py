@@ -23,6 +23,7 @@ class StreamlitTranscriptEntry(BaseModel):
     text: str
     final_response: ChatFinalResponse | None = None
     assistant_completion_state: Literal["complete", "interrupted"] = "complete"
+    show_in_transcript: bool = True
 
 
 class StreamlitInspectorEntry(BaseModel):
