@@ -171,14 +171,26 @@ verification as a security-critical control plane.
 
 - [ ] Review session, task, and turn lifecycle models for state confusion,
   replay inconsistency, and approval durability issues.
-- [ ] Audit persisted storage, resume, replay, and summaries for secret
+- [x] Audit persisted storage, resume, replay, and summaries for secret
   retention, tamper exposure, and unsafe trust in stored artifacts.
+- Completed review: `harness_api` persistence, resume, replay, and summary
+  behavior is documented in `SECURITY_REVIEWS.md` (2026-04-19 entry).
 - [ ] Review planning, context construction, verification, and protection
   scrubbing for privilege escalation or leakage across turns.
 - [ ] Assess stop conditions, no-progress handling, retries, and recovery
   logic for abuse, infinite work, or unsafe resumptions.
 - [x] Landed hardening: harness approval persistence and session-safety updates
   are merged.
+- [ ] High: harness_api/workflow_api - prevent post-denial execution of
+  trailing invocations after approval rejection.
+- [ ] Medium: harness_api - add integrity binding for persisted approval
+  payloads used during resume.
+- [ ] Medium: harness_api - validate or recompute persisted trace and summary
+  artifacts before trusting them for replay or inspection.
+- [ ] Medium: harness_api - reduce sensitive data retention in persisted
+  approval, trace, and summary artifacts.
+- [ ] Low: harness_api - handle malformed file-backed session artifacts without
+  breaking list/load flows.
 
 ### [~] Phase 5: User-facing surfaces (`apps`)
 
@@ -220,8 +232,9 @@ as isolated modules.
 Outcome: convert review output into an actionable security status for the
 project.
 
-- [ ] Record findings in this file or a clearly linked companion artifact with
+- [x] Record findings in this file or a clearly linked companion artifact with
   severity, affected components, exploit preconditions, and recommended fixes.
+- Companion artifact in use: `SECURITY_REVIEWS.md`.
 - [ ] Track remediation tasks separately within this backlog under the affected
   phase or in a dedicated follow-up section.
 - [ ] Re-run relevant tests and add targeted regression tests for each
