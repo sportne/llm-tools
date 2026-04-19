@@ -221,3 +221,21 @@ def test_chat_runtime_registry_contains_expected_read_tools() -> None:
     assert {"list_directory", "find_files", "read_file", "search_text"}.issubset(
         tool_names
     )
+
+
+def test_chat_presentation_empty_and_single_line_branches() -> None:
+    bare_response = ChatFinalResponse(answer="Only answer")
+    assert format_final_response(bare_response) == "Only answer"
+    assert format_final_response_metadata(bare_response) == ""
+    assert pretty_json(None) == ""
+
+    path_only = ChatCitation(source_path="README.md")
+    single_line = ChatCitation(source_path="README.md", line_start=9)
+    same_line = ChatCitation(source_path="README.md", line_start=11, line_end=11)
+    assert format_citation(path_only) == "README.md"
+    assert format_citation(single_line) == "README.md:9"
+    assert format_citation(same_line) == "README.md:11"
+
+    assert format_transcript_text("user", "Question") == "You:\nQuestion"
+    assert format_transcript_text("error", "Problem") == "Error: Problem"
+    assert format_transcript_text("system", "Notice") == "System:\nNotice"
