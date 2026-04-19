@@ -32,20 +32,75 @@ execution and post-review hardening follow-up in this repository.
 
 ## Phased backlog
 
-### [ ] Phase 0: Security review framework and evidence model
+### [x] Phase 0: Security review framework and evidence model
 
 Outcome: establish how the deep dive will be run and what “high confidence”
 means.
 
-- [ ] Define the review lane template used for every component: trust
+- [x] Define the review lane template used for every component: trust
   boundaries, inputs and outputs, privilege and approval model, secret
   handling, persistence and logging, external calls, abuse cases, failure
   modes, and test gaps.
-- [ ] Define evidence requirements for closing a component review: code paths
+- [x] Define evidence requirements for closing a component review: code paths
   inspected, tests reviewed and run, assumptions recorded, findings logged, and
   residual risk stated.
-- [ ] Define severity buckets and follow-up handling inside this file so
+- [x] Define severity buckets and follow-up handling inside this file so
   findings can be tracked without creating a second backlog immediately.
+
+Phase 0 decisions:
+
+- Review lane template for every component review:
+  1. Trust boundary and assets: identify what the component is trusted to do,
+     what data or capabilities it can reach, and which lower and higher layers
+     depend on it.
+  2. Entry points and data flow: enumerate public APIs, model payloads, CLI or
+     app entrypoints, persisted artifacts, environment variables, and any other
+     untrusted inputs or outputs.
+  3. Privilege and approval model: verify side-effect class declarations,
+     capability flags, approval requirements, and any runtime mediation or
+     bypass opportunities.
+  4. Secret and sensitive data handling: inspect credentials, tokens, prompt
+     content, local file contents, logs, artifacts, and replay or summary data
+     for retention, redaction, and accidental disclosure risks.
+  5. Persistence and observability: review what gets stored, logged, replayed,
+     or surfaced to users; note tamper assumptions, retention defaults, and
+     cross-session leakage risks.
+  6. External interactions and dependency trust: inspect filesystem, network,
+     subprocess, provider, parser, and third-party library usage with attention
+     to scoping, argument construction, retries, and trust of returned data.
+  7. Abuse and failure modes: evaluate denial of service, malformed input,
+     oversized payload, state confusion, approval bypass, privilege escalation,
+     unsafe recovery, and replay or resume edge cases.
+  8. Test coverage and blind spots: map existing tests to the threat surface,
+     identify missing negative tests, and note any assumptions not enforced by
+     automated checks.
+- Closure evidence required for marking a component review done:
+  - reviewed code paths are listed by file or module area;
+  - relevant existing tests are listed, with whether they were only inspected
+    or actually run;
+  - key security assumptions and non-goals are written down explicitly;
+  - findings are recorded with severity, affected component, exploit
+    preconditions, and recommended remediation;
+  - residual risk is summarized even when no actionable findings are opened.
+- Severity buckets for findings:
+  - `Critical`: plausible confidentiality, integrity, or execution compromise
+    with low friction, broad blast radius, or a broken core trust boundary.
+  - `High`: material security weakness with realistic exploitation or strong
+    impact, but narrower preconditions or containment than `Critical`.
+  - `Medium`: meaningful weakness that requires more setup, has limited blast
+    radius, or is partially mitigated by existing controls.
+  - `Low`: defense-in-depth issue, hardening gap, or low-likelihood weakness
+    that should be fixed but does not currently threaten a core boundary alone.
+- Follow-up handling rules:
+  - record findings under the affected phase once discovered, and keep the
+    canonical remediation task under that same phase rather than creating a
+    separate backlog file by default;
+  - use Phase 7 for cross-cutting summaries, reopened issues, and final
+    confidence statements, not as the only place findings exist;
+  - add new remediation checklist items using the format `- [ ] <severity>:
+    <component> - <issue>` so outstanding work stays sortable and scannable;
+  - a phase can be marked done only when its review is complete, all accepted
+    findings are logged, and any deferred fixes are called out explicitly.
 
 ### [ ] Phase 1: Core execution substrate (`tool_api`)
 
