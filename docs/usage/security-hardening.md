@@ -1,56 +1,51 @@
 # Security Hardening
 
-This repository ships multiple execution surfaces: local filesystem tools,
-subprocess-backed Git helpers, remote enterprise read integrations, document
-conversion helpers, and durable harness-backed session storage. Treat docs,
-configs, and examples as part of that security surface.
+`llm-tools` now includes multiple execution surfaces: local filesystem tools,
+subprocess-backed Git helpers, remote enterprise read integrations, structured
+provider calls, a Streamlit assistant client, and durable harness-backed
+research sessions. Treat configs, examples, caches, and persisted session state
+as part of the security surface.
 
 ## Dependency Surface
 
-The base package installs more than the minimal local runtime:
+Runtime and optional dependency exposure includes:
 
-- `openai` and `instructor` back the OpenAI-compatible provider layer and
-  structured response parsing.
-- `atlassian-python-api` enables Jira, Confluence, and Bitbucket tools when
-  those tools are enabled and the corresponding credentials are present.
-- `python-gitlab` enables the GitLab read tools when those tools are enabled
-  and credentials are present.
-- `markitdown` converts supported office and document formats into markdown
-  when filesystem reads hit non-text files such as PDF, Office, HTML, EPUB,
-  or RTF documents.
-- `mpxj` plus a working Java runtime are required for Microsoft Project
-  (`.mpp`/`.mpt`) reads.
+- `openai` and `instructor` for the OpenAI-compatible provider layer and
+  structured response parsing
+- `atlassian-python-api` for Jira, Bitbucket, and Confluence tools
+- `python-gitlab` for GitLab read tools
+- `markitdown` for office/document conversion during read-oriented filesystem
+  access
+- `mpxj` plus Java for Microsoft Project file reads
+- `streamlit` and YAML loading when installing `.[streamlit]`
 
-Installing `.[streamlit]` adds the interactive Streamlit clients and YAML
-config loading support.
+Only enable the integrations you actually need in the current environment.
 
-## Startup Permissions
+## Assistant Permissions And Approvals
 
-In `llm_tools.apps.streamlit_assistant`, selecting a workspace root only
-chooses the local directory that filesystem and subprocess tools may use. It
-does not enable those permissions. The initial default runtime for a fresh app
-load starts with:
+In `llm_tools.apps.streamlit_assistant`:
 
-- network access off
-- filesystem access off
-- subprocess access off
+- selecting a workspace root only picks the directory available to local file
+  and subprocess tools
+- fresh sessions start with network, filesystem, and subprocess permissions off
+- write-capable side effects are approval-gated by default, even after a tool is
+  enabled
+- additional approval requirements can come from `policy.require_approval_for`
+  in assistant config
 
-Enable each permission explicitly in the sidebar for the current session.
-This applies even when a config sets `workspace.default_root` or the launch
-command passes a directory argument. The "New Chat" action clones the current
-session runtime, so branched sessions inherit whatever permissions are already
-enabled there.
+The sidebar runtime controls are session-scoped. "New session from current
+setup" clones the current model, enabled tools, permissions, and approval
+settings into the new session.
 
 ## Secret Handling
 
 Prefer one of these patterns for credentials:
 
-- environment variables used by the relevant provider or tool integration
-- the assistant sidebar's session-only API-key prompt
+- environment variables consumed by providers or integrations
+- the Streamlit assistant's session-only API-key entry
 
-Do not commit secrets into assistant YAML configs, scripted harness payloads,
-or example files. If you need repo-local overrides, keep them in ignored
-files outside version control.
+Do not commit secrets into assistant YAML configs, scripted harness payloads, or
+examples. If you need local overrides, keep them in ignored files.
 
 ## Persisted Data And Caches
 
@@ -59,24 +54,26 @@ Default storage locations:
 - Streamlit assistant state: `~/.llm-tools/assistant/streamlit`
 - Streamlit assistant research store: `~/.llm-tools/assistant/streamlit/research`
 - Harness CLI state: `~/.llm-tools/harness`
-- Converted document cache: `${TMPDIR:-/tmp}/llm_tools/read_file_cache` on
-  POSIX systems, or the platform temp directory equivalent reported by
-  Python's `tempfile.gettempdir()`
 
-If you intentionally override these locations into a repository, keep the
-paths ignored. This repository already ignores `.llm-tools/` and
-`.llm-tools-harness/` for that reason.
+Cache locations are split by feature:
+
+- Filesystem/document conversion cache: workspace-local `.llm_tools/cache/read_file`
+- Confluence attachment cache: platform temp dir under
+  `tempfile.gettempdir()/llm_tools/confluence_attachment_cache`
+
+If you intentionally redirect any of these into a repository checkout, keep the
+paths ignored. This repository now ignores `.llm_tools/` in addition to the
+older `.llm-tools/` scratch paths.
 
 ## Pending Approval Snapshots
 
 Newly persisted harness approval records store only a scrubbed base context:
-`invocation_id`, `workspace`, and `metadata` are preserved, while process
-environment variables, logs, artifacts, and source provenance are cleared
-before the snapshot is written. Approval resume rebuilds execution context
-from the stored base context plus the current process environment at resume
-time.
 
-Older snapshots created before this hardening change may still contain raw
-environment data. Delete those persisted session files if they may have held
-sensitive values. The repository does not migrate or scrub old snapshots in
-place.
+- preserved: `invocation_id`, `workspace`, and `metadata`
+- cleared before persistence: process env, logs, artifacts, and source
+  provenance
+- rebuilt on resume: execution context derived from the stored base context plus
+  the current process environment
+
+Older snapshots written before this hardening pass may still contain raw
+environment data. Delete those persisted files if they may have held secrets.

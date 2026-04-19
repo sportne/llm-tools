@@ -388,3 +388,181 @@ def test_build_live_harness_provider_wraps_created_provider_and_wires_protection
     assert environment_calls[0]["workspace"] == str(tmp_path)
     assert environment_calls[0]["allow_filesystem"] is True
     assert "durable research assistant" in harness_provider._system_prompt
+
+
+def test_assistant_harness_turn_provider_sync_passthrough_without_protection() -> None:
+    provider = _Provider(ParsedModelResponse(final_response="plain"))
+    harness_provider = AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+    context = ToolContext(invocation_id="turn-plain-sync", metadata={})
+
+    response = harness_provider.run(
+        state=object(),
+        selected_task_ids=["task-sync"],
+        context=context,
+        adapter=ActionEnvelopeAdapter(),
+        prepared_interaction=SimpleNamespace(response_model=str),
+    )
+
+    assert response.final_response == "plain"
+    assert context.metadata == {}
+
+
+def test_assistant_harness_turn_provider_async_challenges_before_provider_call() -> (
+    None
+):
+    provider = _Provider(ParsedModelResponse(final_response="unused"))
+    harness_provider = AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+        protection_controller=_ProtectionController(
+            prompt_decision=PromptProtectionDecision(
+                action=ProtectionAction.CHALLENGE,
+                challenge_message="Async sensitivity challenge.",
+            ),
+            response_decision=ResponseProtectionDecision(action=ProtectionAction.ALLOW),
+        ),
+    )
+    context = ToolContext(invocation_id="turn-async-challenge", metadata={})
+
+    response = asyncio.run(
+        harness_provider.run_async(
+            state=object(),
+            selected_task_ids=["task-async"],
+            context=context,
+            adapter=ActionEnvelopeAdapter(),
+            prepared_interaction=SimpleNamespace(response_model=str),
+        )
+    )
+
+    assert response.final_response == "Async sensitivity challenge."
+    assert provider.async_calls == 0
+    assert context.metadata["protection_review"]["purge_requested"] is True
+
+
+def test_assistant_harness_turn_provider_async_constrains_and_sanitizes() -> None:
+    provider = _Provider(ParsedModelResponse(final_response="secret"))
+    protection_controller = _ProtectionController(
+        prompt_decision=PromptProtectionDecision(
+            action=ProtectionAction.CONSTRAIN,
+            guard_text="async-guard",
+        ),
+        response_decision=ResponseProtectionDecision(
+            action=ProtectionAction.SANITIZE,
+            sanitized_payload="async-clean",
+            should_purge=True,
+        ),
+    )
+    harness_provider = AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+        protection_controller=protection_controller,
+    )
+    context = ToolContext(
+        invocation_id="turn-async-sanitize",
+        metadata={"harness_turn_context": {"turn_index": 3}},
+    )
+
+    response = asyncio.run(
+        harness_provider.run_async(
+            state=_state_with_provenance(),
+            selected_task_ids=["task-async-2"],
+            context=context,
+            adapter=ActionEnvelopeAdapter(),
+            prepared_interaction=SimpleNamespace(response_model=str),
+        )
+    )
+
+    assert response.final_response == "async-clean"
+    assert provider.messages is not None
+    assert provider.messages[0]["content"] == "async-guard"
+    assert (
+        protection_controller.prompt_calls[0]["provenance"].sources[0].source_id
+        == "/workspace/secret.txt"
+    )
+    assert context.metadata["protection_review"] == {
+        "purge_requested": True,
+        "safe_message": "async-clean",
+    }
+
+
+def test_assistant_harness_turn_provider_async_allows_passthrough_after_review() -> (
+    None
+):
+    provider = _Provider(ParsedModelResponse(final_response="allowed"))
+    harness_provider = AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+        protection_controller=_ProtectionController(
+            prompt_decision=PromptProtectionDecision(action=ProtectionAction.ALLOW),
+            response_decision=ResponseProtectionDecision(action=ProtectionAction.ALLOW),
+        ),
+    )
+    context = ToolContext(invocation_id="turn-async-allow", metadata={})
+
+    response = asyncio.run(
+        harness_provider.run_async(
+            state=object(),
+            selected_task_ids=["task-allow"],
+            context=context,
+            adapter=ActionEnvelopeAdapter(),
+            prepared_interaction=SimpleNamespace(response_model=str),
+        )
+    )
+
+    assert response.final_response == "allowed"
+    assert provider.async_calls == 1
+    assert context.metadata == {}
+
+
+def test_direct_research_provider_builder_module_is_wired(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    created = _Provider(ParsedModelResponse(final_response="done"))
+    monkeypatch.setattr(
+        provider_module, "create_provider", lambda *args, **kwargs: created
+    )
+    monkeypatch.setattr(
+        provider_module,
+        "build_protection_environment",
+        lambda **kwargs: {"environment": kwargs["workspace"]},
+    )
+    monkeypatch.setattr(
+        provider_module,
+        "build_protection_controller",
+        lambda **kwargs: {"controller": kwargs["environment"]},
+    )
+    monkeypatch.setattr(
+        provider_module,
+        "build_research_system_prompt",
+        lambda **kwargs: "patched research system prompt",
+    )
+
+    harness_provider = provider_module.build_live_harness_provider(
+        config=StreamlitAssistantConfig(),
+        provider_config=StreamlitAssistantConfig().llm,
+        model_name="demo-model",
+        api_key=None,
+        mode_strategy="auto",
+        tool_registry=build_assistant_registry(),
+        enabled_tool_names={"read_file"},
+        workspace_enabled=True,
+        workspace=str(tmp_path),
+        allow_network=False,
+        allow_filesystem=True,
+        allow_subprocess=False,
+    )
+
+    assert harness_provider._provider is created
+    assert harness_provider._protection_controller == {
+        "controller": {"environment": str(tmp_path)}
+    }
+    assert harness_provider._system_prompt == "patched research system prompt"

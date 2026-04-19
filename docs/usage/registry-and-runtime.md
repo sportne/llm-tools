@@ -2,7 +2,7 @@
 
 `ToolRegistry` stores concrete tool instances by canonical name. `ToolRuntime`
 executes one `ToolInvocationRequest` at a time with validation, policy checks,
-error normalization, and execution recording.
+error normalization, execution recording, and provenance capture.
 
 ## Registering Tools
 
@@ -13,11 +13,8 @@ registry = ToolRegistry()
 registry.register(EchoTool())
 ```
 
-The registry:
-
-- preserves registration order
-- rejects duplicate tool names
-- exposes canonical `ToolSpec` metadata for listing and filtering
+The registry preserves registration order, rejects duplicate tool names, and
+exposes public read-only bindings through `list_bindings()`.
 
 Built-in tool groups also provide registration helpers:
 
@@ -41,6 +38,9 @@ result = runtime.execute(
 )
 ```
 
+The host passes a `ToolContext` into `ToolRuntime`. The runtime then issues a
+`ToolExecutionContext` to the concrete tool implementation.
+
 `ToolRuntime` handles:
 
 - tool lookup
@@ -51,37 +51,28 @@ result = runtime.execute(
 - normalized success/failure envelopes
 - execution record capture
 
-It provides both:
-
-- `execute(...)` for synchronous callers
-- `execute_async(...)` for asynchronous callers
-
-Execution semantics and result normalization are the same on both paths.
-
 ## Result Shape
 
-Runtime execution always returns a `ToolResult`.
+Runtime execution returns a `ToolResult`.
 
-Success shape:
+Important fields include:
 
-- `ok=True`
-- `output` contains serialized output model data
-- `error=None`
+- `ok`, `output`, and normalized `error`
+- `logs` and `artifacts`
+- `source_provenance`
+- `metadata["execution_record"]` with a serialized `ExecutionRecord`
 
-Failure shape:
+`ExecutionRecord` and `ToolResult` both carry `source_provenance`, which is now
+used by higher-level protection and research flows, not just observability.
 
-- `ok=False`
-- `output=None`
-- `error` contains a normalized `ToolError`
-
-`ToolResult.metadata["execution_record"]` includes a serialized
-`ExecutionRecord` with timing, validated input, policy decision, logs,
-artifacts, and error information.
+Some built-in read-oriented tools also write internal workspace cache data such
+as converted-document cache entries under `.llm_tools/cache/read_file`. That is
+runtime-mediated behavior, not a separate public runtime contract.
 
 ## One-Turn Workflow Bridge
 
-If you want to go from adapter output to tool execution without building your
-own glue code, use `WorkflowExecutor`:
+`WorkflowExecutor` is the bridge from parsed model output to sequential tool
+execution:
 
 ```python
 from llm_tools.workflow_api import WorkflowExecutor
@@ -89,10 +80,6 @@ from llm_tools.workflow_api import WorkflowExecutor
 executor = WorkflowExecutor(registry)
 ```
 
-`WorkflowExecutor` consumes a parsed model turn and either:
-
-- returns a final response with no tool execution
-- or executes one-or-more parsed tool invocations sequentially
-
-It is still one-turn scoped in the current implementation. It does not yet
-replan, loop, or make a second model call.
+`WorkflowExecutor` is still one-turn scoped. It can execute a parsed batch of
+invocations or return a final response, but it does not own assistant session
+state, research orchestration, or durable harness resume logic.

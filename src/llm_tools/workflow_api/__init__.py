@@ -17,6 +17,7 @@ from llm_tools.workflow_api.chat_models import (
 )
 from llm_tools.workflow_api.chat_session import (
     ChatSessionTurnRunner,
+    ModelTurnProvider,
     run_interactive_chat_session_turn,
 )
 from llm_tools.workflow_api.executor import PreparedModelInteraction, WorkflowExecutor
@@ -77,6 +78,7 @@ __all__ = [
     "ChatSessionConfig",
     "ChatSessionState",
     "ChatSessionTurnRunner",
+    "ModelTurnProvider",
     "ChatTokenUsage",
     "ChatWorkflowResultEvent",
     "ChatWorkflowStatusEvent",

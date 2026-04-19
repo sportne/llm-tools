@@ -1260,3 +1260,32 @@ def test_harness_executor_helper_methods_cover_elapsed_budget_and_retryable_path
         )
         is HarnessStopReason.BUDGET_EXHAUSTED
     )
+
+
+def test_harness_executor_scrubs_completed_turn_when_protection_requests_purge(
+    tmp_path: Path,
+    _workflow_executor: WorkflowExecutor,
+) -> None:
+    executor = HarnessExecutor(
+        store=InMemoryHarnessStateStore(),
+        workflow_executor=_workflow_executor,
+        driver=_StaticDriver(
+            workspace=tmp_path,
+            payloads=[ParsedModelResponse(final_response="secret")],
+            context_metadata={
+                "protection_review": {
+                    "purge_requested": True,
+                    "safe_message": "safe",
+                }
+            },
+        ),
+        applier=_RootTaskApplier(),
+    )
+
+    result = executor.run(_state())
+
+    assert result.snapshot.state.turns[-1].workflow_result is not None
+    assert (
+        result.snapshot.state.turns[-1].workflow_result.parsed_response.final_response
+        == "safe"
+    )

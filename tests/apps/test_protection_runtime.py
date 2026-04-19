@@ -29,22 +29,22 @@ def test_llm_protection_classifier_sync_and_async_paths() -> None:
     sync_calls: list[tuple[list[dict[str, str]], type[object], dict[str, float]]] = []
     async_calls: list[tuple[list[dict[str, str]], type[object], dict[str, float]]] = []
 
-    def fake_run_with_fallback(*, messages, response_model, request_params):
+    def fake_run_structured(*, messages, response_model, request_params):
         sync_calls.append((messages, response_model, request_params))
         return response_model(
             reasoning="prompt ok",
             recommended_action=ProtectionAction.CONSTRAIN,
         )
 
-    async def fake_run_with_fallback_async(*, messages, response_model, request_params):
+    async def fake_run_structured_async(*, messages, response_model, request_params):
         async_calls.append((messages, response_model, request_params))
         return {
             "reasoning": "response unsafe",
             "recommended_action": ProtectionAction.BLOCK.value,
         }
 
-    provider._run_with_fallback = fake_run_with_fallback  # type: ignore[attr-defined]
-    provider._run_with_fallback_async = fake_run_with_fallback_async  # type: ignore[attr-defined]
+    provider.run_structured = fake_run_structured  # type: ignore[method-assign]
+    provider.run_structured_async = fake_run_structured_async  # type: ignore[method-assign]
     classifier = protection_runtime.LLMProtectionClassifier(provider=provider)
     corpus = ProtectionCorpus(
         documents=[

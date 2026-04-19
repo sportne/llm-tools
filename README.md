@@ -1,56 +1,57 @@
 # llm-tools
 
-`llm-tools` is a low-level Python library for defining, validating, registering,
-executing, and exposing typed tools for LLM and non-LLM applications.
+`llm-tools` is a typed Python toolkit for defining, validating, exposing, and
+executing tools, with higher-level workflow, harness, and assistant surfaces
+built on top of that core.
 
-The project started as a strict tool substrate and is now evolving toward a
-full agent framework. Today, the strongest implemented layers are still the
-typed tool/runtime foundations plus a thin one-turn integration bridge, but the
-longer-term direction now includes richer agent capabilities on top of that
-core.
+The repository is broader than a minimal tool substrate. The current product
+floor includes:
 
-## Status
+- typed tool/runtime foundations in `tool_api`
+- one-turn execution primitives in `workflow_api`
+- durable research/workflow orchestration in `harness_api`
+- a Streamlit assistant client with normal chat and durable research sessions
+- bundled built-in tools for local files, Git, text search, GitLab, and
+  Atlassian products
 
-The core v0.1 foundation is implemented:
+When repository docs drift, current code and tests are the primary source of
+truth. The current scope audit and cleanup backlog live in
+[docs/implementation/scope-audit.md](docs/implementation/scope-audit.md).
 
-- canonical tool and runtime models
-- registry, runtime, policy, and observability
-- built-in filesystem, git, GitLab, Atlassian, and text tools
-- built-in read-only repository chat tools
-- one canonical structured-action adapter (`ActionEnvelopeAdapter`)
-- an Instructor-backed OpenAI-compatible provider layer
-- a current `workflow_api` bridge for one parsed model turn plus an interactive
-  repository-chat session runner
-- dual sync/async execution paths across runtime, provider, and workflow layers
-- an optional Streamlit assistant app layer for interactive use
-- `harness_api` durable session orchestration with persisted traces, replay,
-  summaries, a public Python session API, and a minimal persisted-session CLI
+## Current Status
 
-## Core Concepts
+The implemented codebase currently spans these main layers:
 
-- tools are Python classes
-- structured data uses Pydantic v2
-- `ToolSpec` plus `input_model` and `output_model` are canonical
-- `ToolRuntime` executes one invocation with validation and normalization
-- adapters expose tools and parse model output into canonical turn results
-- providers handle model requests through OpenAI-compatible endpoints
-- `WorkflowExecutor` currently bridges one parsed model turn into sequential
-  tool execution
-- the optional Streamlit assistant app is the long-term interactive client
+- `tool_api`: canonical typed models, runtime, policy, registry, and execution
+  services
+- `llm_adapters`: structured model-output normalization
+- `llm_providers`: OpenAI-compatible typed provider transport
+- `tools`: bundled built-in tool implementations
+- `workflow_api`: one-turn execution plus assistant-oriented chat/protection
+  helpers
+- `harness_api`: durable multi-turn orchestration, replay, resume, and
+  verification
+- `apps`: product entrypoints and app-local glue
+
+The main supported product entrypoints are:
+
+- `llm_tools.apps.streamlit_assistant`
+- `llm_tools.apps.harness_cli`
+
+`apps/*` are supported product surfaces, but they should not be treated as the
+default extension API for downstream library consumers.
 
 ## Package Layout
-
-The library uses a `src` layout rooted at `src/llm_tools/`.
 
 ```text
 src/llm_tools/
   apps/
-  tool_api/
+  harness_api/
   llm_adapters/
   llm_providers/
+  tool_api/
   tools/
   workflow_api/
-  harness_api/
 ```
 
 ## Quick Start
@@ -65,26 +66,52 @@ git worktrees at `~/.venvs/llm-tools`. Re-run `make install-dev` from the
 checkout you are actively using so the shared environment's editable install
 points at that tree.
 
-Native Microsoft Project (`.mpp`/`.mpt`) reads now use MPXJ. That dependency is
-installed with the base package, and a working Java runtime must be available
-wherever those file reads are expected to work.
+## Assistant Surfaces
 
-To install the optional Streamlit apps:
+Launch the Streamlit assistant with either:
+
+```bash
+python -m llm_tools.apps.streamlit_assistant <directory> --config <path>
+```
+
+or:
+
+```bash
+llm-tools-streamlit-assistant <directory> --config <path>
+```
+
+Launch the persisted harness CLI with either:
+
+```bash
+python -m llm_tools.apps.harness_cli start --title "Task" --intent "Do work"
+```
+
+or:
+
+```bash
+llm-tools-harness start --title "Task" --intent "Do work"
+```
+
+The Streamlit assistant is the main interactive client. The harness CLI is a
+minimal operational surface over the public `harness_api` session service.
+
+## Dependencies
+
+The base package currently bundles:
+
+- OpenAI-compatible provider dependencies: `openai`, `instructor`
+- enterprise read integrations: `atlassian-python-api`, `python-gitlab`
+- document-conversion backends: `markitdown`, `mpxj`
+
+These integrations are mostly loaded lazily at runtime, but they are still part
+of the packaged dependency surface today. The current rationale and cleanup
+follow-ups are tracked in the scope audit.
+
+To install the optional Streamlit runtime:
 
 ```bash
 ~/.venvs/llm-tools/bin/python -m pip install -e .[streamlit]
 ```
-
-## Security and Dependencies
-
-The base package installs provider, remote-service, and document-conversion
-components so those tool surfaces are available when enabled: `openai` and
-`instructor` for OpenAI-compatible structured responses,
-`atlassian-python-api` and `python-gitlab` for enterprise read tools,
-`markitdown` for document conversion, and MPXJ plus a working Java runtime for
-Microsoft Project reads. See [Security Hardening](docs/usage/security-hardening.md)
-for the dependency surface, default storage locations, temp caches, and secret
-handling guidance.
 
 ## Development
 
@@ -99,67 +126,9 @@ make package
 
 ## Documentation
 
+- [Scope Audit](docs/implementation/scope-audit.md)
 - [Design Docs](docs/design/README.md)
 - [Usage Docs](docs/usage/README.md)
 - [Implementation Docs](docs/implementation/README.md)
-- [Extension Docs](docs/extensions/README.md)
+- [Examples](examples/README.md)
 - [Agent Conventions](AGENTS.md)
-
-## Harness Sessions
-
-Launch the minimal persisted harness CLI with either:
-
-```bash
-python -m llm_tools.apps.harness_cli start --title "Task" --intent "Do work"
-```
-
-or:
-
-```bash
-llm-tools-harness start --title "Task" --intent "Do work"
-```
-
-Use the public Python session API from `llm_tools.harness_api` when you need
-injectable session control, replay inspection, or a minimal built-in runner for
-scripted and approval-aware harness tests. The CLI defaults to storing state in
-`~/.llm-tools/harness`; pass `--store-dir` to isolate or relocate persisted
-session data.
-
-## Streamlit Assistant App
-
-Launch the optional Streamlit assistant app with either:
-
-```bash
-python -m llm_tools.apps.streamlit_assistant <directory> --config <path>
-```
-
-or:
-
-```bash
-llm-tools-streamlit-assistant <directory> --config <path>
-```
-
-The assistant is the broader chat client: it can answer normal questions
-without tools, optionally use the full built-in tool registry, and launch
-harness-backed research sessions for durable investigation work. Selecting a
-workspace root does not automatically enable filesystem or subprocess access;
-those permissions stay opt-in in the sidebar.
-
-This is the only long-term interactive client the repository plans to keep.
-
-To pass regular Streamlit server flags, run Streamlit directly:
-
-```bash
-streamlit run src/llm_tools/apps/streamlit_assistant/app.py -- <directory> --config <path>
-```
-
-## Examples
-
-- [Examples Overview](examples/README.md)
-- `examples/minimal_tool.py`
-- `examples/builtins_direct.py`
-- `examples/openai_wiring.py`
-- `examples/async_model_turn.py`
-- `examples/openai_live.py`
-- `examples/structured_response.py`
-- `examples/prompt_schema.py`

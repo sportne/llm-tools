@@ -47,7 +47,7 @@ class LLMProtectionClassifier(SensitivityClassifier):
         messages: list[dict[str, Any]],
         provenance: ProtectionProvenanceSnapshot,
     ) -> ProtectionAssessment:
-        payload = self._provider._run_with_fallback(
+        payload = self._provider.run_structured(
             messages=_build_classifier_messages(
                 task="prompt",
                 corpus=corpus,
@@ -70,7 +70,7 @@ class LLMProtectionClassifier(SensitivityClassifier):
         messages: list[dict[str, Any]],
         provenance: ProtectionProvenanceSnapshot,
     ) -> ProtectionAssessment:
-        payload = await self._provider._run_with_fallback_async(
+        payload = await self._provider.run_structured_async(
             messages=_build_classifier_messages(
                 task="prompt",
                 corpus=corpus,
@@ -93,7 +93,7 @@ class LLMProtectionClassifier(SensitivityClassifier):
         response_payload: Any,
         provenance: ProtectionProvenanceSnapshot,
     ) -> ProtectionAssessment:
-        payload = self._provider._run_with_fallback(
+        payload = self._provider.run_structured(
             messages=_build_classifier_messages(
                 task="response",
                 corpus=corpus,
@@ -116,7 +116,7 @@ class LLMProtectionClassifier(SensitivityClassifier):
         response_payload: Any,
         provenance: ProtectionProvenanceSnapshot,
     ) -> ProtectionAssessment:
-        payload = await self._provider._run_with_fallback_async(
+        payload = await self._provider.run_structured_async(
             messages=_build_classifier_messages(
                 task="response",
                 corpus=corpus,

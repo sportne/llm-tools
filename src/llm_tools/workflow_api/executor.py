@@ -84,7 +84,7 @@ class WorkflowExecutor:
         final_response_model: object = str,
     ) -> PreparedModelInteraction:
         """Prepare a typed response model and schema for one model turn."""
-        tools = list(self._registry._iter_registered_tools())
+        tools = self._registry.list_bindings()
         if context is not None:
             tools = self._filter_tools_for_exposure(
                 tools,

@@ -40,6 +40,7 @@ from llm_tools.harness_api.planning import (
 )
 from llm_tools.harness_api.protection import (
     DEFAULT_PURGED_RESPONSE,
+    collect_state_provenance,
     scrub_state_for_protection,
     scrub_workflow_result,
 )
@@ -127,6 +128,7 @@ __all__ = [
     "complete_task",
     "create_derived_task",
     "create_root_task",
+    "collect_state_provenance",
     "CURRENT_HARNESS_STATE_SCHEMA_VERSION",
     "DEFAULT_PURGED_RESPONSE",
     "DefaultHarnessContextBuilder",

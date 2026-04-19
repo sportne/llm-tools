@@ -69,6 +69,7 @@ from llm_tools.llm_providers import OpenAICompatibleProvider
 from llm_tools.tool_api import SideEffectClass, ToolSpec
 from llm_tools.workflow_api import (
     ChatSessionState,
+    ChatSessionTurnRunner,
     ChatTokenUsage,
     ChatWorkflowApprovalEvent,
     ChatWorkflowApprovalResolvedEvent,
@@ -77,11 +78,8 @@ from llm_tools.workflow_api import (
     ChatWorkflowResultEvent,
     ChatWorkflowStatusEvent,
     ChatWorkflowTurnResult,
-    run_interactive_chat_session_turn,
-)
-from llm_tools.workflow_api.chat_session import (
-    ChatSessionTurnRunner,
     ModelTurnProvider,
+    run_interactive_chat_session_turn,
 )
 
 _APP_STATE_SLOT = "llm_tools_streamlit_assistant_app_state"

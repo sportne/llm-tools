@@ -37,7 +37,7 @@ from llm_tools.tool_api.models import (
 )
 from llm_tools.tool_api.policy import ToolPolicy
 from llm_tools.tool_api.redaction import RedactionConfig, RedactionRule, RedactionTarget
-from llm_tools.tool_api.registry import ToolRegistry
+from llm_tools.tool_api.registry import RegisteredToolBinding, ToolRegistry
 from llm_tools.tool_api.runtime import ToolRuntime
 from llm_tools.tool_api.tool import InputT, OutputT, Tool
 
@@ -73,6 +73,7 @@ __all__ = [
     "ToolError",
     "ToolInvocationRequest",
     "ToolNotRegisteredError",
+    "RegisteredToolBinding",
     "ToolRegistry",
     "ToolRegistryError",
     "ToolRuntime",
