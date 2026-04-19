@@ -10,7 +10,23 @@ import pytest
 import llm_tools.tools.filesystem._content as filesystem_content
 from llm_tools.tool_api import ToolContext
 from llm_tools.tools.filesystem import ReadFileTool
-from llm_tools.tools.filesystem._content import convert_with_mpxj, load_readable_content
+from llm_tools.tools.filesystem._content import (
+    _extract_project_notes,
+    _first_value,
+    _format_predecessors,
+    _format_project_value,
+    _format_task_resources,
+    _get_mpxj_reader_class,
+    _import_mpxj_reader_class,
+    _import_mpxj_runtime,
+    _iter_collection,
+    _normalize_note,
+    _normalize_scalar_text,
+    _render_markdown_table,
+    _render_notes_section,
+    convert_with_mpxj,
+    load_readable_content,
+)
 from llm_tools.tools.filesystem._ops import get_file_info_impl
 from llm_tools.tools.filesystem.models import SourceFilters, ToolLimits
 from llm_tools.tools.text._ops import search_text_impl
@@ -566,3 +582,123 @@ def test_convert_with_mpxj_keeps_real_top_level_first_task(
 
     assert "| Task Count | 2 |" in rendered
     assert "| 1 | 1 | Kickoff | 2026-01-01 08:00 |" in rendered
+
+
+def test_project_content_helpers_cover_remaining_branches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _LockThatPublishesReader:
+        def __enter__(self) -> None:
+            filesystem_content._MPXJ_READER_CLASS = "published-reader"
+            return None
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            return False
+
+    _reset_mpxj_state(monkeypatch)
+    monkeypatch.setattr(
+        filesystem_content, "_MPXJ_JVM_LOCK", _LockThatPublishesReader()
+    )
+    assert _get_mpxj_reader_class() == "published-reader"
+
+    class _StartedJPype:
+        def isJVMStarted(self) -> bool:
+            return True
+
+        def startJVM(self, *args: object) -> None:
+            raise AssertionError("startJVM should not be called")
+
+    _reset_mpxj_state(monkeypatch)
+    monkeypatch.setattr(
+        filesystem_content, "_MPXJ_JVM_LOCK", filesystem_content.threading.Lock()
+    )
+    monkeypatch.setattr(
+        filesystem_content,
+        "_import_mpxj_runtime",
+        lambda: _StartedJPype(),
+    )
+    monkeypatch.setattr(
+        filesystem_content,
+        "_import_mpxj_reader_class",
+        lambda: (_ for _ in ()).throw(ImportError("missing reader module")),
+    )
+    with pytest.raises(RuntimeError, match="reader classes"):
+        _get_mpxj_reader_class()
+
+    class _ReaderModule:
+        UniversalProjectReader = "reader-class"
+
+    modules = {
+        "jpype": "jpype-module",
+        "mpxj": "mpxj-module",
+        "org.mpxj.reader": _ReaderModule(),
+    }
+    monkeypatch.setattr(
+        filesystem_content.importlib,
+        "import_module",
+        lambda name: modules[name],
+    )
+    assert _import_mpxj_runtime() == "jpype-module"
+    assert _import_mpxj_reader_class() == "reader-class"
+
+    assert _render_markdown_table(headers=["A"], rows=[], empty_message="none") == [
+        "none"
+    ]
+    assert _render_notes_section(project_notes=None, tasks=[], resources=[]) == []
+    assert _extract_project_notes(object()) is None
+    assert _normalize_note("  \n  ") is None
+
+    class _MissingTargetRelation:
+        def getTargetTask(self) -> object:
+            return object()
+
+        def getType(self) -> str:
+            return "FS"
+
+    predecessors = _format_predecessors(
+        type(
+            "TaskWithMixedPredecessors",
+            (),
+            {
+                "getPredecessors": lambda self: [
+                    _MissingTargetRelation(),
+                    FakeRelation(3, "-"),
+                ]
+            },
+        )()
+    )
+    assert predecessors == "3"
+
+    fallback_resources = _format_task_resources(
+        type(
+            "TaskWithFallbackAssignments",
+            (),
+            {
+                "getResourceAssignments": lambda self: [
+                    type(
+                        "FallbackAssignment",
+                        (),
+                        {
+                            "getResource": lambda self: object(),
+                            "getResourceName": lambda self: "Fallback Tester",
+                        },
+                    )()
+                ]
+            },
+        )()
+    )
+    assert fallback_resources == "Fallback Tester"
+
+    class _HasAttribute:
+        attr = 1
+
+    assert _first_value(None, "getName") is None
+    assert _first_value(_HasAttribute(), "attr") is None
+    assert _iter_collection(None) == []
+    assert _iter_collection("demo") == ["demo"]
+    sentinel = object()
+    assert _iter_collection(sentinel) == [sentinel]
+    assert _format_project_value(None) == "-"
+    assert _normalize_scalar_text("  \n ") is None
+    assert _normalize_scalar_text("true") == "Yes"
+    assert _normalize_scalar_text("false") == "No"
