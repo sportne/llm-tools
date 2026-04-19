@@ -40,12 +40,14 @@ streamlit run src/llm_tools/apps/streamlit_assistant/app.py -- <directory> --con
 ```
 
 The optional directory becomes the initial workspace root for local file and
-Git tools. The assistant can still answer normal questions when no root is
+Git tools. That workspace selection does not grant filesystem or subprocess
+access by itself; those permissions stay off until you enable them in the
+sidebar. The assistant can still answer normal questions when no root is
 selected.
 
 ## Config Shape
 
-The assistant uses a separate config model from the repository chat apps:
+The assistant uses its own config model:
 
 - `llm`
 - `session`
@@ -95,8 +97,8 @@ Session controls let you opt into:
 
 - tool enablement by source category
 - network access
-- filesystem access
-- subprocess access
+- filesystem access within the selected workspace root
+- subprocess access within the selected workspace root
 - approval requirements for reads and writes
 
 New assistant sessions clone the current model, permissions, and enabled source
@@ -115,7 +117,8 @@ research sessions into the main assistant transcript.
 Research session state copy now distinguishes running, awaiting approval,
 resumable, stopped, and summarized states. A session is treated as summarized
 for the current assistant chat once its summary has been inserted back into that
-chat transcript.
+chat transcript. When `research.store_dir` is omitted, the app stores durable
+research state under `~/.llm-tools/assistant/streamlit/research`.
 
 The UI surfaces capability state for each enabled tool and source group with
 assistant-facing readiness hints such as:
@@ -125,6 +128,10 @@ assistant-facing readiness hints such as:
 - needs credentials
 - blocked by permissions
 - approval on use
+
+Session-only API keys entered in the sidebar stay in the current Streamlit
+session state. Prefer environment variables or that session-only entry path
+for secrets; do not commit secrets into assistant YAML configs.
 
 ## Citations
 

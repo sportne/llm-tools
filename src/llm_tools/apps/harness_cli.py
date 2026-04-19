@@ -26,13 +26,15 @@ from llm_tools.harness_api import (
 )
 from llm_tools.llm_adapters import ParsedModelResponse
 
-DEFAULT_STORE_DIR = ".llm-tools-harness"
+
+def _default_store_dir() -> str:
+    return str((Path.home() / ".llm-tools" / "harness").resolve())
 
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the minimal persisted harness CLI parser."""
     parser = argparse.ArgumentParser(prog="llm-tools-harness")
-    parser.add_argument("--store-dir", default=DEFAULT_STORE_DIR)
+    parser.add_argument("--store-dir", default=_default_store_dir())
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     start = subparsers.add_parser("start", help="Create a persisted harness session.")

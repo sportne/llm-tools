@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+import pytest
 from pydantic import BaseModel
 
 import llm_tools.llm_providers.openai_compatible as provider_module
@@ -149,6 +150,19 @@ class _StrictInstructorModule:
         raise AssertionError("from_openai should be bypassed for fake clients")
 
 
+class InstructorSchemaValidationError(RuntimeError):
+    pass
+
+
+InstructorSchemaValidationError.__module__ = "instructor.testing"
+
+
+def _wrapped_schema_failure(message: str) -> RuntimeError:
+    wrapped = RuntimeError(message)
+    wrapped.__cause__ = InstructorSchemaValidationError(message)
+    return wrapped
+
+
 def test_provider_run_prefers_tools_mode_when_available(monkeypatch: Any) -> None:
     monkeypatch.setattr(provider_module, "_instructor", _FakeInstructor())
     adapter, response_model = _response_model()
@@ -182,12 +196,14 @@ def test_provider_run_prefers_tools_mode_when_available(monkeypatch: Any) -> Non
     assert call["temperature"] == 0
 
 
-def test_provider_run_auto_falls_back_to_json(monkeypatch: Any) -> None:
+def test_provider_run_auto_falls_back_to_json_for_retryable_schema_errors(
+    monkeypatch: Any,
+) -> None:
     monkeypatch.setattr(provider_module, "_instructor", _FakeInstructor())
     adapter, response_model = _response_model()
     client = _SyncClient(
         outcomes={
-            "TOOLS": RuntimeError("tools failed"),
+            "TOOLS": _wrapped_schema_failure("schema validation failed"),
             "JSON": {"actions": [], "final_response": "done"},
             "MD_JSON": RuntimeError("should-not-run"),
         }
@@ -206,6 +222,53 @@ def test_provider_run_auto_falls_back_to_json(monkeypatch: Any) -> None:
         "TOOLS",
         "JSON",
     ]
+
+
+def test_provider_run_auto_retries_wrapped_validation_failure(monkeypatch: Any) -> None:
+    monkeypatch.setattr(provider_module, "_instructor", _FakeInstructor())
+    adapter, response_model = _response_model()
+    client = _SyncClient(
+        outcomes={
+            "TOOLS": _wrapped_schema_failure("schema validation failed"),
+            "JSON": {"actions": [], "final_response": "wrapped"},
+            "MD_JSON": RuntimeError("should-not-run"),
+        }
+    )
+    provider = OpenAICompatibleProvider(model="demo-model", client=client)
+
+    parsed = provider.run(
+        adapter=adapter,
+        messages=[{"role": "user", "content": "hello"}],
+        response_model=response_model,
+    )
+
+    assert parsed.final_response == "wrapped"
+    assert [call["__mode"] for call in client.chat.completions.calls] == [
+        "TOOLS",
+        "JSON",
+    ]
+
+
+def test_provider_run_auto_does_not_retry_generic_failure(monkeypatch: Any) -> None:
+    monkeypatch.setattr(provider_module, "_instructor", _FakeInstructor())
+    adapter, response_model = _response_model()
+    client = _SyncClient(
+        outcomes={
+            "TOOLS": RuntimeError("transport failed"),
+            "JSON": {"actions": [], "final_response": "should-not-run"},
+            "MD_JSON": RuntimeError("should-not-run"),
+        }
+    )
+    provider = OpenAICompatibleProvider(model="demo-model", client=client)
+
+    with pytest.raises(RuntimeError, match="transport failed"):
+        provider.run(
+            adapter=adapter,
+            messages=[{"role": "user", "content": "hello"}],
+            response_model=response_model,
+        )
+
+    assert [call["__mode"] for call in client.chat.completions.calls] == ["TOOLS"]
 
 
 def test_provider_run_honors_explicit_mode_strategy(monkeypatch: Any) -> None:
@@ -235,13 +298,41 @@ def test_provider_run_honors_explicit_mode_strategy(monkeypatch: Any) -> None:
     assert [call["__mode"] for call in client.chat.completions.calls] == ["MD_JSON"]
 
 
-def test_provider_run_async_uses_fallback_order(monkeypatch: Any) -> None:
+def test_provider_run_explicit_mode_raises_original_exception(monkeypatch: Any) -> None:
+    monkeypatch.setattr(provider_module, "_instructor", _FakeInstructor())
+    adapter, response_model = _response_model()
+    client = _SyncClient(
+        outcomes={
+            "TOOLS": RuntimeError("unused"),
+            "JSON": RuntimeError("unused"),
+            "MD_JSON": RuntimeError("md-json failed"),
+        }
+    )
+    provider = OpenAICompatibleProvider(
+        model="demo-model",
+        client=client,
+        mode_strategy=ProviderModeStrategy.MD_JSON,
+    )
+
+    with pytest.raises(RuntimeError, match="md-json failed"):
+        provider.run(
+            adapter=adapter,
+            messages=[{"role": "user", "content": "hello"}],
+            response_model=response_model,
+        )
+
+    assert [call["__mode"] for call in client.chat.completions.calls] == ["MD_JSON"]
+
+
+def test_provider_run_async_uses_fallback_order_for_retryable_schema_errors(
+    monkeypatch: Any,
+) -> None:
     monkeypatch.setattr(provider_module, "_instructor", _FakeInstructor())
     adapter, response_model = _response_model()
     client = _AsyncClient(
         outcomes={
-            "TOOLS": RuntimeError("tools failed"),
-            "JSON": RuntimeError("json failed"),
+            "TOOLS": _wrapped_schema_failure("schema validation failed"),
+            "JSON": _wrapped_schema_failure("json validation failed"),
             "MD_JSON": {
                 "actions": [{"tool_name": "echo", "arguments": {"value": "async"}}],
                 "final_response": None,
@@ -304,6 +395,127 @@ def test_provider_uses_local_fallback_when_instructor_missing(monkeypatch: Any) 
     assert parsed.final_response == "fallback"
 
 
+def test_provider_run_async_auto_does_not_retry_generic_failure(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(provider_module, "_instructor", _FakeInstructor())
+    adapter, response_model = _response_model()
+    client = _AsyncClient(
+        outcomes={
+            "TOOLS": RuntimeError("async transport failed"),
+            "JSON": {"actions": [], "final_response": "should-not-run"},
+            "MD_JSON": RuntimeError("should-not-run"),
+        }
+    )
+    provider = OpenAICompatibleProvider(model="demo-model", async_client=client)
+
+    with pytest.raises(RuntimeError, match="async transport failed"):
+        asyncio.run(
+            provider.run_async(
+                adapter=adapter,
+                messages=[{"role": "user", "content": "hello"}],
+                response_model=response_model,
+            )
+        )
+
+    assert [call["__mode"] for call in client.chat.completions.calls] == ["TOOLS"]
+
+
+def test_provider_run_async_explicit_mode_raises_original_exception(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(provider_module, "_instructor", _FakeInstructor())
+    adapter, response_model = _response_model()
+    client = _AsyncClient(
+        outcomes={
+            "TOOLS": RuntimeError("unused"),
+            "JSON": RuntimeError("unused"),
+            "MD_JSON": RuntimeError("async md-json failed"),
+        }
+    )
+    provider = OpenAICompatibleProvider(
+        model="demo-model",
+        async_client=client,
+        mode_strategy=ProviderModeStrategy.MD_JSON,
+    )
+
+    with pytest.raises(RuntimeError, match="async md-json failed"):
+        asyncio.run(
+            provider.run_async(
+                adapter=adapter,
+                messages=[{"role": "user", "content": "hello"}],
+                response_model=response_model,
+            )
+        )
+
+    assert [call["__mode"] for call in client.chat.completions.calls] == ["MD_JSON"]
+
+
+def test_provider_missing_instructor_async_does_not_resend_identical_requests(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(provider_module, "_instructor", None)
+    adapter, response_model = _response_model()
+    client = _AsyncClient(
+        outcomes={
+            "TOOLS": InstructorSchemaValidationError("schema validation failed"),
+            "JSON": {"actions": [], "final_response": "should-not-run"},
+            "MD_JSON": {"actions": [], "final_response": "should-not-run"},
+        }
+    )
+    provider = OpenAICompatibleProvider(model="demo-model", async_client=client)
+
+    with pytest.raises(ValueError, match="tools: InstructorSchemaValidationError"):
+        asyncio.run(
+            provider.run_async(
+                adapter=adapter,
+                messages=[{"role": "user", "content": "hello"}],
+                response_model=response_model,
+            )
+        )
+
+    assert len(client.chat.completions.calls) == 1
+
+
+def test_provider_caches_wrapped_clients_per_mode(monkeypatch: Any) -> None:
+    monkeypatch.setattr(provider_module, "_instructor", _FakeInstructor())
+    provider = OpenAICompatibleProvider(
+        model="demo-model",
+        client=_SyncClient({"TOOLS": {"actions": [], "final_response": "ok"}}),
+        async_client=_AsyncClient({"TOOLS": {"actions": [], "final_response": "ok"}}),
+    )
+
+    sync_client = provider._instructor_sync_client(ProviderModeStrategy.TOOLS)
+    async_client = provider._instructor_async_client(ProviderModeStrategy.TOOLS)
+
+    assert provider._instructor_sync_client(ProviderModeStrategy.TOOLS) is sync_client
+    assert provider._instructor_async_client(ProviderModeStrategy.TOOLS) is async_client
+
+
+def test_provider_missing_instructor_does_not_resend_identical_requests(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(provider_module, "_instructor", None)
+    adapter, response_model = _response_model()
+    client = _SyncClient(
+        outcomes={
+            "TOOLS": InstructorSchemaValidationError("schema validation failed"),
+            "JSON": {"actions": [], "final_response": "should-not-run"},
+            "MD_JSON": {"actions": [], "final_response": "should-not-run"},
+        }
+    )
+    provider = OpenAICompatibleProvider(model="demo-model", client=client)
+
+    with pytest.raises(ValueError, match="tools: InstructorSchemaValidationError"):
+        provider.run(
+            adapter=adapter,
+            messages=[{"role": "user", "content": "hello"}],
+            response_model=response_model,
+        )
+
+    assert len(client.chat.completions.calls) == 1
+
+
 def test_provider_bypasses_real_instructor_wrapper_for_non_openai_clients(
     monkeypatch: Any,
 ) -> None:
@@ -325,3 +537,27 @@ def test_provider_bypasses_real_instructor_wrapper_for_non_openai_clients(
     )
 
     assert parsed.final_response == "ok"
+
+
+def test_provider_bypassed_instructor_does_not_resend_identical_requests(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(provider_module, "_instructor", _StrictInstructorModule())
+    adapter, response_model = _response_model()
+    client = _SyncClient(
+        outcomes={
+            "TOOLS": InstructorSchemaValidationError("schema validation failed"),
+            "JSON": {"actions": [], "final_response": "should-not-run"},
+            "MD_JSON": {"actions": [], "final_response": "should-not-run"},
+        }
+    )
+    provider = OpenAICompatibleProvider(model="demo-model", client=client)
+
+    with pytest.raises(ValueError, match="tools: InstructorSchemaValidationError"):
+        provider.run(
+            adapter=adapter,
+            messages=[{"role": "user", "content": "hello"}],
+            response_model=response_model,
+        )
+
+    assert len(client.chat.completions.calls) == 1

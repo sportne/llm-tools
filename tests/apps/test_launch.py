@@ -9,71 +9,34 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from tests.apps._imports import (
-    import_streamlit_assistant_modules,
-    import_streamlit_chat_modules,
-)
+from tests.apps._imports import import_streamlit_assistant_modules
 
 
-@pytest.mark.parametrize(
-    ("module_name", "main_module_name", "runner_name"),
-    [
-        (
-            "llm_tools.apps.streamlit_chat",
-            "llm_tools.apps.streamlit_chat.__main__",
-            "run_streamlit_chat_app",
-        ),
-        (
-            "llm_tools.apps.streamlit_assistant",
-            "llm_tools.apps.streamlit_assistant.__main__",
-            "run_streamlit_assistant_app",
-        ),
-    ],
-)
-def test_streamlit_packages_export_main_and_runner(
-    module_name: str,
-    main_module_name: str,
-    runner_name: str,
-) -> None:
-    module = importlib.import_module(module_name)
-    main_module = importlib.import_module(main_module_name)
+def test_streamlit_assistant_package_exports_main_and_runner() -> None:
+    module = importlib.import_module("llm_tools.apps.streamlit_assistant")
+    main_module = importlib.import_module("llm_tools.apps.streamlit_assistant.__main__")
 
     assert hasattr(module, "main")
-    assert hasattr(module, runner_name)
+    assert hasattr(module, "run_streamlit_assistant_app")
     assert hasattr(main_module, "main")
 
 
-@pytest.mark.parametrize(
-    ("package_name", "runner_path", "main_path"),
-    [
-        (
-            "llm_tools.apps.streamlit_chat",
-            "llm_tools.apps.streamlit_chat.app.run_streamlit_chat_app",
-            "llm_tools.apps.streamlit_chat.app.main",
-        ),
-        (
-            "llm_tools.apps.streamlit_assistant",
-            "llm_tools.apps.streamlit_assistant.app.run_streamlit_assistant_app",
-            "llm_tools.apps.streamlit_assistant.app.main",
-        ),
-    ],
-)
-def test_package_main_and_runner_dispatch_to_app_layer(
-    package_name: str,
-    runner_path: str,
-    main_path: str,
+def test_assistant_package_main_and_runner_dispatch_to_app_layer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    package = importlib.import_module(package_name)
+    package = importlib.import_module("llm_tools.apps.streamlit_assistant")
     called: list[str] = []
 
-    monkeypatch.setattr(runner_path, lambda **kwargs: called.append(f"run:{kwargs!r}"))
-    monkeypatch.setattr(main_path, lambda argv=None: called.append("main") or 0)
-
-    getattr(package, next(name for name in dir(package) if name.startswith("run_")))(
-        root_path=None,
-        config=None,
+    monkeypatch.setattr(
+        "llm_tools.apps.streamlit_assistant.app.run_streamlit_assistant_app",
+        lambda **kwargs: called.append(f"run:{kwargs!r}"),
     )
+    monkeypatch.setattr(
+        "llm_tools.apps.streamlit_assistant.app.main",
+        lambda argv=None: called.append("main") or 0,
+    )
+
+    package.run_streamlit_assistant_app(root_path=None, config=None)
     assert package.main() == 0
     assert len(called) == 2
     assert called[1] == "main"
@@ -85,13 +48,13 @@ def test_remaining_console_scripts_are_declared_and_textual_scripts_are_gone() -
     scripts = pyproject["project"]["scripts"]
 
     assert scripts["llm-tools-harness"] == "llm_tools.apps.harness_cli:main"
-    assert scripts["llm-tools-streamlit-chat"] == "llm_tools.apps.streamlit_chat:main"
     assert (
         scripts["llm-tools-streamlit-assistant"]
         == "llm_tools.apps.streamlit_assistant:main"
     )
     assert "llm-tools-chat" not in scripts
     assert "llm-tools-workbench" not in scripts
+    assert "llm-tools-streamlit-chat" not in scripts
 
 
 def test_textual_dependency_hooks_are_removed() -> None:
@@ -104,23 +67,11 @@ def test_textual_dependency_hooks_are_removed() -> None:
     assert all("textual" not in dependency for dependency in dev_dependencies)
 
 
-@pytest.mark.parametrize(
-    ("package_name", "main_module_name"),
-    [
-        ("llm_tools.apps.streamlit_chat", "llm_tools.apps.streamlit_chat.__main__"),
-        (
-            "llm_tools.apps.streamlit_assistant",
-            "llm_tools.apps.streamlit_assistant.__main__",
-        ),
-    ],
-)
-def test_module_main_helpers_dispatch_to_package_main(
-    package_name: str,
-    main_module_name: str,
+def test_assistant_module_main_helpers_dispatch_to_package_main(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    package = importlib.import_module(package_name)
-    main_module = importlib.import_module(main_module_name)
+    package = importlib.import_module("llm_tools.apps.streamlit_assistant")
+    main_module = importlib.import_module("llm_tools.apps.streamlit_assistant.__main__")
 
     monkeypatch.setattr(package, "main", lambda: 7)
 
@@ -128,55 +79,26 @@ def test_module_main_helpers_dispatch_to_package_main(
     assert main_module.main() == 7
 
 
-@pytest.mark.parametrize(
-    ("package_name", "main_module_name"),
-    [
-        ("llm_tools.apps.streamlit_chat", "llm_tools.apps.streamlit_chat.__main__"),
-        (
-            "llm_tools.apps.streamlit_assistant",
-            "llm_tools.apps.streamlit_assistant.__main__",
-        ),
-    ],
-)
-def test_module_entrypoint_raises_system_exit_with_main_return_code(
-    package_name: str,
-    main_module_name: str,
+def test_assistant_module_entrypoint_raises_system_exit_with_main_return_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    package = importlib.import_module(package_name)
+    package = importlib.import_module("llm_tools.apps.streamlit_assistant")
     called: list[str] = []
     monkeypatch.setattr(package, "main", lambda: called.append("main") or 0)
 
-    sys.modules.pop(main_module_name, None)
+    sys.modules.pop("llm_tools.apps.streamlit_assistant.__main__", None)
     with pytest.raises(SystemExit) as exc:
-        runpy.run_module(main_module_name, run_name="__main__")
+        runpy.run_module(
+            "llm_tools.apps.streamlit_assistant.__main__",
+            run_name="__main__",
+        )
 
     assert exc.value.code == 0
     assert called == ["main"]
 
 
-@pytest.mark.parametrize(
-    ("importer", "app_module_path", "runner_class_path"),
-    [
-        (
-            import_streamlit_chat_modules,
-            "llm_tools.apps.streamlit_chat.app",
-            "run_streamlit_chat_app",
-        ),
-        (
-            import_streamlit_assistant_modules,
-            "llm_tools.apps.streamlit_assistant.app",
-            "run_streamlit_assistant_app",
-        ),
-    ],
-)
-def test_app_module_run_helpers_exist(
-    importer: object,
-    app_module_path: str,
-    runner_class_path: str,
-) -> None:
-    del app_module_path
-    app_module = importer().app
+def test_assistant_app_module_run_helpers_exist() -> None:
+    app_module = import_streamlit_assistant_modules().app
 
-    assert hasattr(app_module, runner_class_path)
+    assert hasattr(app_module, "run_streamlit_assistant_app")
     assert hasattr(app_module, "main")

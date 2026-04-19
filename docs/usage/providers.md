@@ -21,7 +21,10 @@ It accepts:
 - optional `default_request_params`
 
 It uses the OpenAI Python SDK for transport and Instructor for structured
-response parsing.
+response parsing. Treat `base_url` as a trust boundary: prompts, structured
+responses, and credentials are sent to that endpoint. Prefer HTTPS for remote
+providers; plaintext HTTP is only appropriate for local loopback-style setups
+such as Ollama on `localhost`.
 
 ## Public Methods
 
@@ -44,12 +47,15 @@ Both methods accept:
 
 `mode_strategy` controls Instructor mode selection:
 
-- `auto` (default): tries `TOOLS`, then `JSON`, then `MD_JSON`
+- `auto` (default): tries `TOOLS`, then `JSON`, then `MD_JSON` only for
+  structured-output compatibility failures
 - `tools`
 - `json`
 - `md_json`
 
-This preserves the reliability ladder while keeping one provider API.
+`auto` is a compatibility fallback, not a general retry policy. Authentication,
+transport, timeout, and other unexpected provider failures are surfaced
+immediately instead of being replayed across modes.
 
 ## Example
 
