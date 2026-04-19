@@ -76,6 +76,17 @@ To install the optional Streamlit apps:
 ~/.venvs/llm-tools/bin/python -m pip install -e .[streamlit]
 ```
 
+## Security and Dependencies
+
+The base package installs provider, remote-service, and document-conversion
+components so those tool surfaces are available when enabled: `openai` and
+`instructor` for OpenAI-compatible structured responses,
+`atlassian-python-api` and `python-gitlab` for enterprise read tools,
+`markitdown` for document conversion, and MPXJ plus a working Java runtime for
+Microsoft Project reads. See [Security Hardening](docs/usage/security-hardening.md)
+for the dependency surface, default storage locations, temp caches, and secret
+handling guidance.
+
 ## Development
 
 ```bash
@@ -111,7 +122,9 @@ llm-tools-harness start --title "Task" --intent "Do work"
 
 Use the public Python session API from `llm_tools.harness_api` when you need
 injectable session control, replay inspection, or a minimal built-in runner for
-scripted and approval-aware harness tests.
+scripted and approval-aware harness tests. The CLI defaults to storing state in
+`~/.llm-tools/harness`; pass `--store-dir` to isolate or relocate persisted
+session data.
 
 ## Streamlit Chat App
 
@@ -154,7 +167,9 @@ llm-tools-streamlit-assistant <directory> --config <path>
 
 The assistant is the broader chat client: it can answer normal questions
 without tools, optionally use the full built-in tool registry, and launch
-harness-backed research sessions for durable investigation work.
+harness-backed research sessions for durable investigation work. Selecting a
+workspace root does not automatically enable filesystem or subprocess access;
+those permissions stay opt-in in the sidebar.
 
 This is the only long-term interactive client the repository plans to keep.
 

@@ -11,7 +11,9 @@ import pytest
 
 from llm_tools.apps.harness_cli import (
     _approval_resolution_from_args,
+    _default_store_dir,
     _load_script,
+    build_parser,
     main,
 )
 
@@ -227,8 +229,20 @@ def test_harness_cli_load_script_and_resolution_helpers(tmp_path: Path) -> None:
     assert _approval_resolution_from_args(args) is None
 
 
+def test_harness_cli_default_store_dir_is_user_scoped(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    args = build_parser().parse_args(["list"])
+
+    assert Path(args.store_dir) == Path(_default_store_dir())
+    assert Path(args.store_dir) == (tmp_path / ".llm-tools" / "harness").resolve()
+
+
 def test_harness_cli_module_entrypoint(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(
         sys,
         "argv",

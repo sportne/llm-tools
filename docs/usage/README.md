@@ -8,6 +8,7 @@ These guides explain how to use the implemented public APIs in `llm-tools`.
 - [Adapters](adapters.md)
 - [Providers](providers.md)
 - [Harness Sessions](harness-sessions.md)
+- [Security Hardening](security-hardening.md)
 - [Streamlit Chat](streamlit-chat.md)
 - [Streamlit Assistant](streamlit-assistant.md)
 

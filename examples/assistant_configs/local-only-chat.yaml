@@ -1,6 +1,7 @@
 # Local-only assistant chat for workspace Q&A.
-# Enables local read-only file browsing and text search, with no remote tools
-# and no durable research sessions.
+# Preselects the workspace root for local tools, but filesystem and subprocess
+# access still stay off until you enable them in the sidebar.
+# No remote tools or durable research sessions are enabled.
 llm:
   provider: ollama
   model_name: gemma4:26b

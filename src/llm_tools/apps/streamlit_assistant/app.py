@@ -455,7 +455,7 @@ def _default_runtime_config(
         enabled_tools=sorted(resolve_assistant_default_enabled_tools(config)),
         require_approval_for=default_approvals,
         allow_network=False,
-        allow_filesystem=root_path is not None,
+        allow_filesystem=False,
         allow_subprocess=False,
         inspector_open=config.ui.inspector_open_by_default,
     )
@@ -1700,12 +1700,20 @@ def _render_sidebar_runtime_settings(
         candidate = Path(current_root).expanduser()
         if candidate.exists() and candidate.is_dir():
             runtime.root_path = str(candidate.resolve())
-            runtime.allow_filesystem = True
         else:
             st.caption("Workspace root must point to an existing directory.")
     else:
         runtime.root_path = None
         runtime.allow_filesystem = False
+        runtime.allow_subprocess = False
+    if runtime.root_path is None:
+        st.caption(
+            "Select a workspace root to make filesystem and subprocess permissions available."
+        )
+    else:
+        st.caption(
+            "Selecting a workspace root only scopes local tools. Enable filesystem or subprocess access separately below."
+        )
 
     llm_config = _llm_config_for_runtime(config, runtime)
     metadata = llm_config.credential_prompt_metadata()
@@ -1729,6 +1737,10 @@ def _render_sidebar_permission_controls(
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
     st.markdown("### Session permissions")
+    st.caption(
+        "Filesystem access enables local file tools within the selected workspace. "
+        "Subprocess access enables local command tools in that workspace."
+    )
     runtime.allow_network = st.checkbox("Network access", value=runtime.allow_network)
     runtime.allow_filesystem = st.checkbox(
         "Filesystem access",

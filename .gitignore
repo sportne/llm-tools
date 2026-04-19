@@ -42,4 +42,6 @@ coverage.json
 .cursorindexingignore
 
 # Project-local scratch files
+.llm-tools/
+.llm-tools-harness/
 .DS_Store

@@ -835,6 +835,9 @@ def test_streamlit_assistant_helper_paths_and_preferences(
     assert _MODULES.app._title_from_prompt("word " * 20).endswith("...")
 
     runtime = _MODULES.app._default_runtime_config(config, root_path=tmp_path)
+    assert runtime.root_path == str(tmp_path)
+    assert runtime.allow_filesystem is False
+    assert runtime.allow_subprocess is False
     preferences = _MODULES.app.StreamlitPreferences(theme_mode="light")
     _MODULES.app._remember_runtime_preferences(preferences, runtime)
     assert preferences.recent_roots[0] == str(tmp_path)
@@ -856,6 +859,35 @@ def test_streamlit_assistant_helper_paths_and_preferences(
     assert (
         _MODULES.app._visible_transcript_entries(record.transcript)
         == record.transcript[:2]
+    )
+
+
+def test_streamlit_assistant_runtime_settings_keep_permissions_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit(
+        text_input_values={"Workspace root": str(tmp_path)},
+    )
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    config = StreamlitAssistantConfig(
+        workspace=AssistantWorkspaceConfig(default_root=str(tmp_path))
+    )
+    runtime = _MODULES.app._default_runtime_config(config, root_path=None)
+
+    _MODULES.app._render_sidebar_runtime_settings(runtime, config=config)
+    _MODULES.app._render_sidebar_permission_controls(runtime)
+
+    assert runtime.root_path == str(tmp_path.resolve())
+    assert runtime.allow_filesystem is False
+    assert runtime.allow_subprocess is False
+    assert any(
+        "Selecting a workspace root only scopes local tools." in message
+        for message in fake_st.caption_messages
+    )
+    assert any(
+        "Filesystem access enables local file tools" in message
+        for message in fake_st.caption_messages
     )
 
 

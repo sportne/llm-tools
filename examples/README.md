@@ -8,15 +8,16 @@ public APIs working together.
 These YAML files configure `llm_tools.apps.streamlit_assistant` for common
 assistant usage modes.
 
-Config examples preselect tools and research defaults, but session permissions
-such as network access and subprocess access are still granted per session in
-the Streamlit sidebar.
+Config examples preselect tools, research defaults, and sometimes a workspace
+root, but they do not grant filesystem, subprocess, or network access. Those
+permissions still have to be enabled per session in the Streamlit sidebar.
 
 - `assistant_configs/local-only-chat.yaml`
   Use this for local workspace Q&A when you want file browsing and text search
   without remote data or durable research.
   Capabilities enabled: local read-only workspace helpers with a default root
-  of `.` and research mode disabled.
+  of `.` preselected, while filesystem/subprocess permissions remain off until
+  enabled in the UI, and research mode disabled.
   Launch: `llm-tools-streamlit-assistant . --config examples/assistant_configs/local-only-chat.yaml`
 - `assistant_configs/enterprise-data-chat.yaml`
   Use this when the assistant should start with remote enterprise read tools
@@ -28,7 +29,9 @@ the Streamlit sidebar.
   Use this for assistant chat that also launches durable harness-backed
   research sessions over a local workspace.
   Capabilities enabled: local investigation tools, git inspection helpers,
-  inspector-open UI defaults, and research replay/budget defaults.
+  inspector-open UI defaults, and research replay/budget defaults. The
+  research store falls back to the app's user-scoped storage unless you
+  override it explicitly.
   Launch: `llm-tools-streamlit-assistant . --config examples/assistant_configs/harness-research-chat.yaml`
 
 ## Offline Examples
