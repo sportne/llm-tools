@@ -318,7 +318,7 @@ class _FakeThread:
 
 
 def _make_runtime(*, root_path: str | None = None):
-    runtime = _MODULES.app.StreamlitRuntimeConfig(root_path=root_path)
+    runtime = _MODULES.models.StreamlitRuntimeConfig(root_path=root_path)
     if root_path is not None:
         runtime.enabled_tools = ["read_file"]
         runtime.allow_filesystem = True
@@ -336,7 +336,7 @@ def _make_app_state(*, session_id: str = "session-1", root_path: str | None = No
         sessions={session_id: record},
         session_order=[session_id],
         active_session_id=session_id,
-        preferences=_MODULES.app.StreamlitPreferences(theme_mode="light"),
+        preferences=_MODULES.models.StreamlitPreferences(theme_mode="light"),
         turn_states={session_id: _MODULES.app.AssistantTurnState()},
     )
 
@@ -835,7 +835,7 @@ def test_streamlit_assistant_helper_paths_and_preferences(
     assert _MODULES.app._title_from_prompt("word " * 20).endswith("...")
 
     runtime = _MODULES.app._default_runtime_config(config, root_path=tmp_path)
-    preferences = _MODULES.app.StreamlitPreferences(theme_mode="light")
+    preferences = _MODULES.models.StreamlitPreferences(theme_mode="light")
     _MODULES.app._remember_runtime_preferences(preferences, runtime)
     assert preferences.recent_roots[0] == str(tmp_path)
     assert preferences.recent_models[runtime.provider.value][0] == runtime.model_name
@@ -843,9 +843,9 @@ def test_streamlit_assistant_helper_paths_and_preferences(
     record = _MODULES.app._new_session_record("session-1", runtime)
     record.transcript.extend(
         [
-            _MODULES.app.StreamlitTranscriptEntry(role="user", text="hello"),
-            _MODULES.app.StreamlitTranscriptEntry(role="assistant", text="hi"),
-            _MODULES.app.StreamlitTranscriptEntry(
+            _MODULES.models.StreamlitTranscriptEntry(role="user", text="hello"),
+            _MODULES.models.StreamlitTranscriptEntry(role="assistant", text="hi"),
+            _MODULES.models.StreamlitTranscriptEntry(
                 role="system", text="hidden", show_in_transcript=False
             ),
         ]
@@ -1030,7 +1030,7 @@ def test_streamlit_assistant_skips_corrupt_persisted_session(
     monkeypatch.setenv(_MODULES.app._STORAGE_ENV_VAR, str(storage_root))
     (storage_root / "sessions").mkdir(parents=True)
     (storage_root / "index.json").write_text(
-        _MODULES.app.StreamlitSessionIndex(
+        _MODULES.models.StreamlitSessionIndex(
             active_session_id="broken",
             session_order=["broken"],
         ).model_dump_json(indent=2),
@@ -1550,7 +1550,7 @@ def test_streamlit_assistant_research_controls_show_states_and_select_details(
     app_state = _make_app_state(root_path=str(tmp_path))
     active = app_state.sessions[app_state.active_session_id]
     active.transcript.append(
-        _MODULES.app.StreamlitTranscriptEntry(
+        _MODULES.models.StreamlitTranscriptEntry(
             role="system",
             text="Research session: stopped-1\nStop reason: completed",
         )
@@ -1955,7 +1955,7 @@ def test_streamlit_assistant_fallback_storage_provider_helpers_and_missing_sessi
 
     runtime = _make_runtime(root_path=str(tmp_path))
     runtime.api_base_url = None
-    preferences = _MODULES.app.StreamlitPreferences(theme_mode="light")
+    preferences = _MODULES.models.StreamlitPreferences(theme_mode="light")
     _MODULES.app._remember_runtime_preferences(preferences, runtime)
     assert runtime.provider.value in preferences.recent_models
     assert runtime.provider.value not in preferences.recent_base_urls
@@ -1984,7 +1984,7 @@ def test_streamlit_assistant_fallback_storage_provider_helpers_and_missing_sessi
     monkeypatch.setenv(_MODULES.app._STORAGE_ENV_VAR, str(storage_root))
     (storage_root / "sessions").mkdir(parents=True)
     (storage_root / "index.json").write_text(
-        _MODULES.app.StreamlitSessionIndex(
+        _MODULES.models.StreamlitSessionIndex(
             active_session_id="missing",
             session_order=["missing"],
         ).model_dump_json(indent=2),
