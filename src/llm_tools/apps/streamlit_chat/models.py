@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 from llm_tools.apps.chat_config import ProviderPreset
+from llm_tools.llm_providers import ProviderModeStrategy
 from llm_tools.tool_api import SideEffectClass
 from llm_tools.workflow_api import (
     ChatFinalResponse,
@@ -43,6 +44,7 @@ class StreamlitRuntimeConfig(BaseModel):
     """Mutable runtime controls owned by one Streamlit chat session."""
 
     provider: ProviderPreset = ProviderPreset.OLLAMA
+    provider_mode_strategy: ProviderModeStrategy = ProviderModeStrategy.AUTO
     model_name: str = "gemma4:26b"
     api_base_url: str | None = "http://127.0.0.1:11434/v1"
     root_path: str | None = None

@@ -12,6 +12,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,6 +55,7 @@ from llm_tools.apps.streamlit_chat.models import (
     StreamlitSessionSummary,
     StreamlitTranscriptEntry,
 )
+from llm_tools.llm_providers import OpenAICompatibleProvider, ProviderModeStrategy
 from llm_tools.tool_api import SideEffectClass, ToolPolicy, ToolSpec
 from llm_tools.workflow_api import (
     ChatFinalResponse,
@@ -82,6 +84,12 @@ _STORAGE_ENV_VAR = "LLM_TOOLS_STREAMLIT_STATE_DIR"
 _SESSION_STORAGE_DIR_NAME = "sessions"
 _ROOT_SENTINEL = "__none__"
 _THEME_TOGGLE_KEY = "theme-mode"
+_MODE_LABELS: dict[ProviderModeStrategy, str] = {
+    ProviderModeStrategy.AUTO: "Auto (fallback)",
+    ProviderModeStrategy.TOOLS: "Tools",
+    ProviderModeStrategy.JSON: "Structured response",
+    ProviderModeStrategy.MD_JSON: "Prompt text",
+}
 
 
 @dataclass(slots=True)
@@ -389,6 +397,21 @@ def _llm_config_for_runtime(
             "model_name": runtime.model_name,
             "api_base_url": runtime.api_base_url,
         }
+    )
+
+
+def _create_provider_for_runtime(
+    llm_config: Any,
+    runtime: StreamlitRuntimeConfig,
+    *,
+    api_key: str | None,
+    model_name: str,
+) -> OpenAICompatibleProvider:
+    return create_provider(
+        llm_config,
+        api_key=api_key,
+        model_name=model_name,
+        mode_strategy=runtime.provider_mode_strategy,
     )
 
 
@@ -1409,8 +1432,9 @@ def _available_model_options(  # pragma: no cover
     if metadata.expects_api_key and current_api_key is None:
         return fallback, _missing_api_key_text(llm_config)
     try:
-        provider = create_provider(
+        provider = _create_provider_for_runtime(
             llm_config,
+            runtime,
             api_key=current_api_key,
             model_name=runtime.model_name,
         )
@@ -1448,8 +1472,9 @@ def _submit_streamlit_prompt(
         return
     llm_config = _llm_config_for_runtime(config, record.runtime)
     api_key = _current_api_key(llm_config)
-    provider = create_provider(
+    provider = _create_provider_for_runtime(
         llm_config,
+        record.runtime,
         api_key=api_key,
         model_name=record.runtime.model_name,
     )
@@ -1491,7 +1516,10 @@ def _cancel_active_turn(  # pragma: no cover
     st = _streamlit_module()
     handle = st.session_state.get(_ACTIVE_TURN_STATE_SLOT)
     turn_state = _turn_state_for(app_state, session_id)
-    if not isinstance(handle, StreamlitActiveTurnHandle) or handle.session_id != session_id:
+    if (
+        not isinstance(handle, StreamlitActiveTurnHandle)
+        or handle.session_id != session_id
+    ):
         if not preserve_pending_prompt:
             turn_state.pending_interrupt_draft = None
         if turn_state.busy:
@@ -1582,8 +1610,9 @@ def _run_streamlit_command(  # pragma: no cover
                 )
             )
         try:
-            provider = create_provider(
+            provider = _create_provider_for_runtime(
                 llm_config,
+                runtime,
                 api_key=api_key,
                 model_name=new_model_name,
             )
@@ -1819,10 +1848,8 @@ def _pick_root_directory_via_tk() -> tuple[str | None, str | None]:
     try:
         root = tk.Tk()
         root.withdraw()
-        try:
+        with suppress(Exception):
             root.attributes("-topmost", True)
-        except Exception:
-            pass
         selected = filedialog.askdirectory(mustexist=True)
     except Exception as exc:
         return None, f"Unable to open native directory picker: {exc}"
@@ -1894,6 +1921,7 @@ def _provider_control_strip(  # pragma: no cover  # noqa: C901
     turn_state = _turn_state_for(app_state, session_id)
     busy = turn_state.busy
     provider_key = f"provider:{session_id}"
+    mode_key = f"provider-mode:{session_id}"
     model_key = f"model:{session_id}"
     root_input_key = f"root-input:{session_id}"
     recent_root_key = f"recent-root:{session_id}"
@@ -1924,6 +1952,29 @@ def _provider_control_strip(  # pragma: no cover  # noqa: C901
             _touch_record(record)
             _save_workspace_state(app_state)
             st.rerun()
+
+        mode_values = [strategy.value for strategy in ProviderModeStrategy]
+        _prime_widget_value(mode_key, runtime.provider_mode_strategy.value)
+        if st.session_state.get(mode_key) not in mode_values:
+            st.session_state[mode_key] = runtime.provider_mode_strategy.value
+        selected_mode = st.selectbox(
+            "Instructor mode",
+            options=mode_values,
+            index=mode_values.index(str(st.session_state[mode_key])),
+            key=mode_key,
+            disabled=busy,
+            format_func=lambda value: _MODE_LABELS[ProviderModeStrategy(str(value))],
+        )
+        if selected_mode != runtime.provider_mode_strategy.value:
+            runtime.provider_mode_strategy = ProviderModeStrategy(selected_mode)
+            _queue_widget_override(mode_key, runtime.provider_mode_strategy.value)
+            _touch_record(record)
+            _save_workspace_state(app_state)
+            st.rerun()
+        if runtime.provider_mode_strategy is ProviderModeStrategy.AUTO:
+            st.caption(
+                "Auto mode falls back in order: tools, structured response, prompt text."
+            )
 
         model_options, model_notice = _available_model_options(
             runtime, app_state.preferences, config
@@ -2440,7 +2491,9 @@ def _render_settings_panel(  # pragma: no cover
             unsafe_allow_html=True,
         )
         with st.container():
-            st.markdown("<div class='llm-tools-chevron-button'>", unsafe_allow_html=True)
+            st.markdown(
+                "<div class='llm-tools-chevron-button'>", unsafe_allow_html=True
+            )
             if st.button(
                 "«",
                 key="settings-panel-toggle",

@@ -31,6 +31,7 @@ def create_provider(
     *,
     api_key: str | None,
     model_name: str,
+    mode_strategy: ProviderModeStrategy = ProviderModeStrategy.AUTO,
 ) -> OpenAICompatibleProvider:
     """Create a provider client for the configured OpenAI-compatible backend."""
     request_params = {"timeout": config.timeout_seconds}
@@ -38,7 +39,7 @@ def create_provider(
         return OpenAICompatibleProvider.for_openai(
             model=model_name,
             api_key=api_key or getenv(config.api_key_env_var or "OPENAI_API_KEY"),
-            mode_strategy=ProviderModeStrategy.AUTO,
+            mode_strategy=mode_strategy,
             default_request_params=request_params,
         )
     if config.provider.value == "ollama":
@@ -47,7 +48,7 @@ def create_provider(
             model=model_name,
             base_url=base_url,
             api_key=api_key or "ollama",
-            mode_strategy=ProviderModeStrategy.AUTO,
+            mode_strategy=mode_strategy,
             default_request_params=request_params,
         )
     if not config.api_base_url:
@@ -56,7 +57,7 @@ def create_provider(
         model=model_name,
         base_url=config.api_base_url,
         api_key=api_key or getenv(config.api_key_env_var or "OPENAI_API_KEY"),
-        mode_strategy=ProviderModeStrategy.AUTO,
+        mode_strategy=mode_strategy,
         default_request_params=request_params,
     )
 

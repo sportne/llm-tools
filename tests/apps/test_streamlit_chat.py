@@ -712,7 +712,7 @@ def test_streamlit_chat_theme_css_covers_widget_surfaces() -> None:
     assert '[data-baseweb="tab"]' in css
     assert '[data-testid="stDownloadButton"] > button' in css
     assert '[data-testid="InputInstructions"]' in css
-    assert 'llm-tools-status-line' in css
+    assert "llm-tools-status-line" in css
 
 
 def test_streamlit_chat_fatal_error_renderer_and_script_wrapper(
@@ -832,11 +832,16 @@ def test_streamlit_chat_helper_defaults_and_model_validators(
         api_base_url="  ",
         root_path="  ",
         enabled_tools=[" read_file ", "search_text"],
+        provider_mode_strategy="json",
     )
     assert validated_runtime.model_name == "demo"
     assert validated_runtime.api_base_url is None
     assert validated_runtime.root_path is None
     assert validated_runtime.enabled_tools == ["read_file", "search_text"]
+    assert (
+        validated_runtime.provider_mode_strategy
+        is _STREAMLIT_MODULES.app.ProviderModeStrategy.JSON
+    )
     with pytest.raises(ValueError):
         _STREAMLIT_MODULES.app.StreamlitRuntimeConfig(model_name="   ")
     with pytest.raises(ValueError):
@@ -1189,6 +1194,7 @@ def test_streamlit_chat_composer_clears_on_next_render_without_mutating_widget_s
         _STREAMLIT_MODULES.app, "_save_workspace_state", lambda app_state: None
     )
 
+    monkeypatch.setenv(_STREAMLIT_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
     app_state = _make_app_state(root_path=str(tmp_path))
     session_id = app_state.active_session_id
     with pytest.raises(_RerunRequestError):
@@ -1295,7 +1301,9 @@ def test_streamlit_chat_root_warning_only_shows_when_workspace_missing(
         session_id=busy_session,
         config=_STREAMLIT_MODULES.package.TextualChatConfig(),
     )
-    assert "Select a root directory to enable this tool." not in fake_busy.caption_messages
+    assert (
+        "Select a root directory to enable this tool." not in fake_busy.caption_messages
+    )
 
     fake_missing = _FakeStreamlit()
     monkeypatch.setattr(
@@ -1308,7 +1316,9 @@ def test_streamlit_chat_root_warning_only_shows_when_workspace_missing(
         session_id=missing_session,
         config=_STREAMLIT_MODULES.package.TextualChatConfig(),
     )
-    assert "Select a root directory to enable this tool." in fake_missing.caption_messages
+    assert (
+        "Select a root directory to enable this tool." in fake_missing.caption_messages
+    )
 
 
 def test_streamlit_chat_submit_and_command_helpers(
@@ -1325,8 +1335,15 @@ def test_streamlit_chat_submit_and_command_helpers(
     app_state.drafts[session_id] = "/help"
 
     started: list[str] = []
+    create_provider_calls: list[dict[str, object]] = []
+
+    def _fake_create_provider(*args: object, **kwargs: object) -> str:
+        del args
+        create_provider_calls.append(dict(kwargs))
+        return "provider"
+
     monkeypatch.setattr(
-        _STREAMLIT_MODULES.app, "create_provider", lambda *args, **kwargs: "provider"
+        _STREAMLIT_MODULES.app, "create_provider", _fake_create_provider
     )
     monkeypatch.setattr(
         _STREAMLIT_MODULES.app,
@@ -1358,6 +1375,11 @@ def test_streamlit_chat_submit_and_command_helpers(
         prompt="pending",
     )
     turn_state.busy = False
+    app_state.sessions[
+        session_id
+    ].runtime.provider_mode_strategy = (
+        _STREAMLIT_MODULES.app.ProviderModeStrategy.MD_JSON
+    )
     _STREAMLIT_MODULES.app._submit_streamlit_prompt(
         app_state=app_state,
         session_id=session_id,
@@ -1366,6 +1388,7 @@ def test_streamlit_chat_submit_and_command_helpers(
     )
     assert cancelled == [True]
     assert started == ["hello"]
+    assert create_provider_calls[-1]["mode_strategy"] == "md_json"
 
     monkeypatch.setattr(
         _STREAMLIT_MODULES.app, "_cancel_active_turn", original_cancel_active_turn
@@ -1475,12 +1498,51 @@ def test_streamlit_chat_provider_controls_tools_popover_and_composer(
             session_id=session_id,
         )
     assert record.runtime.provider is _STREAMLIT_MODULES.package.ProviderPreset.OPENAI
-    assert fake_provider_change.session_state[
-        _STREAMLIT_MODULES.app._WIDGET_OVERRIDES_STATE_SLOT
-    ][f"model:{session_id}"] == "gpt-4.1-mini"
-    assert fake_provider_change.session_state[
-        _STREAMLIT_MODULES.app._WIDGET_OVERRIDES_STATE_SLOT
-    ][f"base-url:{session_id}"] == ""
+    assert (
+        fake_provider_change.session_state[
+            _STREAMLIT_MODULES.app._WIDGET_OVERRIDES_STATE_SLOT
+        ][f"model:{session_id}"]
+        == "gpt-4.1-mini"
+    )
+    assert (
+        fake_provider_change.session_state[
+            _STREAMLIT_MODULES.app._WIDGET_OVERRIDES_STATE_SLOT
+        ][f"base-url:{session_id}"]
+        == ""
+    )
+
+    app_state = _make_app_state(root_path=None)
+    session_id = app_state.active_session_id
+    record = app_state.sessions[session_id]
+    fake_mode_change = _FakeStreamlit(
+        selectbox_values={
+            f"provider-mode:{session_id}": _STREAMLIT_MODULES.app.ProviderModeStrategy.JSON.value
+        }
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_mode_change
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app,
+        "_available_model_options",
+        lambda *args: (["gemma4:26b"], None),
+    )
+    with pytest.raises(_RerunRequestError):
+        _STREAMLIT_MODULES.app._provider_control_strip(
+            app_state,
+            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+            session_id=session_id,
+        )
+    assert (
+        record.runtime.provider_mode_strategy
+        is _STREAMLIT_MODULES.app.ProviderModeStrategy.JSON
+    )
+    assert (
+        fake_mode_change.session_state[
+            _STREAMLIT_MODULES.app._WIDGET_OVERRIDES_STATE_SLOT
+        ][f"provider-mode:{session_id}"]
+        == "json"
+    )
 
     app_state = _make_app_state(root_path=None)
     session_id = app_state.active_session_id
@@ -1535,9 +1597,7 @@ def test_streamlit_chat_provider_controls_tools_popover_and_composer(
     assert browse_record.transcript[-1].text.startswith("Workspace root updated")
     assert fake_browse_root.session_state[
         _STREAMLIT_MODULES.app._WIDGET_OVERRIDES_STATE_SLOT
-    ][f"root-input:{browse_session}"] == str(
-        tmp_path.resolve()
-    )
+    ][f"root-input:{browse_session}"] == str(tmp_path.resolve())
 
     recent_state = _make_app_state(root_path=None)
     recent_session = recent_state.active_session_id
@@ -1564,9 +1624,7 @@ def test_streamlit_chat_provider_controls_tools_popover_and_composer(
     assert recent_record.transcript[-1].text.startswith("Workspace root updated")
     assert fake_recent_root.session_state[
         _STREAMLIT_MODULES.app._WIDGET_OVERRIDES_STATE_SLOT
-    ][f"recent-root:{recent_session}"] == (
-        _STREAMLIT_MODULES.app._ROOT_SENTINEL
-    )
+    ][f"recent-root:{recent_session}"] == (_STREAMLIT_MODULES.app._ROOT_SENTINEL)
 
     stale_state = _make_app_state(root_path=None)
     stale_session = stale_state.active_session_id
@@ -1590,9 +1648,7 @@ def test_streamlit_chat_provider_controls_tools_popover_and_composer(
     assert "does not exist" in stale_record.transcript[-1].text
     assert fake_stale_root.session_state[
         _STREAMLIT_MODULES.app._WIDGET_OVERRIDES_STATE_SLOT
-    ][f"recent-root:{stale_session}"] == (
-        _STREAMLIT_MODULES.app._ROOT_SENTINEL
-    )
+    ][f"recent-root:{stale_session}"] == (_STREAMLIT_MODULES.app._ROOT_SENTINEL)
 
     fake_tools = _FakeStreamlit(
         button_values={f"tools-all:{session_id}": True},
@@ -1733,11 +1789,18 @@ def test_chat_runtime_provider_factory_and_executor_defaults(
     )
     assert (
         _CHAT_RUNTIME_MODULE.create_provider(
-            openai_config, api_key=None, model_name="gpt-4.1-mini"
+            openai_config,
+            api_key=None,
+            model_name="gpt-4.1-mini",
+            mode_strategy=_STREAMLIT_MODULES.app.ProviderModeStrategy.JSON,
         )
         == "openai-provider"
     )
     assert openai_calls[0]["api_key"] == "env-key"
+    assert (
+        openai_calls[0]["mode_strategy"]
+        == _STREAMLIT_MODULES.app.ProviderModeStrategy.JSON
+    )
 
     ollama_config = config.model_copy(
         update={
@@ -1747,12 +1810,19 @@ def test_chat_runtime_provider_factory_and_executor_defaults(
     )
     assert (
         _CHAT_RUNTIME_MODULE.create_provider(
-            ollama_config, api_key=None, model_name="gemma4:26b"
+            ollama_config,
+            api_key=None,
+            model_name="gemma4:26b",
+            mode_strategy=_STREAMLIT_MODULES.app.ProviderModeStrategy.MD_JSON,
         )
         == "ollama-provider"
     )
     assert ollama_calls[0]["base_url"] == "http://127.0.0.1:11434/v1"
     assert ollama_calls[0]["api_key"] == "ollama"
+    assert (
+        ollama_calls[0]["mode_strategy"]
+        == _STREAMLIT_MODULES.app.ProviderModeStrategy.MD_JSON
+    )
 
     custom_config = config.model_copy(
         update={
@@ -1762,10 +1832,17 @@ def test_chat_runtime_provider_factory_and_executor_defaults(
         }
     )
     custom_provider = _CHAT_RUNTIME_MODULE.create_provider(
-        custom_config, api_key="provided", model_name="custom-model"
+        custom_config,
+        api_key="provided",
+        model_name="custom-model",
+        mode_strategy=_STREAMLIT_MODULES.app.ProviderModeStrategy.TOOLS,
     )
     assert custom_provider.kind == "custom-provider"
     assert custom_calls[0]["api_key"] == "provided"
+    assert (
+        custom_calls[0]["mode_strategy"]
+        == _STREAMLIT_MODULES.app.ProviderModeStrategy.TOOLS
+    )
     with pytest.raises(ValueError, match="require api_base_url"):
         _CHAT_RUNTIME_MODULE.create_provider(
             custom_config.model_copy(update={"api_base_url": None}),
@@ -1792,6 +1869,374 @@ def test_chat_runtime_provider_factory_and_executor_defaults(
     assert policy.allow_network is False
     assert policy.allow_filesystem is True
     assert policy.allow_subprocess is False
+
+
+def test_streamlit_chat_helper_branch_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--provider",
+            _STREAMLIT_MODULES.package.ProviderPreset.OPENAI.value,
+            "--model",
+            "gpt-demo",
+            "--temperature",
+            "0.4",
+            "--api-base-url",
+            "https://api.example.invalid/v1",
+            "--max-context-tokens",
+            "2048",
+            "--max-tool-round-trips",
+            "2",
+            "--max-tool-calls-per-round",
+            "3",
+            "--max-total-tool-calls-per-turn",
+            "4",
+            "--max-entries-per-call",
+            "5",
+            "--max-recursive-depth",
+            "6",
+            "--max-search-matches",
+            "7",
+            "--max-read-lines",
+            "8",
+            "--max-file-size-characters",
+            "9",
+            "--max-tool-result-chars",
+            "10",
+        ]
+    )
+    resolved = _resolve_chat_config(args)
+    assert resolved.llm.provider is _STREAMLIT_MODULES.package.ProviderPreset.OPENAI
+    assert resolved.llm.model_name == "gpt-demo"
+    assert resolved.llm.temperature == 0.4
+    assert resolved.llm.api_base_url == "https://api.example.invalid/v1"
+    assert resolved.session.max_context_tokens == 2048
+    assert resolved.session.max_tool_round_trips == 2
+    assert resolved.session.max_tool_calls_per_round == 3
+    assert resolved.session.max_total_tool_calls_per_turn == 4
+    assert resolved.tool_limits.max_entries_per_call == 5
+    assert resolved.tool_limits.max_recursive_depth == 6
+    assert resolved.tool_limits.max_search_matches == 7
+    assert resolved.tool_limits.max_read_lines == 8
+    assert resolved.tool_limits.max_file_size_characters == 9
+    assert resolved.tool_limits.max_tool_result_chars == 10
+
+    assert (
+        _STREAMLIT_MODULES.app._tool_group(
+            _STREAMLIT_MODULES.app.ToolSpec(
+                name="misc",
+                description="misc",
+                input_schema={},
+                output_schema={},
+                tags=["misc"],
+            )
+        )
+        == "Other"
+    )
+    assert (
+        _STREAMLIT_MODULES.app._default_model_for_provider(
+            _STREAMLIT_MODULES.package.TextualChatConfig(),
+            _STREAMLIT_MODULES.package.ProviderPreset.OLLAMA,
+        )
+        == "gemma4:26b"
+    )
+    assert (
+        _STREAMLIT_MODULES.app._default_model_for_provider(
+            _STREAMLIT_MODULES.package.TextualChatConfig(),
+            _STREAMLIT_MODULES.package.ProviderPreset.CUSTOM_OPENAI_COMPATIBLE,
+        )
+        == "gpt-4.1-mini"
+    )
+    assert (
+        _STREAMLIT_MODULES.app._default_base_url_for_provider(
+            _STREAMLIT_MODULES.package.TextualChatConfig(),
+            _STREAMLIT_MODULES.package.ProviderPreset.OLLAMA,
+        )
+        == "http://127.0.0.1:11434/v1"
+    )
+
+    assert _STREAMLIT_MODULES.app._title_from_prompt("short prompt") == "short prompt"
+    assert _STREAMLIT_MODULES.app._title_from_prompt("word " * 20).endswith("...")
+    assert _STREAMLIT_MODULES.app._resolve_root_text("   ") == (None, None)
+    assert (
+        _STREAMLIT_MODULES.app._session_matches(
+            _make_record(root_path=str(tmp_path)),
+            "gemma4",
+        )
+        is True
+    )
+
+    monkeypatch.delenv(_STREAMLIT_MODULES.app._STORAGE_ENV_VAR, raising=False)
+    monkeypatch.setattr(_STREAMLIT_MODULES.app.Path, "home", lambda: tmp_path)
+    assert (
+        _STREAMLIT_MODULES.app._storage_root()
+        == (tmp_path / ".llm-tools" / "chat" / "streamlit").resolve()
+    )
+
+
+def test_streamlit_chat_widget_delete_and_event_edge_branches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    fake_st.session_state[_STREAMLIT_MODULES.app._WIDGET_OVERRIDES_STATE_SLOT] = "bad"
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
+
+    overrides = _STREAMLIT_MODULES.app._widget_overrides_state()
+    assert overrides == {}
+    _STREAMLIT_MODULES.app._queue_widget_override("demo", "value")
+    _STREAMLIT_MODULES.app._prime_widget_value("demo", "fallback")
+    assert fake_st.session_state["demo"] == "value"
+    _STREAMLIT_MODULES.app._prime_widget_value("fresh", "fallback")
+    assert fake_st.session_state["fresh"] == "fallback"
+
+    monkeypatch.setenv(_STREAMLIT_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app,
+        "_streamlit_module",
+        lambda: (_ for _ in ()).throw(ModuleNotFoundError()),
+    )
+    _STREAMLIT_MODULES.app._delete_session(
+        app_state,
+        session_id=session_id,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+        root_path=tmp_path,
+    )
+    assert app_state.session_order
+    assert app_state.active_session_id in app_state.sessions
+    assert app_state.active_session_id != session_id
+
+    with pytest.raises(TypeError):
+        _STREAMLIT_MODULES.app._serialize_workflow_event(
+            object(), turn_number=1, session_id="session-1"
+        )
+
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+    with pytest.raises(ValueError, match="Unsupported queued event kind"):
+        _STREAMLIT_MODULES.app._apply_queued_event(
+            app_state,
+            _STREAMLIT_MODULES.app.StreamlitQueuedEvent(
+                kind="mystery",
+                payload=object(),
+                turn_number=99,
+                session_id=session_id,
+            ),
+        )
+
+    turn_state = _STREAMLIT_MODULES.app._turn_state_for(app_state, session_id)
+    turn_state.busy = True
+    turn_state.cancelling = True
+    turn_state.pending_interrupt_draft = "next"
+    queue_obj = _STREAMLIT_MODULES.app.queue.Queue()
+    queue_obj.put(
+        _STREAMLIT_MODULES.app.StreamlitQueuedEvent(
+            kind="complete", payload=None, turn_number=1, session_id=session_id
+        )
+    )
+    fake_st = _FakeStreamlit()
+    fake_st.session_state[_STREAMLIT_MODULES.app._ACTIVE_TURN_STATE_SLOT] = (
+        _STREAMLIT_MODULES.app.StreamlitActiveTurnHandle(
+            session_id=session_id,
+            runner=_FakeRunnerHandle(),
+            event_queue=queue_obj,
+            thread=_DeadThread(),
+            turn_number=1,
+        )
+    )
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
+    assert _STREAMLIT_MODULES.app._drain_active_turn_events(app_state) == "next"
+
+
+def test_streamlit_chat_wsl_and_powershell_picker_branches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    existing = str(tmp_path.resolve())
+
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.delenv("WSL_INTEROP", raising=False)
+    assert _STREAMLIT_MODULES.app._running_in_wsl() is False
+    monkeypatch.setenv("WSL_INTEROP", "1")
+    assert _STREAMLIT_MODULES.app._running_in_wsl() is True
+    monkeypatch.delenv("WSL_INTEROP", raising=False)
+
+    monkeypatch.setattr(_STREAMLIT_MODULES.app.shutil, "which", lambda name: None)
+    assert _STREAMLIT_MODULES.app._pick_root_directory_via_powershell() == (
+        None,
+        "Native directory picker is not available in this environment.",
+    )
+
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app.shutil,
+        "which",
+        lambda name: "powershell.exe" if name == "powershell.exe" else None,
+    )
+
+    def _raise_run(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(_STREAMLIT_MODULES.app.subprocess, "run", _raise_run)
+    selected, error = _STREAMLIT_MODULES.app._pick_root_directory_via_powershell()
+    assert selected is None
+    assert error == "Unable to open native directory picker: boom"
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        del kwargs
+        if cmd[0] == "powershell.exe":
+            return SimpleNamespace(returncode=1, stderr="bad picker", stdout="")
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(_STREAMLIT_MODULES.app.subprocess, "run", _fake_run)
+    selected, error = _STREAMLIT_MODULES.app._pick_root_directory_via_powershell()
+    assert selected is None
+    assert error == "Unable to open native directory picker: bad picker"
+
+    def _fake_empty(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        del cmd, kwargs
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(_STREAMLIT_MODULES.app.subprocess, "run", _fake_empty)
+    assert _STREAMLIT_MODULES.app._pick_root_directory_via_powershell() == (None, None)
+
+    def _fake_success(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        del kwargs
+        if cmd[0] == "powershell.exe":
+            return SimpleNamespace(returncode=0, stderr="", stdout="C:\\repo")
+        if cmd[0] == "wslpath":
+            return SimpleNamespace(returncode=0, stderr="", stdout=existing)
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app.shutil,
+        "which",
+        lambda name: "powershell.exe" if name == "powershell.exe" else "wslpath",
+    )
+    monkeypatch.setattr(_STREAMLIT_MODULES.app.subprocess, "run", _fake_success)
+    assert _STREAMLIT_MODULES.app._pick_root_directory_via_powershell() == (
+        existing,
+        None,
+    )
+
+
+class _FakeTkRoot:
+    def __init__(self, *, fail_attributes: bool = False) -> None:
+        self.fail_attributes = fail_attributes
+        self.destroyed = False
+
+    def withdraw(self) -> None:
+        return None
+
+    def attributes(self, *args: object) -> None:
+        del args
+        if self.fail_attributes:
+            raise RuntimeError("ignore me")
+
+    def destroy(self) -> None:
+        self.destroyed = True
+
+
+class _FakeTkModule:
+    def __init__(self, root: _FakeTkRoot | Exception) -> None:
+        self._root = root
+        self.Tk = self._build_root
+
+    def _build_root(self) -> _FakeTkRoot:
+        if isinstance(self._root, Exception):
+            raise self._root
+        return self._root
+
+
+def test_streamlit_chat_tk_picker_branches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    existing = str(tmp_path.resolve())
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _missing_tk(name: str, *args: object, **kwargs: object):
+        if name == "tkinter":
+            raise ImportError("no tk")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _missing_tk)
+    assert _STREAMLIT_MODULES.app._pick_root_directory_via_tk() == (
+        None,
+        "Native directory picker is not available in this environment.",
+    )
+
+    fake_dialog = SimpleNamespace(askdirectory=lambda mustexist=True: existing)
+
+    def _import_fake_tk(name: str, *args: object, **kwargs: object):
+        if name == "tkinter":
+            module = _FakeTkModule(_FakeTkRoot(fail_attributes=True))
+            module.filedialog = fake_dialog
+            return module
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _import_fake_tk)
+    assert _STREAMLIT_MODULES.app._pick_root_directory_via_tk() == (existing, None)
+
+    def _import_broken_tk(name: str, *args: object, **kwargs: object):
+        if name == "tkinter":
+            module = _FakeTkModule(RuntimeError("tk boom"))
+            module.filedialog = fake_dialog
+            return module
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _import_broken_tk)
+    selected, error = _STREAMLIT_MODULES.app._pick_root_directory_via_tk()
+    assert selected is None
+    assert error == "Unable to open native directory picker: tk boom"
+
+
+def test_streamlit_chat_picker_fallback_and_clear_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    existing = str(tmp_path.resolve())
+
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_running_in_wsl", lambda: True)
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app,
+        "_pick_root_directory_via_powershell",
+        lambda: (existing, None),
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_pick_root_directory_via_tk", lambda: (None, "unused")
+    )
+    assert _STREAMLIT_MODULES.app._pick_root_directory() == (existing, None)
+
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app,
+        "_pick_root_directory_via_powershell",
+        lambda: (None, "retry"),
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_pick_root_directory_via_tk", lambda: (existing, None)
+    )
+    assert _STREAMLIT_MODULES.app._pick_root_directory() == (existing, None)
+
+    runtime = _make_runtime(root_path=existing)
+    record = _make_record(root_path=existing)
+    _STREAMLIT_MODULES.app._apply_runtime_root(
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+        preferences=_STREAMLIT_MODULES.app.StreamlitPreferences(),
+        record=record,
+        runtime=runtime,
+        resolved_root=None,
+    )
+    assert record.transcript[-1].text == "Workspace root cleared."
+    assert runtime.root_path is None
 
 
 def test_chat_runtime_available_tool_names_and_context_limits(tmp_path: Path) -> None:
