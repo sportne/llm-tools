@@ -173,7 +173,7 @@ silently widen privileges.
 - [x] Completed 2026-04-19: `workflow_api` security posture review executed
   against the workflow, runtime, adapter, and harness approval/replay paths;
   findings and residual risk captured in
-  `docs/implementation/workflow-api-security-review-2026-04-19.md`.
+  `SECURITY_REVIEWS.md`.
 
 ### [x] Phase 4: Durable orchestration (`harness_api`)
 
@@ -184,9 +184,8 @@ verification as a security-critical control plane.
   replay inconsistency, and approval durability issues.
 - [x] Audit persisted storage, resume, replay, and summaries for secret
   retention, tamper exposure, and unsafe trust in stored artifacts.
-- Completed review artifacts:
-  - `SECURITY_REVIEWS.md` (cumulative summary)
-  - `docs/implementation/harness-persistence-security-review.md` (detailed implementation review)
+- Completed review artifact: `SECURITY_REVIEWS.md` (includes lifecycle and
+  persistence review summaries).
 - [x] Review planning, context construction, verification, and protection
   scrubbing for privilege escalation or leakage across turns.
 - [x] Assess stop conditions, no-progress handling, retries, and recovery
