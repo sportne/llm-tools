@@ -256,7 +256,9 @@ class HarnessSessionService:
                 HarnessSessionListItem(
                     snapshot=normalized,
                     summary=summary,
-                    replay=(replay_session(normalized) if request.include_replay else None),
+                    replay=(
+                        replay_session(normalized) if request.include_replay else None
+                    ),
                 )
             )
         return HarnessSessionListResult(sessions=items)
