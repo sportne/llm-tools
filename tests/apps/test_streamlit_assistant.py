@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import importlib
+import queue
 import runpy
 import sys
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from tests.apps._imports import import_streamlit_assistant_modules
@@ -32,6 +34,7 @@ from llm_tools.apps.assistant_runtime import (
     resolve_assistant_default_enabled_tools,
 )
 from llm_tools.harness_api import (
+    ApprovalResolution,
     BudgetPolicy,
     HarnessSessionService,
     InMemoryHarnessStateStore,
@@ -39,7 +42,20 @@ from llm_tools.harness_api import (
 )
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import SideEffectClass, ToolContext
-from llm_tools.workflow_api import ChatSessionState
+from llm_tools.workflow_api import (
+    ApprovalRequest,
+    ChatFinalResponse,
+    ChatMessage,
+    ChatSessionState,
+    ChatTokenUsage,
+    ChatWorkflowApprovalEvent,
+    ChatWorkflowApprovalResolvedEvent,
+    ChatWorkflowApprovalState,
+    ChatWorkflowInspectorEvent,
+    ChatWorkflowResultEvent,
+    ChatWorkflowStatusEvent,
+    ChatWorkflowTurnResult,
+)
 
 _MODULES = import_streamlit_assistant_modules()
 build_parser = _MODULES.app.build_parser
@@ -55,6 +71,266 @@ class _FakeProvider:
     def run(self, **kwargs: object) -> ParsedModelResponse:
         del kwargs
         return self._responses.pop(0)
+
+
+class _FakeBlock:
+    def __init__(self, streamlit: _FakeStreamlit) -> None:
+        self._streamlit = streamlit
+
+    def __enter__(self) -> _FakeBlock:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        return False
+
+    def button(self, label: str, **kwargs: object) -> bool:
+        return self._streamlit.button(label, **kwargs)
+
+    def text_input(self, label: str, **kwargs: object) -> str:
+        return self._streamlit.text_input(label, **kwargs)
+
+    def text_area(self, label: str, *args: object, **kwargs: object) -> str:
+        return self._streamlit.text_area(label, *args, **kwargs)
+
+    def checkbox(self, label: str, **kwargs: object) -> bool:
+        return self._streamlit.checkbox(label, **kwargs)
+
+    def selectbox(self, label: str, **kwargs: object) -> object:
+        return self._streamlit.selectbox(label, **kwargs)
+
+    def columns(self, spec: int | list[int]) -> list[_FakeBlock]:
+        return self._streamlit.columns(spec)
+
+    def markdown(self, text: str, **kwargs: object) -> None:
+        self._streamlit.markdown(text, **kwargs)
+
+    def caption(self, text: str) -> None:
+        self._streamlit.caption(text)
+
+    def code(self, text: str) -> None:
+        self._streamlit.code(text)
+
+    def warning(self, text: str) -> None:
+        self._streamlit.warning(text)
+
+    def error(self, text: str) -> None:
+        self._streamlit.error(text)
+
+
+class _FakeStreamlit:
+    def __init__(
+        self,
+        *,
+        button_values: dict[str, bool] | None = None,
+        text_input_values: dict[str, str] | None = None,
+        checkbox_values: dict[str, bool] | None = None,
+        selectbox_values: dict[str, object] | None = None,
+    ) -> None:
+        self.session_state: dict[str, object] = {}
+        self.button_values = button_values or {}
+        self.text_input_values = text_input_values or {}
+        self.checkbox_values = checkbox_values or {}
+        self.selectbox_values = selectbox_values or {}
+        self.sidebar = _FakeBlock(self)
+        self.page_config_kwargs: list[dict[str, object]] = []
+        self.markdown_messages: list[str] = []
+        self.caption_messages: list[str] = []
+        self.warning_messages: list[str] = []
+        self.error_messages: list[str] = []
+        self.button_labels: list[str] = []
+        self.text_area_values: dict[str, str] = {}
+        self.chat_roles: list[str] = []
+        self.rerun_called = False
+
+    def set_page_config(self, **kwargs: object) -> None:
+        self.page_config_kwargs.append(kwargs)
+
+    def markdown(self, text: str, unsafe_allow_html: bool = False) -> None:
+        del unsafe_allow_html
+        self.markdown_messages.append(text)
+
+    def caption(self, text: str) -> None:
+        self.caption_messages.append(text)
+
+    def warning(self, text: str) -> None:
+        self.warning_messages.append(text)
+
+    def error(self, text: str) -> None:
+        self.error_messages.append(text)
+
+    def code(self, text: str) -> None:
+        self.markdown_messages.append(text)
+
+    def button(
+        self,
+        label: str,
+        *,
+        key: str | None = None,
+        use_container_width: bool = False,
+        disabled: bool = False,
+    ) -> bool:
+        del use_container_width
+        self.button_labels.append(label)
+        if disabled:
+            return False
+        token = key or label
+        return self.button_values.get(token, self.button_values.get(label, False))
+
+    def text_input(
+        self,
+        label: str,
+        *,
+        value: str = "",
+        key: str | None = None,
+        disabled: bool = False,
+        placeholder: str | None = None,
+        type: str = "default",
+    ) -> str:
+        del disabled, placeholder, type
+        token = key or label
+        return self.text_input_values.get(
+            token, self.text_input_values.get(label, value)
+        )
+
+    def text_area(
+        self,
+        label: str,
+        value: str = "",
+        *,
+        key: str | None = None,
+        height: int | None = None,
+        placeholder: str | None = None,
+        label_visibility: str | None = None,
+    ) -> str:
+        del height, placeholder, label_visibility
+        token = key or label
+        resolved = self.text_input_values.get(
+            token, self.text_input_values.get(label, value)
+        )
+        self.text_area_values[token] = str(resolved)
+        self.session_state[token] = str(resolved)
+        return str(resolved)
+
+    def checkbox(
+        self,
+        label: str,
+        *,
+        value: bool = False,
+        key: str | None = None,
+        disabled: bool = False,
+    ) -> bool:
+        if disabled:
+            return value
+        token = key or label
+        return self.checkbox_values.get(token, self.checkbox_values.get(label, value))
+
+    def selectbox(
+        self,
+        label: str,
+        *,
+        options: list[object],
+        index: int = 0,
+        key: str | None = None,
+        disabled: bool = False,
+        format_func=None,
+    ) -> object:
+        del format_func
+        if disabled:
+            return options[index]
+        token = key or label
+        return self.selectbox_values.get(
+            token, self.selectbox_values.get(label, options[index])
+        )
+
+    def columns(self, spec: int | list[int]) -> list[_FakeBlock]:
+        count = spec if isinstance(spec, int) else len(spec)
+        return [_FakeBlock(self) for _ in range(count)]
+
+    def chat_message(self, role: str) -> _FakeBlock:
+        self.chat_roles.append(role)
+        return _FakeBlock(self)
+
+    def rerun(self) -> None:
+        self.rerun_called = True
+
+
+class _DeadThread:
+    def is_alive(self) -> bool:
+        return False
+
+
+class _FakeRunnerHandle:
+    def __init__(self) -> None:
+        self.cancelled = False
+        self.approvals: list[bool] = []
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+    def resolve_pending_approval(self, approved: bool) -> bool:
+        self.approvals.append(approved)
+        return True
+
+
+class _FakeIterableRunner:
+    def __init__(self, events: list[object]) -> None:
+        self._events = list(events)
+        self.approvals: list[bool] = []
+        self.cancelled = False
+
+    def __iter__(self):
+        return iter(self._events)
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+    def resolve_pending_approval(self, approved: bool) -> bool:
+        self.approvals.append(approved)
+        return True
+
+
+class _RejectingRunnerHandle(_FakeRunnerHandle):
+    def resolve_pending_approval(self, approved: bool) -> bool:
+        self.approvals.append(approved)
+        return False
+
+
+class _FakeThread:
+    def __init__(self, target=None, args=(), daemon: bool | None = None) -> None:
+        self.target = target
+        self.args = args
+        self.daemon = daemon
+        self.started = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def is_alive(self) -> bool:
+        return self.started
+
+
+def _make_runtime(*, root_path: str | None = None):
+    runtime = _MODULES.app.StreamlitRuntimeConfig(root_path=root_path)
+    if root_path is not None:
+        runtime.enabled_tools = ["read_file"]
+        runtime.allow_filesystem = True
+    return runtime
+
+
+def _make_record(*, session_id: str = "session-1", root_path: str | None = None):
+    runtime = _make_runtime(root_path=root_path)
+    return _MODULES.app._new_session_record(session_id, runtime)
+
+
+def _make_app_state(*, session_id: str = "session-1", root_path: str | None = None):
+    record = _make_record(session_id=session_id, root_path=root_path)
+    return _MODULES.app.AssistantWorkspaceState(
+        sessions={session_id: record},
+        session_order=[session_id],
+        active_session_id=session_id,
+        preferences=_MODULES.app.StreamlitPreferences(theme_mode="light"),
+        turn_states={session_id: _MODULES.app.AssistantTurnState()},
+    )
 
 
 def test_streamlit_assistant_package_imports_without_loading_streamlit() -> None:
@@ -398,3 +674,961 @@ def test_assistant_harness_turn_provider_builds_research_messages() -> None:
     assert provider.messages is not None
     assert provider.messages[0]["content"] == "research-system"
     assert '"task-1"' in provider.messages[1]["content"]
+
+
+def test_streamlit_assistant_helper_paths_and_preferences(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
+    config = StreamlitAssistantConfig(
+        workspace=AssistantWorkspaceConfig(default_root=str(tmp_path))
+    )
+
+    args = build_parser().parse_args([])
+    assert _MODULES.app._resolve_root_argument(args, config) == tmp_path.resolve()
+    assert _MODULES.app._storage_root() == (tmp_path / "state").resolve()
+    assert _MODULES.app._sessions_dir() == (tmp_path / "state" / "sessions").resolve()
+    assert (
+        _MODULES.app._preferences_path()
+        == (tmp_path / "state" / "preferences.json").resolve()
+    )
+    assert _MODULES.app._index_path() == (tmp_path / "state" / "index.json").resolve()
+    assert (
+        _MODULES.app._session_path("demo")
+        == (tmp_path / "state" / "sessions" / "demo.json").resolve()
+    )
+    assert (
+        _MODULES.app._research_store_dir(config)
+        == (tmp_path / "state" / "research").resolve()
+    )
+    assert _MODULES.app._dedupe_preserve([" a ", "", "a", "b "]) == ["a", "b"]
+    assert _MODULES.app._title_from_prompt("word " * 20).endswith("...")
+
+    runtime = _MODULES.app._default_runtime_config(config, root_path=tmp_path)
+    preferences = _MODULES.app.StreamlitPreferences(theme_mode="light")
+    _MODULES.app._remember_runtime_preferences(preferences, runtime)
+    assert preferences.recent_roots[0] == str(tmp_path)
+    assert preferences.recent_models[runtime.provider.value][0] == runtime.model_name
+
+    record = _MODULES.app._new_session_record("session-1", runtime)
+    record.transcript.extend(
+        [
+            _MODULES.app.StreamlitTranscriptEntry(role="user", text="hello"),
+            _MODULES.app.StreamlitTranscriptEntry(role="assistant", text="hi"),
+            _MODULES.app.StreamlitTranscriptEntry(
+                role="system", text="hidden", show_in_transcript=False
+            ),
+        ]
+    )
+    _MODULES.app._sync_summary_fields(record)
+    assert record.summary.message_count == 2
+    _MODULES.app._touch_record(record)
+    assert (
+        _MODULES.app._visible_transcript_entries(record.transcript)
+        == record.transcript[:2]
+    )
+
+
+def test_streamlit_assistant_persists_multiple_sessions_and_deletes_them(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setenv(_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
+
+    state = _MODULES.app._load_workspace_state(
+        root_path=tmp_path,
+        config=StreamlitAssistantConfig(),
+    )
+    original_id = state.active_session_id
+    _MODULES.app._create_session(
+        state, template_runtime=state.sessions[original_id].runtime
+    )
+
+    reloaded = _MODULES.app._load_workspace_state(
+        root_path=tmp_path,
+        config=StreamlitAssistantConfig(),
+    )
+    assert len(reloaded.session_order) == 2
+
+    session_to_delete = reloaded.session_order[0]
+    _MODULES.app._delete_session(
+        reloaded,
+        session_id=session_to_delete,
+        config=StreamlitAssistantConfig(),
+        root_path=tmp_path,
+    )
+    assert session_to_delete not in reloaded.session_order
+    assert not _MODULES.app._session_path(session_to_delete).exists()
+
+
+def test_streamlit_assistant_skips_corrupt_persisted_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    storage_root = tmp_path / "state"
+    monkeypatch.setenv(_MODULES.app._STORAGE_ENV_VAR, str(storage_root))
+    (storage_root / "sessions").mkdir(parents=True)
+    (storage_root / "index.json").write_text(
+        _MODULES.app.StreamlitSessionIndex(
+            active_session_id="broken",
+            session_order=["broken"],
+        ).model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+    (storage_root / "sessions" / "broken.json").write_text(
+        "{not-json", encoding="utf-8"
+    )
+
+    state = _MODULES.app._load_workspace_state(
+        root_path=None,
+        config=StreamlitAssistantConfig(),
+    )
+
+    assert state.session_order
+    assert any(
+        "Skipped unreadable assistant session broken" in notice
+        for notice in state.startup_notices
+    )
+
+
+def test_streamlit_assistant_event_reducers_and_drain(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setenv(_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
+    app_state = _make_app_state(root_path=str(tmp_path))
+    approval = ChatWorkflowApprovalState(
+        approval_request=ApprovalRequest(
+            approval_id="approval-1",
+            invocation_index=1,
+            request={"tool_name": "read_file", "arguments": {"path": "a.txt"}},
+            tool_name="read_file",
+            tool_version="0.1.0",
+            policy_reason="approval required",
+            policy_metadata={},
+            requested_at="2026-01-01T00:00:00Z",
+            expires_at="2026-01-01T00:05:00Z",
+        ),
+        tool_name="read_file",
+        redacted_arguments={"path": "a.txt"},
+        policy_reason="approval required",
+        policy_metadata={},
+    )
+    queued_events = [
+        _MODULES.app._serialize_workflow_event(
+            ChatWorkflowStatusEvent(status="thinking"),
+            turn_number=1,
+            session_id="session-1",
+        ),
+        _MODULES.app._serialize_workflow_event(
+            ChatWorkflowApprovalEvent(approval=approval),
+            turn_number=1,
+            session_id="session-1",
+        ),
+        _MODULES.app._serialize_workflow_event(
+            ChatWorkflowApprovalResolvedEvent(approval=approval, resolution="approved"),
+            turn_number=1,
+            session_id="session-1",
+        ),
+        _MODULES.app._serialize_workflow_event(
+            ChatWorkflowInspectorEvent(
+                round_index=1, kind="provider_messages", payload=[{"role": "user"}]
+            ),
+            turn_number=1,
+            session_id="session-1",
+        ),
+        _MODULES.app._serialize_workflow_event(
+            ChatWorkflowResultEvent(
+                result=ChatWorkflowTurnResult(
+                    status="completed",
+                    new_messages=[],
+                    context_warning="warn",
+                    final_response=ChatFinalResponse(answer="done", confidence=0.5),
+                    token_usage=ChatTokenUsage(
+                        session_tokens=22, active_context_tokens=10
+                    ),
+                    session_state=ChatSessionState(),
+                )
+            ),
+            turn_number=1,
+            session_id="session-1",
+        ),
+        _MODULES.app.AssistantQueuedEvent(
+            kind="error",
+            payload="boom",
+            turn_number=1,
+            session_id="session-1",
+        ),
+    ]
+    queue_obj: queue.Queue[object] = queue.Queue()
+    for event in queued_events:
+        queue_obj.put(event)
+    fake_st.session_state[_MODULES.app._ACTIVE_TURN_STATE_SLOT] = (
+        _MODULES.app.AssistantActiveTurnHandle(
+            session_id="session-1",
+            runner=_FakeRunnerHandle(),
+            event_queue=queue_obj,
+            thread=_DeadThread(),
+            turn_number=1,
+        )
+    )
+
+    pending_prompt = _MODULES.app._drain_active_turn_events(app_state)
+    record = app_state.sessions["session-1"]
+    assert pending_prompt is None
+    assert any(entry.text == "warn" for entry in record.transcript)
+    assert any(
+        entry.text == "Approved pending approval request."
+        for entry in record.transcript
+    )
+    assert any(entry.text == "boom" for entry in record.transcript)
+    assert record.inspector_state.provider_messages
+    assert record.token_usage is not None
+    assert fake_st.session_state[_MODULES.app._ACTIVE_TURN_STATE_SLOT] is None
+
+    interrupted_event = ChatWorkflowResultEvent(
+        result=ChatWorkflowTurnResult(
+            status="interrupted",
+            new_messages=[
+                ChatMessage(
+                    role="assistant",
+                    content="partial answer",
+                    completion_state="interrupted",
+                )
+            ],
+            interruption_reason="stopped",
+        )
+    )
+    _MODULES.app._apply_turn_result(
+        app_state, session_id="session-1", event=interrupted_event
+    )
+    assert record.transcript[-1].assistant_completion_state == "interrupted"
+
+    interrupted_no_message = ChatWorkflowResultEvent(
+        result=ChatWorkflowTurnResult(
+            status="interrupted",
+            new_messages=[],
+            interruption_reason="stopped hard",
+        )
+    )
+    _MODULES.app._apply_turn_result(
+        app_state, session_id="session-1", event=interrupted_no_message
+    )
+    assert record.transcript[-1].text == "stopped hard"
+
+    with pytest.raises(TypeError):
+        _MODULES.app._serialize_workflow_event(
+            object(), turn_number=1, session_id="session-1"
+        )
+
+
+def test_streamlit_assistant_complete_event_finishes_cancelled_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+    turn_state = _MODULES.app._turn_state_for(app_state, session_id)
+    turn_state.busy = True
+    turn_state.cancelling = True
+    turn_state.status_text = "stopping"
+    turn_state.pending_interrupt_draft = "next prompt"
+
+    ignored = _MODULES.app._apply_queued_event(
+        app_state,
+        _MODULES.app.AssistantQueuedEvent(
+            kind="status",
+            payload=ChatWorkflowStatusEvent(status="thinking").model_dump(mode="json"),
+            turn_number=1,
+            session_id=session_id,
+        ),
+    )
+    assert ignored is None
+    assert turn_state.status_text == "stopping"
+
+    pending_prompt = _MODULES.app._apply_queued_event(
+        app_state,
+        _MODULES.app.AssistantQueuedEvent(
+            kind="complete",
+            payload=None,
+            turn_number=1,
+            session_id=session_id,
+        ),
+    )
+    assert pending_prompt == "next prompt"
+    assert turn_state.busy is False
+    assert turn_state.cancelling is False
+    assert app_state.sessions[session_id].transcript[-1].text == "Stopped active turn."
+
+
+def test_streamlit_assistant_submit_prompt_and_approval_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(_MODULES.app, "_save_workspace_state", lambda app_state: None)
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+
+    started: list[str] = []
+    monkeypatch.setattr(
+        _MODULES.app, "_create_provider_for_runtime", lambda *args, **kwargs: "provider"
+    )
+    monkeypatch.setattr(
+        _MODULES.app,
+        "_start_streamlit_turn",
+        lambda **kwargs: started.append(kwargs["user_message"]),
+    )
+    cancelled: list[bool] = []
+    monkeypatch.setattr(
+        _MODULES.app,
+        "_cancel_active_turn",
+        lambda app_state, session_id, preserve_pending_prompt=False: cancelled.append(
+            preserve_pending_prompt
+        ),
+    )
+
+    turn_state = _MODULES.app._turn_state_for(app_state, session_id)
+    _MODULES.app._submit_streamlit_prompt(
+        app_state=app_state,
+        session_id=session_id,
+        config=StreamlitAssistantConfig(),
+        prompt="   ",
+    )
+    turn_state.busy = True
+    _MODULES.app._submit_streamlit_prompt(
+        app_state=app_state,
+        session_id=session_id,
+        config=StreamlitAssistantConfig(),
+        prompt="pending",
+    )
+    turn_state.busy = False
+    _MODULES.app._submit_streamlit_prompt(
+        app_state=app_state,
+        session_id=session_id,
+        config=StreamlitAssistantConfig(),
+        prompt="hello",
+    )
+    assert cancelled == [True]
+    assert started == ["hello"]
+
+    runner = _FakeRunnerHandle()
+    approval = ChatWorkflowApprovalState(
+        approval_request=ApprovalRequest(
+            approval_id="approval-1",
+            invocation_index=1,
+            request={"tool_name": "read_file", "arguments": {"path": "a.txt"}},
+            tool_name="read_file",
+            tool_version="0.1.0",
+            policy_reason="approval required",
+            policy_metadata={},
+            requested_at="2026-01-01T00:00:00Z",
+            expires_at="2026-01-01T00:05:00Z",
+        ),
+        tool_name="read_file",
+        redacted_arguments={"path": "a.txt"},
+        policy_reason="approval required",
+        policy_metadata={},
+    )
+    fake_st.session_state[_MODULES.app._ACTIVE_TURN_STATE_SLOT] = (
+        _MODULES.app.AssistantActiveTurnHandle(
+            session_id=session_id,
+            runner=runner,
+            event_queue=queue.Queue(),
+            thread=_DeadThread(),
+            turn_number=1,
+        )
+    )
+    turn_state.pending_approval = approval
+
+    _MODULES.app._resolve_active_approval(
+        app_state, session_id=session_id, approved=True
+    )
+    assert runner.approvals == [True]
+    assert turn_state.approval_decision_in_flight is True
+
+
+def test_streamlit_assistant_research_controls_resume_with_explicit_approval_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit(button_values={"research-approve:research-1": True})
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.resolutions: list[ApprovalResolution | None] = []
+
+        def launch(self, *, prompt: str) -> object:
+            raise AssertionError(prompt)
+
+        def list_recent(self) -> object:
+            summary = SimpleNamespace(
+                session_id="research-1",
+                stop_reason=SimpleNamespace(value="awaiting_approval"),
+                total_turns=3,
+                pending_approval_ids=["approval-1"],
+            )
+            return SimpleNamespace(sessions=[SimpleNamespace(summary=summary)])
+
+        def inspect(self, session_id: str) -> object:
+            return SimpleNamespace(session_id=session_id)
+
+        def resume(
+            self,
+            session_id: str,
+            *,
+            approval_resolution: ApprovalResolution | None = None,
+        ) -> object:
+            self.resolutions.append(approval_resolution)
+            return SimpleNamespace(session_id=session_id)
+
+        def stop(self, session_id: str) -> object:
+            return SimpleNamespace(session_id=session_id)
+
+    controller = _FakeController()
+    monkeypatch.setattr(
+        _MODULES.app, "_build_research_controller", lambda **kwargs: controller
+    )
+    appended: list[object] = []
+    monkeypatch.setattr(
+        _MODULES.app,
+        "_append_research_summary",
+        lambda active, inspection, app_state: appended.append(inspection),
+    )
+    app_state = _make_app_state(root_path=str(tmp_path))
+    active = app_state.sessions[app_state.active_session_id]
+
+    _MODULES.app._render_sidebar_research_controls(
+        app_state,
+        config=StreamlitAssistantConfig(),
+        runtime=active.runtime,
+        active=active,
+    )
+
+    assert controller.resolutions == [ApprovalResolution.APPROVE]
+    assert appended and appended[0].session_id == "research-1"
+
+
+def test_streamlit_assistant_build_research_controller_filters_blocked_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = _make_runtime(root_path=str(tmp_path))
+    runtime.enabled_tools = ["read_file", "search_gitlab_code"]
+    runtime.allow_network = False
+    runtime.allow_filesystem = True
+    captured: list[set[str]] = []
+
+    monkeypatch.setattr(_MODULES.app, "_current_api_key", lambda llm_config: None)
+    monkeypatch.setattr(
+        _MODULES.app,
+        "build_assistant_executor",
+        lambda policy: ("registry", "workflow"),
+    )
+    monkeypatch.setattr(
+        _MODULES.app,
+        "build_live_harness_provider",
+        lambda **kwargs: (
+            captured.append(set(kwargs["enabled_tool_names"])) or "provider"
+        ),
+    )
+
+    class _FakeHarnessService:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+        def list_sessions(self, request: object) -> object:
+            del request
+            return SimpleNamespace(sessions=[])
+
+    monkeypatch.setattr(_MODULES.app, "HarnessSessionService", _FakeHarnessService)
+
+    controller = _MODULES.app._build_research_controller(
+        config=StreamlitAssistantConfig(
+            research=AssistantResearchConfig(store_dir=str(tmp_path / "research"))
+        ),
+        runtime=runtime,
+    )
+    controller.list_recent()
+
+    assert captured == [{"read_file"}]
+
+
+def test_streamlit_assistant_launch_and_script_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: list[str] = []
+    fake_cli = SimpleNamespace(main=lambda: captured.extend(sys.argv) or 0)
+    monkeypatch.setitem(sys.modules, "streamlit.web.cli", fake_cli)
+    monkeypatch.setitem(sys.modules, "streamlit.web", SimpleNamespace(cli=fake_cli))
+    monkeypatch.setitem(
+        sys.modules, "streamlit", SimpleNamespace(web=SimpleNamespace(cli=fake_cli))
+    )
+
+    assert _MODULES.app._launch_streamlit_app(["--config", "assistant.yaml"]) == 0
+    assert captured[:3] == [
+        "streamlit",
+        "run",
+        str(Path(_MODULES.app.__file__).resolve()),
+    ]
+
+    config_path = tmp_path / "assistant.yaml"
+    config_path.write_text(
+        """
+llm:
+  provider: ollama
+""".lstrip(),
+        encoding="utf-8",
+    )
+    called: list[tuple[Path | None, str]] = []
+    monkeypatch.setattr(
+        _MODULES.app,
+        "run_streamlit_assistant_app",
+        lambda *, root_path, config: called.append(
+            (root_path, config.llm.provider.value)
+        ),
+    )
+    _MODULES.app._run_streamlit_script([str(tmp_path), "--config", str(config_path)])
+    assert called == [(tmp_path.resolve(), "ollama")]
+
+
+def test_assistant_research_controller_inspect_resume_stop_and_summary() -> None:
+    calls: list[tuple[str, object]] = []
+
+    class _FakeService:
+        def inspect_session(self, request: object) -> object:
+            calls.append(("inspect", request))
+            return inspection
+
+        def resume_session(self, request: object) -> object:
+            calls.append(("resume", request))
+            return None
+
+        def stop_session(self, request: object) -> object:
+            calls.append(("stop", request))
+            return inspection
+
+        def list_sessions(self, request: object) -> object:
+            calls.append(("list", request))
+            return SimpleNamespace(sessions=[])
+
+    inspection = SimpleNamespace(
+        summary=SimpleNamespace(
+            session_id="research-1",
+            stop_reason=SimpleNamespace(value="awaiting_approval"),
+            total_turns=4,
+            completed_task_ids=["task-1"],
+            active_task_ids=[],
+            pending_approval_ids=["approval-1"],
+            latest_decision_summary="waiting",
+        )
+    )
+    controller = AssistantResearchSessionController(
+        service_factory=_FakeService,
+        budget_policy=BudgetPolicy(max_turns=2),
+        include_replay_by_default=True,
+        list_limit=3,
+    )
+
+    assert controller.inspect("research-1") is inspection
+    assert (
+        controller.resume("research-1", approval_resolution=ApprovalResolution.DENY)
+        is inspection
+    )
+    assert controller.stop("research-1") is inspection
+    assert controller.list_recent().sessions == []
+    summary = controller.summary_text(inspection)
+    assert "Pending approvals: approval-1" in summary
+    assert "Latest decision: waiting" in summary
+    assert [name for name, _ in calls] == [
+        "inspect",
+        "resume",
+        "inspect",
+        "stop",
+        "list",
+    ]
+
+
+def test_resolve_assistant_config_applies_cli_overrides_for_all_runtime_limits(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "assistant.yml"
+    config_path.write_text(
+        """
+llm:
+  provider: ollama
+  model_name: base
+""".lstrip(),
+        encoding="utf-8",
+    )
+    args = build_parser().parse_args(
+        [
+            "--config",
+            str(config_path),
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-test",
+            "--temperature",
+            "0.3",
+            "--api-base-url",
+            "https://example.test/v1",
+            "--max-context-tokens",
+            "123",
+            "--max-tool-round-trips",
+            "4",
+            "--max-tool-calls-per-round",
+            "5",
+            "--max-total-tool-calls-per-turn",
+            "6",
+            "--max-entries-per-call",
+            "7",
+            "--max-recursive-depth",
+            "8",
+            "--max-search-matches",
+            "9",
+            "--max-read-lines",
+            "10",
+            "--max-file-size-characters",
+            "11",
+            "--max-tool-result-chars",
+            "12",
+        ]
+    )
+
+    resolved = _resolve_assistant_config(args)
+
+    assert resolved.llm.provider.value == "openai"
+    assert resolved.llm.model_name == "gpt-test"
+    assert resolved.llm.temperature == 0.3
+    assert resolved.llm.api_base_url == "https://example.test/v1"
+    assert resolved.session.max_context_tokens == 123
+    assert resolved.session.max_tool_round_trips == 4
+    assert resolved.session.max_tool_calls_per_round == 5
+    assert resolved.session.max_total_tool_calls_per_turn == 6
+    assert resolved.tool_limits.max_entries_per_call == 7
+    assert resolved.tool_limits.max_recursive_depth == 8
+    assert resolved.tool_limits.max_search_matches == 9
+    assert resolved.tool_limits.max_read_lines == 10
+    assert resolved.tool_limits.max_file_size_characters == 11
+    assert resolved.tool_limits.max_tool_result_chars == 12
+
+
+def test_streamlit_assistant_fallback_storage_provider_helpers_and_missing_session_notice(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv(_MODULES.app._STORAGE_ENV_VAR, raising=False)
+    monkeypatch.setattr(_MODULES.app.Path, "home", lambda: tmp_path)
+    assert (
+        _MODULES.app._storage_root()
+        == (tmp_path / ".llm-tools" / "assistant" / "streamlit").resolve()
+    )
+
+    runtime = _make_runtime(root_path=str(tmp_path))
+    runtime.api_base_url = None
+    preferences = _MODULES.app.StreamlitPreferences(theme_mode="light")
+    _MODULES.app._remember_runtime_preferences(preferences, runtime)
+    assert runtime.provider.value in preferences.recent_models
+    assert runtime.provider.value not in preferences.recent_base_urls
+
+    recorded: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        _MODULES.app,
+        "create_provider",
+        lambda *args, **kwargs: recorded.append(dict(kwargs)) or "provider",
+    )
+    assert (
+        _MODULES.app._create_provider_for_runtime(
+            StreamlitAssistantConfig().llm,
+            _make_runtime(root_path=None),
+            api_key=None,
+            model_name="demo-model",
+        )
+        == "provider"
+    )
+    assert recorded[-1]["model_name"] == "demo-model"
+    assert "OPENAI_API_KEY" in _MODULES.app._missing_api_key_text(
+        SimpleNamespace(api_key_env_var=None)
+    )
+
+    storage_root = tmp_path / "state"
+    monkeypatch.setenv(_MODULES.app._STORAGE_ENV_VAR, str(storage_root))
+    (storage_root / "sessions").mkdir(parents=True)
+    (storage_root / "index.json").write_text(
+        _MODULES.app.StreamlitSessionIndex(
+            active_session_id="missing",
+            session_order=["missing"],
+        ).model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+    loaded = _MODULES.app._load_workspace_state(
+        root_path=None,
+        config=StreamlitAssistantConfig(),
+    )
+    assert any(
+        "Skipped missing assistant session missing." in notice
+        for notice in loaded.startup_notices
+    )
+
+
+def test_streamlit_assistant_load_save_delete_edge_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setenv(_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
+
+    storage_root = tmp_path / "state"
+    storage_root.mkdir(parents=True, exist_ok=True)
+    (storage_root / "preferences.json").write_text("{bad-json", encoding="utf-8")
+    (storage_root / "index.json").write_text("{bad-json", encoding="utf-8")
+    state = _MODULES.app._load_workspace_state(
+        root_path=None,
+        config=StreamlitAssistantConfig(),
+    )
+    assert any(
+        "Unable to load preferences" in notice for notice in state.startup_notices
+    )
+    assert any(
+        "Unable to load session index" in notice for notice in state.startup_notices
+    )
+
+    stale_path = _MODULES.app._session_path("stale")
+    stale_path.parent.mkdir(parents=True, exist_ok=True)
+    stale_path.write_text("{}", encoding="utf-8")
+    state.session_order.append("ghost")
+    _MODULES.app._save_workspace_state(state)
+    assert not stale_path.exists()
+
+    handle = _MODULES.app.AssistantActiveTurnHandle(
+        session_id=state.active_session_id,
+        runner=_FakeRunnerHandle(),
+        event_queue=queue.Queue(),
+        thread=_DeadThread(),
+        turn_number=1,
+    )
+    fake_st.session_state[_MODULES.app._ACTIVE_TURN_STATE_SLOT] = handle
+    _MODULES.app._delete_session(
+        state,
+        session_id=state.active_session_id,
+        config=StreamlitAssistantConfig(),
+        root_path=tmp_path,
+    )
+    assert handle.runner.cancelled is True
+    assert fake_st.session_state[_MODULES.app._ACTIVE_TURN_STATE_SLOT] is None
+    assert state.session_order
+
+    monkeypatch.setattr(
+        _MODULES.app,
+        "_streamlit_module",
+        lambda: (_ for _ in ()).throw(ModuleNotFoundError()),
+    )
+    single = _make_app_state(root_path=str(tmp_path))
+    _MODULES.app._delete_session(
+        single,
+        session_id=single.active_session_id,
+        config=StreamlitAssistantConfig(),
+        root_path=tmp_path,
+    )
+    assert single.session_order
+    assert single.active_session_id in single.sessions
+
+
+def test_streamlit_assistant_start_cancel_and_resolve_guard_branches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(_MODULES.app, "_save_workspace_state", lambda app_state: None)
+    fake_runner = _FakeIterableRunner([])
+    monkeypatch.setattr(
+        _MODULES.app, "_build_assistant_runner", lambda **kwargs: fake_runner
+    )
+    monkeypatch.setattr(_MODULES.app.threading, "Thread", _FakeThread)
+
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+    _MODULES.app._start_streamlit_turn(
+        app_state=app_state,
+        session_id=session_id,
+        config=StreamlitAssistantConfig(),
+        provider="provider",
+        user_message="hello world",
+    )
+    turn_state = _MODULES.app._turn_state_for(app_state, session_id)
+    assert turn_state.busy is True
+    assert app_state.sessions[session_id].transcript[-1].text == "hello world"
+    assert (
+        fake_st.session_state[_MODULES.app._ACTIVE_TURN_STATE_SLOT].thread.started
+        is True
+    )
+    assert _MODULES.app._active_session(app_state) is app_state.sessions[session_id]
+
+    _MODULES.app._cancel_active_turn(app_state, session_id=session_id)
+    assert fake_runner.cancelled is True
+
+    fake_st.session_state[_MODULES.app._ACTIVE_TURN_STATE_SLOT] = None
+    turn_state.pending_interrupt_draft = "draft"
+    _MODULES.app._cancel_active_turn(app_state, session_id=session_id)
+    assert turn_state.busy is False
+    assert app_state.sessions[session_id].transcript[-1].text == "Stopped active turn."
+
+    _MODULES.app._resolve_active_approval(
+        app_state, session_id=session_id, approved=True
+    )
+    mismatch = _FakeRunnerHandle()
+    fake_st.session_state[_MODULES.app._ACTIVE_TURN_STATE_SLOT] = (
+        _MODULES.app.AssistantActiveTurnHandle(
+            session_id="other",
+            runner=mismatch,
+            event_queue=queue.Queue(),
+            thread=_DeadThread(),
+            turn_number=1,
+        )
+    )
+    _MODULES.app._resolve_active_approval(
+        app_state, session_id=session_id, approved=True
+    )
+    assert mismatch.approvals == []
+
+    rejecting = _RejectingRunnerHandle()
+    approval = ChatWorkflowApprovalState(
+        approval_request=ApprovalRequest(
+            approval_id="approval-2",
+            invocation_index=1,
+            request={"tool_name": "read_file", "arguments": {"path": "a.txt"}},
+            tool_name="read_file",
+            tool_version="0.1.0",
+            policy_reason="approval required",
+            policy_metadata={},
+            requested_at="2026-01-01T00:00:00Z",
+            expires_at="2026-01-01T00:05:00Z",
+        ),
+        tool_name="read_file",
+        redacted_arguments={"path": "a.txt"},
+        policy_reason="approval required",
+        policy_metadata={},
+    )
+    turn_state.pending_approval = approval
+    fake_st.session_state[_MODULES.app._ACTIVE_TURN_STATE_SLOT] = (
+        _MODULES.app.AssistantActiveTurnHandle(
+            session_id=session_id,
+            runner=rejecting,
+            event_queue=queue.Queue(),
+            thread=_DeadThread(),
+            turn_number=2,
+        )
+    )
+    turn_state.approval_decision_in_flight = False
+    _MODULES.app._resolve_active_approval(
+        app_state, session_id=session_id, approved=False
+    )
+    assert rejecting.approvals == [False]
+    assert turn_state.approval_decision_in_flight is False
+
+
+def test_streamlit_assistant_process_turn_handles_approval_and_continuation() -> None:
+    approval = ChatWorkflowApprovalState(
+        approval_request=ApprovalRequest(
+            approval_id="approval-1",
+            invocation_index=1,
+            request={"tool_name": "read_file", "arguments": {"path": "a.txt"}},
+            tool_name="read_file",
+            tool_version="0.1.0",
+            policy_reason="approval required",
+            policy_metadata={},
+            requested_at="2026-01-01T00:00:00Z",
+            expires_at="2026-01-01T00:05:00Z",
+        ),
+        tool_name="read_file",
+        redacted_arguments={"path": "a.txt"},
+        policy_reason="approval required",
+        policy_metadata={},
+    )
+    runner = _FakeIterableRunner(
+        [
+            ChatWorkflowApprovalEvent(approval=approval),
+            ChatWorkflowApprovalResolvedEvent(approval=approval, resolution="approved"),
+            ChatWorkflowResultEvent(
+                result=ChatWorkflowTurnResult(
+                    status="needs_continuation",
+                    new_messages=[],
+                    context_warning="warn",
+                    continuation_reason="continue",
+                    session_state=ChatSessionState(),
+                )
+            ),
+        ]
+    )
+    original = _MODULES.app._build_assistant_runner
+    _MODULES.app._build_assistant_runner = lambda **kwargs: runner
+    try:
+        outcome = process_streamlit_assistant_turn(
+            root_path=None,
+            config=StreamlitAssistantConfig(),
+            provider=_FakeProvider([]),
+            session_state=ChatSessionState(),
+            user_message="hello",
+            approval_resolver=lambda approval: True,
+        )
+    finally:
+        _MODULES.app._build_assistant_runner = original
+
+    assert runner.approvals == [True]
+    assert [entry.text for entry in outcome.transcript_entries] == [
+        "Approval requested for read_file: approval required",
+        "Approved pending approval request.",
+        "warn",
+        "continue",
+    ]
+
+
+def test_streamlit_assistant_apply_turn_result_and_queue_error_branches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(_MODULES.app, "_save_workspace_state", lambda app_state: None)
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+
+    continuation_event = ChatWorkflowResultEvent(
+        result=ChatWorkflowTurnResult(
+            status="needs_continuation",
+            new_messages=[],
+            continuation_reason="continue next",
+            session_state=ChatSessionState(),
+        )
+    )
+    _MODULES.app._apply_turn_result(
+        app_state, session_id=session_id, event=continuation_event
+    )
+    assert app_state.sessions[session_id].transcript[-1].text == "continue next"
+
+    with pytest.raises(ValueError, match="Unsupported queued event kind"):
+        _MODULES.app._apply_queued_event(
+            app_state,
+            _MODULES.app.AssistantQueuedEvent(
+                kind="mystery",
+                payload=object(),
+                turn_number=1,
+                session_id=session_id,
+            ),
+        )
+
+    assert _MODULES.app._drain_active_turn_events(app_state) is None

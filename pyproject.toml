@@ -123,7 +123,6 @@ addopts = "-ra"
 [tool.coverage.run]
 source = ["llm_tools"]
 branch = true
-omit = ["src/llm_tools/apps/streamlit_assistant/app.py"]
 
 [tool.coverage.report]
 fail_under = 90

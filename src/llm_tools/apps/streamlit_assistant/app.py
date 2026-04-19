@@ -1,4 +1,3 @@
-# coverage: ignore file
 """Streamlit app shell for the assistant-focused chat experience."""
 
 from __future__ import annotations
@@ -689,6 +688,31 @@ def _missing_api_key_text(llm_config: Any) -> str:
     return f"Set {env_var} or enter it in the header controls to use this provider."
 
 
+def _exposed_tool_names_for_runtime(
+    *,
+    tool_specs: dict[str, ToolSpec],
+    runtime: StreamlitRuntimeConfig,
+    root: Path | None,
+    env: dict[str, str],
+) -> set[str]:
+    capability_groups = build_tool_capabilities(
+        tool_specs=tool_specs,
+        enabled_tools=set(runtime.enabled_tools),
+        root_path=runtime.root_path,
+        env=env,
+        allow_network=runtime.allow_network,
+        allow_filesystem=runtime.allow_filesystem and root is not None,
+        allow_subprocess=runtime.allow_subprocess and root is not None,
+        require_approval_for=set(runtime.require_approval_for),
+    )
+    return {
+        tool.tool_name
+        for group in capability_groups.values()
+        for tool in group
+        if tool.exposed_to_model
+    }
+
+
 def _build_assistant_runner(
     *,
     session_id: str,
@@ -711,21 +735,12 @@ def _build_assistant_runner(
         redaction_config=config.policy.redaction,
     )
     registry, executor = build_assistant_executor(policy=policy)
-    exposed_tool_names = {
-        tool.tool_name
-        for group in build_tool_capabilities(
-            tool_specs=tool_specs,
-            enabled_tools=enabled_tools,
-            root_path=runtime.root_path,
-            env=dict(os.environ),
-            allow_network=runtime.allow_network,
-            allow_filesystem=runtime.allow_filesystem and root is not None,
-            allow_subprocess=runtime.allow_subprocess and root is not None,
-            require_approval_for=set(runtime.require_approval_for),
-        ).values()
-        for tool in group
-        if tool.exposed_to_model
-    }
+    exposed_tool_names = _exposed_tool_names_for_runtime(
+        tool_specs=tool_specs,
+        runtime=runtime,
+        root=root,
+        env=dict(os.environ),
+    )
     return run_interactive_chat_session_turn(
         user_message=user_message,
         session_state=session_state,
@@ -1413,6 +1428,12 @@ def _build_research_controller(
             redaction_config=config.policy.redaction,
         )
         registry, workflow_executor = build_assistant_executor(policy=policy)
+        exposed_tool_names = _exposed_tool_names_for_runtime(
+            tool_specs=tool_specs,
+            runtime=runtime,
+            root=root,
+            env=dict(os.environ),
+        )
         harness_provider = build_live_harness_provider(
             config=config,
             provider_config=llm_config,
@@ -1420,7 +1441,7 @@ def _build_research_controller(
             api_key=api_key,
             mode_strategy=runtime.provider_mode_strategy,
             tool_registry=registry,
-            enabled_tool_names=enabled_tools,
+            enabled_tool_names=exposed_tool_names,
             workspace_enabled=root is not None,
         )
         return HarnessSessionService(
@@ -1652,14 +1673,39 @@ def _render_sidebar_research_controls(
         st.caption(
             f"stop={summary.stop_reason.value if summary.stop_reason else 'running'} | turns={summary.total_turns} | approvals={len(summary.pending_approval_ids)}"
         )
+        if summary.pending_approval_ids:
+            cols = st.columns(4)
+            if cols[0].button(
+                "Insert summary", key=f"research-insert:{summary.session_id}"
+            ):
+                inspection = controller.inspect(summary.session_id)
+                _append_research_summary(active, inspection, app_state)
+            if cols[1].button("Approve", key=f"research-approve:{summary.session_id}"):
+                inspection = controller.resume(
+                    summary.session_id,
+                    approval_resolution=ApprovalResolution.APPROVE,
+                )
+                _append_research_summary(active, inspection, app_state)
+            if cols[2].button("Deny", key=f"research-deny:{summary.session_id}"):
+                inspection = controller.resume(
+                    summary.session_id,
+                    approval_resolution=ApprovalResolution.DENY,
+                )
+                _append_research_summary(active, inspection, app_state)
+            if cols[3].button("Stop", key=f"research-stop:{summary.session_id}"):
+                inspection = controller.stop(summary.session_id)
+                _append_research_summary(active, inspection, app_state)
+            continue
         cols = st.columns(3)
-        if cols[0].button("Insert summary", key=f"insert:{summary.session_id}"):
+        if cols[0].button(
+            "Insert summary", key=f"research-insert:{summary.session_id}"
+        ):
             inspection = controller.inspect(summary.session_id)
             _append_research_summary(active, inspection, app_state)
-        if cols[1].button("Resume", key=f"resume:{summary.session_id}"):
+        if cols[1].button("Resume", key=f"research-resume:{summary.session_id}"):
             inspection = controller.resume(summary.session_id)
             _append_research_summary(active, inspection, app_state)
-        if cols[2].button("Stop", key=f"stop:{summary.session_id}"):
+        if cols[2].button("Stop", key=f"research-stop:{summary.session_id}"):
             inspection = controller.stop(summary.session_id)
             _append_research_summary(active, inspection, app_state)
 
