@@ -12,7 +12,11 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
-from llm_tools.tool_api import ToolContext, ToolResult
+from llm_tools.tool_api import (
+    ProtectionProvenanceSnapshot,
+    ToolContext,
+    ToolResult,
+)
 from llm_tools.tool_api.redaction import RedactionConfig, RedactionTarget, Redactor
 from llm_tools.tools.filesystem._content import dump_json
 from llm_tools.tools.filesystem.models import ToolLimits
@@ -37,6 +41,11 @@ from llm_tools.workflow_api.models import (
     ApprovalRequest,
     WorkflowInvocationStatus,
     WorkflowTurnResult,
+)
+from llm_tools.workflow_api.protection import (
+    ProtectionAction,
+    ProtectionController,
+    collect_provenance_from_tool_results,
 )
 
 
@@ -70,6 +79,7 @@ class ChatSessionTurnRunner:
         tool_limits: ToolLimits,
         redaction_config: RedactionConfig,
         temperature: float,
+        protection_controller: ProtectionController | None = None,
     ) -> None:
         (
             self._system_message,
@@ -91,6 +101,7 @@ class ChatSessionTurnRunner:
         self._tool_limits = tool_limits
         self._redaction_config = redaction_config
         self._temperature = temperature
+        self._protection_controller = protection_controller
         self._adapter = ActionEnvelopeAdapter()
         self._approval_condition = Condition()
         self._cancel_requested = False
@@ -150,6 +161,14 @@ class ChatSessionTurnRunner:
         executed_tool_call_count = 0
         yield ChatWorkflowStatusEvent(status="thinking")
 
+        pending_prompt_event = self._maybe_handle_pending_protection_prompt(
+            new_messages=new_messages,
+            tool_results=tool_results,
+        )
+        if pending_prompt_event is not None:
+            yield pending_prompt_event
+            return
+
         while True:
             if self._cancel_requested:
                 yield self._interrupted_event(
@@ -159,21 +178,27 @@ class ChatSessionTurnRunner:
                 )
                 return
 
-            round_context = self._base_context.model_copy(
-                update={
-                    "invocation_id": f"{self._base_context.invocation_id}:{uuid4()}"
-                }
+            (
+                round_context,
+                response_model,
+                round_index,
+                serialized_messages,
+                provenance,
+            ) = self._build_round_inputs(
+                messages=messages,
+                tool_results=tool_results,
+                round_count=round_count,
             )
-            prepared = self._executor.prepare_model_interaction(
-                self._adapter,
-                context=round_context,
-                include_requires_approval=True,
-                final_response_model=ChatFinalResponse,
+            serialized_messages, prompt_event = self._apply_prompt_protection(
+                serialized_messages=serialized_messages,
+                provenance=provenance,
+                new_messages=new_messages,
+                tool_results=tool_results,
             )
-            round_index = round_count + 1
-            serialized_messages = [
-                _serialize_chat_message(message) for message in messages
-            ]
+            if prompt_event is not None:
+                yield prompt_event
+                return
+
             yield ChatWorkflowInspectorEvent(
                 round_index=round_index,
                 kind="provider_messages",
@@ -182,8 +207,12 @@ class ChatSessionTurnRunner:
             parsed = self._provider.run(
                 adapter=self._adapter,
                 messages=serialized_messages,
-                response_model=prepared.response_model,
+                response_model=response_model,
                 request_params={"temperature": self._temperature},
+            )
+            parsed = self._apply_response_protection(
+                parsed=parsed,
+                provenance=provenance,
             )
             yield ChatWorkflowInspectorEvent(
                 round_index=round_index,
@@ -202,66 +231,30 @@ class ChatSessionTurnRunner:
                 )
                 return
 
-            assistant_message = ChatMessage(
-                role="assistant",
-                content=json.dumps(
-                    {
-                        "actions": [
-                            invocation.model_dump(mode="json")
-                            for invocation in parsed.invocations
-                        ],
-                        "final_response": parsed.final_response,
-                    },
-                    sort_keys=True,
-                    default=str,
-                ),
+            self._append_assistant_message(
+                messages=messages,
+                new_messages=new_messages,
+                parsed=parsed,
             )
-            messages.append(assistant_message)
-            new_messages.append(assistant_message)
 
-            if parsed.final_response is not None:
+            final_response_event = self._maybe_finalize_from_response(
+                parsed=parsed,
+                new_messages=new_messages,
+                tool_results=tool_results,
+            )
+            if final_response_event is not None:
                 yield ChatWorkflowStatusEvent(status="drafting answer")
-                final_response = ChatFinalResponse.model_validate(parsed.final_response)
-                yield self._finalized_event(
-                    result=ChatWorkflowTurnResult(
-                        status="completed",
-                        new_messages=new_messages,
-                        final_response=final_response,
-                        token_usage=None,
-                        tool_results=tool_results,
-                    )
-                )
+                yield final_response_event
                 return
 
-            if len(parsed.invocations) > self._session_config.max_tool_calls_per_round:
-                yield self._finalized_event(
-                    result=_build_continuation_result(
-                        new_messages=new_messages,
-                        tool_results=tool_results,
-                        token_usage=None,
-                        reason=(
-                            "The model requested more tool calls in one round than "
-                            "allowed. User confirmation is required before continuing."
-                        ),
-                    )
-                )
-                return
-
-            if (
-                executed_tool_call_count + len(parsed.invocations)
-                > self._session_config.max_total_tool_calls_per_turn
-            ):
-                yield self._finalized_event(
-                    result=_build_continuation_result(
-                        new_messages=new_messages,
-                        tool_results=tool_results,
-                        token_usage=None,
-                        reason=(
-                            "The model needs more total tool-call budget before it can "
-                            "continue this turn."
-                        ),
-                    )
-                )
+            continuation_event = self._continuation_limit_event(
+                parsed=parsed,
+                new_messages=new_messages,
+                tool_results=tool_results,
+                executed_tool_call_count=executed_tool_call_count,
+            )
+            if continuation_event is not None:
+                yield continuation_event
                 return
 
             workflow_result = self._executor.execute_parsed_response(
@@ -286,21 +279,244 @@ class ChatSessionTurnRunner:
                 return
 
             round_count += 1
-            if round_count >= self._session_config.max_tool_round_trips:
-                yield self._finalized_event(
-                    result=_build_continuation_result(
-                        new_messages=new_messages,
-                        tool_results=tool_results,
-                        token_usage=None,
-                        reason=(
-                            "The model needs more tool rounds before it can provide "
-                            "a final response."
-                        ),
-                    )
-                )
+            round_limit_event = self._round_trip_limit_event(
+                round_count=round_count,
+                new_messages=new_messages,
+                tool_results=tool_results,
+            )
+            if round_limit_event is not None:
+                yield round_limit_event
                 return
 
             yield ChatWorkflowStatusEvent(status="thinking")
+
+    def _build_round_inputs(
+        self,
+        *,
+        messages: list[ChatMessage],
+        tool_results: list[ToolResult],
+        round_count: int,
+    ) -> tuple[
+        ToolContext,
+        type[BaseModel],
+        int,
+        list[dict[str, Any]],
+        ProtectionProvenanceSnapshot,
+    ]:
+        round_context = self._base_context.model_copy(
+            update={"invocation_id": f"{self._base_context.invocation_id}:{uuid4()}"}
+        )
+        prepared = self._executor.prepare_model_interaction(
+            self._adapter,
+            context=round_context,
+            include_requires_approval=True,
+            final_response_model=ChatFinalResponse,
+        )
+        round_index = round_count + 1
+        serialized_messages = [_serialize_chat_message(message) for message in messages]
+        provenance = _collect_chat_provenance(
+            session_state=self._session_state,
+            current_tool_results=tool_results,
+        )
+        return (
+            round_context,
+            prepared.response_model,
+            round_index,
+            serialized_messages,
+            provenance,
+        )
+
+    def _apply_prompt_protection(
+        self,
+        *,
+        serialized_messages: list[dict[str, Any]],
+        provenance: ProtectionProvenanceSnapshot,
+        new_messages: list[ChatMessage],
+        tool_results: list[ToolResult],
+    ) -> tuple[list[dict[str, Any]], ChatWorkflowResultEvent | None]:
+        if self._protection_controller is None:
+            return serialized_messages, None
+
+        prompt_decision = self._protection_controller.assess_prompt(
+            messages=serialized_messages,
+            provenance=provenance,
+        )
+        if (
+            prompt_decision.action is ProtectionAction.CONSTRAIN
+            and prompt_decision.guard_text is not None
+        ):
+            return [
+                {"role": "system", "content": prompt_decision.guard_text},
+                *serialized_messages,
+            ], None
+        if prompt_decision.action not in {
+            ProtectionAction.CHALLENGE,
+            ProtectionAction.BLOCK,
+        }:
+            return serialized_messages, None
+
+        challenge_response = ChatFinalResponse(
+            answer=(
+                prompt_decision.challenge_message
+                or "The request was withheld for this environment."
+            )
+        )
+        assistant_message = _assistant_message_for_final_response(challenge_response)
+        pending_prompt = (
+            self._protection_controller.build_pending_prompt(
+                original_user_message=self._user_chat_message.content,
+                serialized_messages=serialized_messages,
+                decision=prompt_decision,
+                session_id=self._base_context.invocation_id,
+            )
+            if prompt_decision.action is ProtectionAction.CHALLENGE
+            else None
+        )
+        return serialized_messages, self._finalized_event(
+            result=ChatWorkflowTurnResult(
+                status="completed",
+                new_messages=[*new_messages, assistant_message],
+                final_response=challenge_response,
+                token_usage=None,
+                tool_results=tool_results,
+                pending_protection_prompt=pending_prompt,
+            )
+        )
+
+    def _apply_response_protection(
+        self,
+        *,
+        parsed: ParsedModelResponse,
+        provenance: ProtectionProvenanceSnapshot,
+    ) -> ParsedModelResponse:
+        if self._protection_controller is None or parsed.final_response is None:
+            return parsed
+
+        response_decision = self._protection_controller.review_response(
+            response_payload=parsed.final_response,
+            provenance=provenance,
+        )
+        if (
+            response_decision.action is ProtectionAction.SANITIZE
+            and response_decision.sanitized_payload is not None
+        ):
+            return parsed.model_copy(
+                update={"final_response": response_decision.sanitized_payload}
+            )
+        if response_decision.action is not ProtectionAction.BLOCK:
+            return parsed
+        return parsed.model_copy(
+            update={
+                "final_response": ChatFinalResponse(
+                    answer=(
+                        response_decision.safe_message
+                        or "The response was withheld for this environment."
+                    )
+                ).model_dump(mode="json")
+            }
+        )
+
+    def _append_assistant_message(
+        self,
+        *,
+        messages: list[ChatMessage],
+        new_messages: list[ChatMessage],
+        parsed: ParsedModelResponse,
+    ) -> None:
+        assistant_message = ChatMessage(
+            role="assistant",
+            content=json.dumps(
+                {
+                    "actions": [
+                        invocation.model_dump(mode="json")
+                        for invocation in parsed.invocations
+                    ],
+                    "final_response": parsed.final_response,
+                },
+                sort_keys=True,
+                default=str,
+            ),
+        )
+        messages.append(assistant_message)
+        new_messages.append(assistant_message)
+
+    def _maybe_finalize_from_response(
+        self,
+        *,
+        parsed: ParsedModelResponse,
+        new_messages: list[ChatMessage],
+        tool_results: list[ToolResult],
+    ) -> ChatWorkflowResultEvent | None:
+        if parsed.final_response is None:
+            return None
+        final_response = ChatFinalResponse.model_validate(parsed.final_response)
+        return self._finalized_event(
+            result=ChatWorkflowTurnResult(
+                status="completed",
+                new_messages=new_messages,
+                final_response=final_response,
+                token_usage=None,
+                tool_results=tool_results,
+            )
+        )
+
+    def _continuation_limit_event(
+        self,
+        *,
+        parsed: ParsedModelResponse,
+        new_messages: list[ChatMessage],
+        tool_results: list[ToolResult],
+        executed_tool_call_count: int,
+    ) -> ChatWorkflowResultEvent | None:
+        if len(parsed.invocations) > self._session_config.max_tool_calls_per_round:
+            return self._finalized_event(
+                result=_build_continuation_result(
+                    new_messages=new_messages,
+                    tool_results=tool_results,
+                    token_usage=None,
+                    reason=(
+                        "The model requested more tool calls in one round than "
+                        "allowed. User confirmation is required before continuing."
+                    ),
+                )
+            )
+        if (
+            executed_tool_call_count + len(parsed.invocations)
+            <= self._session_config.max_total_tool_calls_per_turn
+        ):
+            return None
+        return self._finalized_event(
+            result=_build_continuation_result(
+                new_messages=new_messages,
+                tool_results=tool_results,
+                token_usage=None,
+                reason=(
+                    "The model needs more total tool-call budget before it can "
+                    "continue this turn."
+                ),
+            )
+        )
+
+    def _round_trip_limit_event(
+        self,
+        *,
+        round_count: int,
+        new_messages: list[ChatMessage],
+        tool_results: list[ToolResult],
+    ) -> ChatWorkflowResultEvent | None:
+        if round_count < self._session_config.max_tool_round_trips:
+            return None
+        return self._finalized_event(
+            result=_build_continuation_result(
+                new_messages=new_messages,
+                tool_results=tool_results,
+                token_usage=None,
+                reason=(
+                    "The model needs more tool rounds before it can provide "
+                    "a final response."
+                ),
+            )
+        )
 
     def _consume_workflow_result(
         self,
@@ -461,6 +677,72 @@ class ChatSessionTurnRunner:
             )
         )
 
+    def _maybe_handle_pending_protection_prompt(
+        self,
+        *,
+        new_messages: list[ChatMessage],
+        tool_results: list[ToolResult],
+    ) -> ChatWorkflowResultEvent | None:
+        if self._protection_controller is None:
+            return None
+        pending_prompt = self._session_state.pending_protection_prompt
+        if pending_prompt is None:
+            return None
+
+        parsed_feedback = self._protection_controller.parse_feedback_message(
+            self._user_chat_message.content
+        )
+        if parsed_feedback is None:
+            final_response = ChatFinalResponse(
+                answer=self._protection_controller.feedback_required_message()
+            )
+            assistant_message = _assistant_message_for_final_response(final_response)
+            return self._finalized_event(
+                result=ChatWorkflowTurnResult(
+                    status="completed",
+                    new_messages=[*new_messages, assistant_message],
+                    final_response=final_response,
+                    token_usage=None,
+                    tool_results=tool_results,
+                    pending_protection_prompt=pending_prompt,
+                )
+            )
+
+        if parsed_feedback.analysis_is_correct:
+            final_response = ChatFinalResponse(
+                answer=self._protection_controller.confirmation_block_message()
+            )
+            assistant_message = _assistant_message_for_final_response(final_response)
+            return self._finalized_event(
+                result=ChatWorkflowTurnResult(
+                    status="completed",
+                    new_messages=[*new_messages, assistant_message],
+                    final_response=final_response,
+                    token_usage=None,
+                    tool_results=tool_results,
+                )
+            )
+
+        feedback_entry = self._protection_controller.record_feedback(
+            pending_prompt=pending_prompt,
+            feedback_prompt=parsed_feedback,
+        )
+        final_response = ChatFinalResponse(
+            answer=self._protection_controller.correction_recorded_message(
+                expected_sensitivity_label=feedback_entry.expected_sensitivity_label,
+            )
+        )
+        assistant_message = _assistant_message_for_final_response(final_response)
+        return self._finalized_event(
+            result=ChatWorkflowTurnResult(
+                status="completed",
+                new_messages=[*new_messages, assistant_message],
+                final_response=final_response,
+                token_usage=None,
+                tool_results=tool_results,
+            )
+        )
+
     @staticmethod
     def _executed_tool_call_count(*, tool_results: list[ToolResult]) -> int:
         return len(tool_results)
@@ -478,6 +760,7 @@ def run_interactive_chat_session_turn(
     tool_limits: ToolLimits,
     redaction_config: RedactionConfig,
     temperature: float,
+    protection_controller: ProtectionController | None = None,
 ) -> ChatSessionTurnRunner:
     """Return an interruptible multi-turn chat runner for one user message."""
     return ChatSessionTurnRunner(
@@ -491,6 +774,7 @@ def run_interactive_chat_session_turn(
         tool_limits=tool_limits,
         redaction_config=redaction_config,
         temperature=temperature,
+        protection_controller=protection_controller,
     )
 
 
@@ -655,6 +939,7 @@ def _finalize_session_turn_result(
     updated_session_state = ChatSessionState(
         turns=updated_turns,
         active_context_start_turn=active_context_start_turn,
+        pending_protection_prompt=turn_result.pending_protection_prompt,
     )
     active_context_messages = [
         system_message,
@@ -676,6 +961,34 @@ def _finalize_session_turn_result(
             "context_warning": context_warning,
         }
     )
+
+
+def _assistant_message_for_final_response(
+    final_response: ChatFinalResponse,
+) -> ChatMessage:
+    return ChatMessage(
+        role="assistant",
+        content=json.dumps(
+            {
+                "actions": [],
+                "final_response": final_response.model_dump(mode="json"),
+            },
+            sort_keys=True,
+            default=str,
+        ),
+    )
+
+
+def _collect_chat_provenance(
+    *,
+    session_state: ChatSessionState,
+    current_tool_results: list[ToolResult],
+) -> ProtectionProvenanceSnapshot:
+    collected: list[ToolResult] = []
+    for turn in session_state.turns:
+        collected.extend(turn.tool_results)
+    collected.extend(current_tool_results)
+    return collect_provenance_from_tool_results(collected)
 
 
 def _tokenize(text: str) -> list[str]:

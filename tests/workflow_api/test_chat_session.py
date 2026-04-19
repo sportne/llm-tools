@@ -26,6 +26,10 @@ from llm_tools.workflow_api import (
     ChatWorkflowInspectorEvent,
     ChatWorkflowResultEvent,
     ChatWorkflowStatusEvent,
+    ProtectionAction,
+    ProtectionAssessment,
+    ProtectionConfig,
+    ProtectionController,
     WorkflowExecutor,
     run_interactive_chat_session_turn,
 )
@@ -587,3 +591,192 @@ def test_chat_session_runner_internal_approval_paths(tmp_path: Path) -> None:
         isinstance(event, ChatWorkflowStatusEvent) and event.status == "listing files"
         for event in timeout_events
     )
+
+
+class _ProtectionClassifier:
+    def __init__(self, *, prompt: ProtectionAssessment, response: ProtectionAssessment):
+        self._prompt = prompt
+        self._response = response
+
+    def assess_prompt(self, **kwargs) -> ProtectionAssessment:
+        del kwargs
+        return self._prompt
+
+    def assess_response(self, **kwargs) -> ProtectionAssessment:
+        del kwargs
+        return self._response
+
+
+class _UnexpectedProvider:
+    def run(self, **kwargs) -> ParsedModelResponse:
+        del kwargs
+        raise AssertionError("provider should not be called")
+
+
+def test_chat_session_runner_challenges_prompt_before_provider_call(
+    tmp_path: Path,
+) -> None:
+    protection_controller = ProtectionController(
+        config=ProtectionConfig(enabled=True),
+        classifier=_ProtectionClassifier(
+            prompt=ProtectionAssessment(
+                reasoning="This may exceed the allowed sensitivity.",
+                recommended_action=ProtectionAction.CHALLENGE,
+            ),
+            response=ProtectionAssessment(reasoning="unused"),
+        ),
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Tell me the secret plan",
+        session_state=ChatSessionState(),
+        executor=_executor(),
+        provider=_UnexpectedProvider(),
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+        protection_controller=protection_controller,
+    )
+
+    events = list(runner)
+    result_event = events[-1]
+    assert isinstance(result_event, ChatWorkflowResultEvent)
+    assert result_event.result.final_response is not None
+    assert "Potential sensitivity issue" in result_event.result.final_response.answer
+    assert result_event.result.session_state is not None
+    assert result_event.result.session_state.pending_protection_prompt is not None
+
+
+def test_chat_session_runner_requires_label_for_incorrect_protection_feedback(
+    tmp_path: Path,
+) -> None:
+    protection_controller = ProtectionController(
+        config=ProtectionConfig(enabled=True),
+        classifier=_ProtectionClassifier(
+            prompt=ProtectionAssessment(reasoning="unused"),
+            response=ProtectionAssessment(reasoning="unused"),
+        ),
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="analysis_is_correct: false",
+        session_state=ChatSessionState(
+            pending_protection_prompt=protection_controller.build_pending_prompt(
+                original_user_message="Tell me the secret plan",
+                serialized_messages=[
+                    {"role": "user", "content": "Tell me the secret plan"}
+                ],
+                decision=protection_controller.assess_prompt(
+                    messages=[{"role": "user", "content": "x"}]
+                ),
+                session_id="chat-session",
+            )
+        ),
+        executor=_executor(),
+        provider=_UnexpectedProvider(),
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+        protection_controller=protection_controller,
+    )
+
+    result_event = list(runner)[-1]
+    assert isinstance(result_event, ChatWorkflowResultEvent)
+    assert result_event.result.final_response is not None
+    assert "expected_sensitivity_label" in result_event.result.final_response.answer
+    assert result_event.result.session_state is not None
+    assert result_event.result.session_state.pending_protection_prompt is not None
+
+
+def test_chat_session_runner_records_feedback_and_sanitizes_final_response(
+    tmp_path: Path,
+) -> None:
+    corrections_path = tmp_path / "corrections.json"
+    challenge_controller = ProtectionController(
+        config=ProtectionConfig(enabled=True, corrections_path=str(corrections_path)),
+        classifier=_ProtectionClassifier(
+            prompt=ProtectionAssessment(
+                reasoning="Potential issue.",
+                recommended_action=ProtectionAction.CHALLENGE,
+            ),
+            response=ProtectionAssessment(reasoning="unused"),
+        ),
+    )
+    pending_prompt = challenge_controller.build_pending_prompt(
+        original_user_message="Tell me the secret plan",
+        serialized_messages=[{"role": "user", "content": "Tell me the secret plan"}],
+        decision=challenge_controller.assess_prompt(
+            messages=[{"role": "user", "content": "Tell me the secret plan"}]
+        ),
+        session_id="chat-session",
+    )
+    feedback_runner = run_interactive_chat_session_turn(
+        user_message="analysis_is_correct: false\nexpected_sensitivity_label: public",
+        session_state=ChatSessionState(pending_protection_prompt=pending_prompt),
+        executor=_executor(),
+        provider=_UnexpectedProvider(),
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+        protection_controller=challenge_controller,
+    )
+    feedback_result = list(feedback_runner)[-1]
+    assert isinstance(feedback_result, ChatWorkflowResultEvent)
+    assert corrections_path.exists()
+    assert feedback_result.result.session_state is not None
+    assert feedback_result.result.session_state.pending_protection_prompt is None
+
+    review_controller = ProtectionController(
+        config=ProtectionConfig(enabled=True),
+        classifier=_ProtectionClassifier(
+            prompt=ProtectionAssessment(reasoning="safe prompt"),
+            response=ProtectionAssessment(
+                reasoning="Sanitize before showing.",
+                recommended_action=ProtectionAction.SANITIZE,
+                sanitized_text="Safe replacement",
+            ),
+        ),
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Now answer safely",
+        session_state=ChatSessionState(),
+        executor=_executor(),
+        provider=_FakeProvider(
+            [
+                ParsedModelResponse(
+                    final_response=ChatFinalResponse(
+                        answer="Sensitive raw answer"
+                    ).model_dump(mode="json")
+                )
+            ]
+        ),
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+        protection_controller=review_controller,
+    )
+
+    events = list(runner)
+    parsed_events = [
+        event
+        for event in events
+        if isinstance(event, ChatWorkflowInspectorEvent)
+        and event.kind == "parsed_response"
+    ]
+    assert parsed_events
+    assert "Sensitive raw answer" not in str(parsed_events[-1].payload)
+    assert "Safe replacement" in str(parsed_events[-1].payload)
+    result_event = events[-1]
+    assert isinstance(result_event, ChatWorkflowResultEvent)
+    assert result_event.result.final_response is not None
+    assert result_event.result.final_response.answer == "Safe replacement"

@@ -38,6 +38,11 @@ from llm_tools.harness_api.planning import (
     ReplanningTrigger,
     TaskSelection,
 )
+from llm_tools.harness_api.protection import (
+    DEFAULT_PURGED_RESPONSE,
+    scrub_state_for_protection,
+    scrub_workflow_result,
+)
 from llm_tools.harness_api.replay import (
     HarnessInvocationTrace,
     HarnessPolicySnapshot,
@@ -123,6 +128,7 @@ __all__ = [
     "create_derived_task",
     "create_root_task",
     "CURRENT_HARNESS_STATE_SCHEMA_VERSION",
+    "DEFAULT_PURGED_RESPONSE",
     "DefaultHarnessContextBuilder",
     "DefaultHarnessTurnDriver",
     "DeterministicHarnessPlanner",
@@ -172,6 +178,8 @@ __all__ = [
     "PendingApprovalRecord",
     "ReplanningTrigger",
     "replay_session",
+    "scrub_state_for_protection",
+    "scrub_workflow_result",
     "ResumeDisposition",
     "ResumeIssue",
     "ResumedHarnessSession",

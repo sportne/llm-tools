@@ -25,6 +25,7 @@ dependencies = [
   "atlassian-python-api>=4,<5",
   "python-gitlab>=4,<6",
   "markitdown>=0.1.5,<0.2",
+  "mpxj>=16,<17",
   "openai>=1,<2",
   "pydantic>=2,<3",
 ]

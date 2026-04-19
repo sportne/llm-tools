@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from pathlib import Path
 from typing import Any, cast
 
@@ -10,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from llm_tools.tool_api import (
     SideEffectClass,
+    SourceProvenanceRef,
     Tool,
     ToolContext,
     ToolRegistry,
@@ -24,6 +26,23 @@ from llm_tools.tools.filesystem._content import (
 from llm_tools.tools.filesystem.models import FileReadResult, ToolLimits
 
 _GITLAB_ENV_KEYS = ("GITLAB_BASE_URL", "GITLAB_API_TOKEN")
+
+
+def _append_remote_source_provenance(
+    context: ToolContext,
+    *,
+    source_kind: str,
+    source_id: str,
+) -> None:
+    context.source_provenance.append(
+        SourceProvenanceRef(
+            source_kind=source_kind,
+            source_id=source_id,
+            content_hash=hashlib.sha256(source_id.encode("utf-8")).hexdigest(),
+            whole_source_reproduction_allowed=True,
+            metadata={"source_id": source_id},
+        )
+    )
 
 
 def _get_required_env(context: ToolContext, key: str) -> str:
@@ -348,6 +367,11 @@ class ReadGitLabFileTool(Tool[ReadGitLabFileInput, ReadGitLabFileOutput]):
             f"Read GitLab file '{args.file_path}' from project '{args.project}'."
         )
         context.artifacts.append(resolved_path)
+        _append_remote_source_provenance(
+            context,
+            source_kind="gitlab_file",
+            source_id=resolved_path,
+        )
         return ReadGitLabFileOutput(
             project=project_name,
             ref=effective_ref,

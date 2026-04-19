@@ -12,6 +12,7 @@ from pydantic import ValidationError as PydanticValidationError
 from llm_tools.apps.chat_config import ChatLLMConfig, ChatPolicyConfig, ChatUIConfig
 from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import ChatSessionConfig
+from llm_tools.workflow_api.protection import ProtectionConfig
 
 
 class AssistantWorkspaceConfig(BaseModel):
@@ -59,6 +60,7 @@ class StreamlitAssistantConfig(BaseModel):
     session: ChatSessionConfig = Field(default_factory=ChatSessionConfig)
     tool_limits: ToolLimits = Field(default_factory=ToolLimits)
     policy: ChatPolicyConfig = Field(default_factory=ChatPolicyConfig)
+    protection: ProtectionConfig = Field(default_factory=ProtectionConfig)
     ui: ChatUIConfig = Field(default_factory=ChatUIConfig)
     workspace: AssistantWorkspaceConfig = Field(
         default_factory=AssistantWorkspaceConfig
@@ -90,6 +92,7 @@ def load_streamlit_assistant_config(path: Path) -> StreamlitAssistantConfig:
         "session",
         "tool_limits",
         "policy",
+        "protection",
         "ui",
         "workspace",
         "research",

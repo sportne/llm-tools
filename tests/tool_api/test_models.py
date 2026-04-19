@@ -240,6 +240,7 @@ def test_execution_record_serializes_nested_models_and_error_codes() -> None:
         "logs": ["starting"],
         "artifacts": ["trace.json"],
         "metadata": {"provider": "test"},
+        "source_provenance": [],
     }
 
 

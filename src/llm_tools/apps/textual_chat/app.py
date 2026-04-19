@@ -16,6 +16,10 @@ from llm_tools.apps.chat_controls import (
     build_chat_control_state,
     build_startup_message,
 )
+from llm_tools.apps.protection_runtime import (
+    build_protection_controller,
+    build_protection_environment,
+)
 from llm_tools.apps.textual_chat.controller import (
     ChatScreenController,
     build_available_tool_specs,
@@ -348,6 +352,21 @@ class ChatScreen(Screen[None]):
             if provider is None:
                 raise RuntimeError("Chat provider is not configured.")
             registry, executor = build_chat_executor(self)
+            protection_controller = build_protection_controller(
+                config=self._config.protection,
+                provider=provider,
+                environment=build_protection_environment(
+                    app_name="textual_chat",
+                    model_name=self._active_model_name,
+                    workspace=str(self._root_path)
+                    if self._root_path is not None
+                    else None,
+                    enabled_tools=self._enabled_tools,
+                    allow_network=False,
+                    allow_filesystem=True,
+                    allow_subprocess=False,
+                ),
+            )
             runner = run_interactive_chat_session_turn(
                 user_message=user_message,
                 session_state=self._session_state,
@@ -359,6 +378,7 @@ class ChatScreen(Screen[None]):
                 tool_limits=self._config.tool_limits,
                 redaction_config=self._config.policy.redaction,
                 temperature=self._config.llm.temperature,
+                protection_controller=protection_controller,
             )
             self._active_runner = runner
             for event in runner:
