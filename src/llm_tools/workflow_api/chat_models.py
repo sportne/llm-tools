@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from llm_tools.tool_api import ToolResult
 from llm_tools.workflow_api.models import ApprovalRequest
+from llm_tools.workflow_api.protection import ProtectionPendingPrompt
 
 ChatWorkflowTurnStatus = Literal["completed", "needs_continuation", "interrupted"]
 ChatMessageRole = Literal["system", "user", "assistant", "tool"]
@@ -197,6 +198,7 @@ class ChatSessionState(BaseModel):
 
     turns: list[ChatSessionTurnRecord] = Field(default_factory=list)
     active_context_start_turn: int = Field(default=0, ge=0)
+    pending_protection_prompt: ProtectionPendingPrompt | None = None
 
     @model_validator(mode="after")
     def validate_active_context_start_turn(self) -> ChatSessionState:
@@ -217,6 +219,7 @@ class ChatWorkflowTurnResult(BaseModel):
     tool_results: list[ToolResult] = Field(default_factory=list)
     continuation_reason: str | None = None
     interruption_reason: str | None = None
+    pending_protection_prompt: ProtectionPendingPrompt | None = None
     session_state: ChatSessionState | None = None
     context_warning: str | None = None
 

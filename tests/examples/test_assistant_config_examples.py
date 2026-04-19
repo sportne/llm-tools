@@ -15,6 +15,7 @@ from llm_tools.apps.assistant_config import (
 from llm_tools.apps.chat_config import ChatLLMConfig, ChatPolicyConfig, ChatUIConfig
 from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import ChatSessionConfig
+from llm_tools.workflow_api.protection import ProtectionConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES_DIR = REPO_ROOT / "examples" / "assistant_configs"
@@ -24,6 +25,7 @@ SECTION_MODELS = {
     "session": ChatSessionConfig,
     "tool_limits": ToolLimits,
     "policy": ChatPolicyConfig,
+    "protection": ProtectionConfig,
     "ui": ChatUIConfig,
     "workspace": AssistantWorkspaceConfig,
     "research": AssistantResearchConfig,

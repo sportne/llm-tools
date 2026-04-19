@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 from llm_tools.tool_api import (
     SideEffectClass,
+    SourceProvenanceRef,
     Tool,
     ToolContext,
     ToolRegistry,
@@ -35,6 +37,21 @@ from llm_tools.tools.filesystem.models import (
     SourceFilters,
     ToolLimits,
 )
+
+
+def _append_local_source_provenance(
+    context: ToolContext, *, resolved_path: Path
+) -> None:
+    source_id = str(resolved_path.resolve())
+    context.source_provenance.append(
+        SourceProvenanceRef(
+            source_kind="local_file",
+            source_id=source_id,
+            content_hash=hashlib.sha256(source_id.encode("utf-8")).hexdigest(),
+            whole_source_reproduction_allowed=True,
+            metadata={"path": source_id},
+        )
+    )
 
 
 def _require_repository_metadata(
@@ -77,8 +94,10 @@ class ReadFileTool(Tool[ReadFileInput, ReadFileOutput]):
             start_char=args.start_char,
             end_char=args.end_char,
         )
+        resolved_path = (root_path / args.path).resolve()
         context.logs.append(f"Read file '{args.path}'.")
-        context.artifacts.append(str((root_path / args.path).resolve()))
+        context.artifacts.append(str(resolved_path))
+        _append_local_source_provenance(context, resolved_path=resolved_path)
         return ReadFileOutput.model_validate(result.model_dump(mode="json"))
 
 

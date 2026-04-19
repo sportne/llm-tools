@@ -36,6 +36,9 @@ policy:
     - run_git_diff
     - run_git_log
 
+protection:
+  enabled: false
+
 ui:
   show_token_usage: true
   show_footer_help: true
