@@ -14,6 +14,7 @@ from llm_tools.tool_api import SideEffectClass
 from llm_tools.tool_api.redaction import RedactionConfig
 from llm_tools.tools.filesystem import SourceFilters, ToolLimits
 from llm_tools.workflow_api import ChatSessionConfig
+from llm_tools.workflow_api.protection import ProtectionConfig
 
 
 class ProviderPreset(str, Enum):  # noqa: UP042
@@ -128,6 +129,7 @@ class TextualChatConfig(BaseModel):
     session: ChatSessionConfig = Field(default_factory=ChatSessionConfig)
     tool_limits: ToolLimits = Field(default_factory=ToolLimits)
     policy: ChatPolicyConfig = Field(default_factory=ChatPolicyConfig)
+    protection: ProtectionConfig = Field(default_factory=ProtectionConfig)
     ui: ChatUIConfig = Field(default_factory=ChatUIConfig)
 
 
@@ -156,6 +158,7 @@ def load_textual_chat_config(path: Path) -> TextualChatConfig:
         "session",
         "tool_limits",
         "policy",
+        "protection",
         "ui",
     ):
         section_value = raw.get(section_name)

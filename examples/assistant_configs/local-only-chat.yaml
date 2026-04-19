@@ -33,6 +33,9 @@ policy:
     - read_file
     - search_text
 
+protection:
+  enabled: false
+
 ui:
   show_token_usage: true
   show_footer_help: true

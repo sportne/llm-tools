@@ -69,6 +69,22 @@ class ToolSpec(BaseModel):
     cost_hint: str | None = None
 
 
+class SourceProvenanceRef(BaseModel):
+    """Structured reference to a source material visible to a tool invocation."""
+
+    source_kind: str = Field(min_length=1)
+    source_id: str = Field(min_length=1)
+    content_hash: str = Field(min_length=1)
+    whole_source_reproduction_allowed: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProtectionProvenanceSnapshot(BaseModel):
+    """Collection of source references currently visible to protection checks."""
+
+    sources: list[SourceProvenanceRef] = Field(default_factory=list)
+
+
 class ToolContext(BaseModel):
     """Runtime context for a single tool invocation."""
 
@@ -77,6 +93,7 @@ class ToolContext(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     logs: list[str] = Field(default_factory=list)
     artifacts: list[str] = Field(default_factory=list)
+    source_provenance: list[SourceProvenanceRef] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -108,6 +125,7 @@ class ToolResult(BaseModel):
 
     logs: list[str] = Field(default_factory=list)
     artifacts: list[str] = Field(default_factory=list)
+    source_provenance: list[SourceProvenanceRef] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -143,4 +161,5 @@ class ExecutionRecord(BaseModel):
     policy_decision: PolicyDecision | None = None
     logs: list[str] = Field(default_factory=list)
     artifacts: list[str] = Field(default_factory=list)
+    source_provenance: list[SourceProvenanceRef] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)

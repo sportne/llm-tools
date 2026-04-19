@@ -32,6 +32,10 @@ from llm_tools.apps.assistant_runtime import (
 )
 from llm_tools.apps.chat_presentation import format_citation, pretty_json
 from llm_tools.apps.chat_runtime import create_provider
+from llm_tools.apps.protection_runtime import (
+    build_protection_controller,
+    build_protection_environment,
+)
 from llm_tools.apps.streamlit_chat.models import (
     StreamlitInspectorEntry,
     StreamlitPersistedSessionRecord,
@@ -741,6 +745,19 @@ def _build_assistant_runner(
         root=root,
         env=dict(os.environ),
     )
+    protection_controller = build_protection_controller(
+        config=config.protection,
+        provider=provider,
+        environment=build_protection_environment(
+            app_name="streamlit_assistant",
+            model_name=runtime.model_name,
+            workspace=runtime.root_path,
+            enabled_tools=sorted(exposed_tool_names),
+            allow_network=runtime.allow_network,
+            allow_filesystem=runtime.allow_filesystem and root is not None,
+            allow_subprocess=runtime.allow_subprocess and root is not None,
+        ),
+    )
     return run_interactive_chat_session_turn(
         user_message=user_message,
         session_state=session_state,
@@ -761,6 +778,7 @@ def _build_assistant_runner(
         tool_limits=config.tool_limits,
         redaction_config=config.policy.redaction,
         temperature=config.llm.temperature,
+        protection_controller=protection_controller,
     )
 
 
@@ -1443,6 +1461,10 @@ def _build_research_controller(
             tool_registry=registry,
             enabled_tool_names=exposed_tool_names,
             workspace_enabled=root is not None,
+            workspace=str(root) if root is not None else None,
+            allow_network=runtime.allow_network,
+            allow_filesystem=runtime.allow_filesystem and root is not None,
+            allow_subprocess=runtime.allow_subprocess and root is not None,
         )
         return HarnessSessionService(
             store=FileHarnessStateStore(_research_store_dir(config)),

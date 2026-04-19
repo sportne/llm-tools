@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from llm_tools.tool_api import (
     SideEffectClass,
+    SourceProvenanceRef,
     Tool,
     ToolContext,
     ToolRegistry,
@@ -40,6 +41,23 @@ _CONFLUENCE_ENV_KEYS = (
     "CONFLUENCE_API_TOKEN",
 )
 _INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1F]')
+
+
+def _append_remote_source_provenance(
+    context: ToolContext,
+    *,
+    source_kind: str,
+    source_id: str,
+) -> None:
+    context.source_provenance.append(
+        SourceProvenanceRef(
+            source_kind=source_kind,
+            source_id=source_id,
+            content_hash=hashlib.sha256(source_id.encode("utf-8")).hexdigest(),
+            whole_source_reproduction_allowed=True,
+            metadata={"source_id": source_id},
+        )
+    )
 
 
 def _get_required_env(context: ToolContext, key: str, label: str) -> str:
@@ -659,6 +677,11 @@ class ReadBitbucketFileTool(Tool[ReadBitbucketFileInput, ReadBitbucketFileOutput
             f"'{args.path}' from '{args.project_key}/{args.repository_slug}'."
         )
         context.artifacts.append(resolved_path)
+        _append_remote_source_provenance(
+            context,
+            source_kind="bitbucket_file",
+            source_id=resolved_path,
+        )
         return ReadBitbucketFileOutput(
             project_key=args.project_key,
             repository_slug=args.repository_slug,
@@ -938,8 +961,14 @@ class ReadConfluenceContentTool(
                 start_char=args.start_char,
                 end_char=args.end_char,
             )
+            page_source_id = page_web_url or f"confluence:page:{args.page_id}"
             context.logs.append(f"Read Confluence page '{args.page_id}'.")
-            context.artifacts.append(page_web_url or f"confluence:page:{args.page_id}")
+            context.artifacts.append(page_source_id)
+            _append_remote_source_provenance(
+                context,
+                source_kind="confluence_page",
+                source_id=page_source_id,
+            )
             return ReadConfluenceContentOutput(
                 page_id=args.page_id,
                 mode="page",
@@ -978,13 +1007,19 @@ class ReadConfluenceContentTool(
             start_char=args.start_char,
             end_char=args.end_char,
         )
+        attachment_source_id = (
+            attachment_url
+            or f"confluence:page:{args.page_id}:attachment:{attachment_title}"
+        )
         context.logs.append(
             "Read Confluence attachment "
             f"'{attachment_title or args.attachment_id}' from page '{args.page_id}'."
         )
-        context.artifacts.append(
-            attachment_url
-            or f"confluence:page:{args.page_id}:attachment:{attachment_title}"
+        context.artifacts.append(attachment_source_id)
+        _append_remote_source_provenance(
+            context,
+            source_kind="confluence_attachment",
+            source_id=attachment_source_id,
         )
         return ReadConfluenceContentOutput(
             page_id=args.page_id,

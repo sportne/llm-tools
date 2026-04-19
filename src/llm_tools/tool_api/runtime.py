@@ -398,8 +398,8 @@ class ToolRuntime:
     ) -> ToolResult:
         state.ok = True
         self._apply_observability_redaction(state, context)
-        result = self._normalize_result(state, error=None)
-        record = self._record_execution(state)
+        result = self._normalize_result(state, context=context, error=None)
+        record = self._record_execution(state, context=context)
         result.metadata["execution_record"] = record.model_dump(mode="json")
         return result
 
@@ -413,8 +413,8 @@ class ToolRuntime:
         redacted_error = self._redact_error_details(state, error)
         state.error_code = redacted_error.code
         self._apply_observability_redaction(state, context)
-        result = self._normalize_result(state, error=redacted_error)
-        record = self._record_execution(state)
+        result = self._normalize_result(state, context=context, error=redacted_error)
+        record = self._record_execution(state, context=context)
         result.metadata["execution_record"] = record.model_dump(mode="json")
         return result
 
@@ -422,6 +422,7 @@ class ToolRuntime:
         self,
         state: _ExecutionState,
         *,
+        context: ToolContext,
         error: ToolError | None,
     ) -> ToolResult:
         return ToolResult(
@@ -432,9 +433,17 @@ class ToolRuntime:
             error=error,
             logs=list(state.logs or []),
             artifacts=list(state.artifacts or []),
+            source_provenance=[
+                entry.model_copy(deep=True) for entry in context.source_provenance
+            ],
         )
 
-    def _record_execution(self, state: _ExecutionState) -> ExecutionRecord:
+    def _record_execution(
+        self,
+        state: _ExecutionState,
+        *,
+        context: ToolContext,
+    ) -> ExecutionRecord:
         ended_at = self._utc_now()
         logs, artifacts = self._snapshot_observability(state)
         return ExecutionRecord(
@@ -454,6 +463,9 @@ class ToolRuntime:
             policy_decision=state.policy_decision,
             logs=logs,
             artifacts=artifacts,
+            source_provenance=[
+                entry.model_copy(deep=True) for entry in context.source_provenance
+            ],
             metadata={
                 "redaction": self._redaction_metadata(state),
             },

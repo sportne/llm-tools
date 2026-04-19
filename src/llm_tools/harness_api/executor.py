@@ -17,6 +17,7 @@ from llm_tools.harness_api.models import (
     TurnDecision,
     TurnDecisionAction,
 )
+from llm_tools.harness_api.protection import scrub_state_for_protection
 from llm_tools.harness_api.replay import (
     StoredHarnessArtifacts,
     build_stored_artifacts,
@@ -801,6 +802,15 @@ class HarnessExecutor:
             },
             deep=True,
         )
+        protection_review = context.metadata.get("protection_review", {})
+        if isinstance(protection_review, dict) and protection_review.get(
+            "purge_requested"
+        ):
+            new_state = scrub_state_for_protection(
+                new_state,
+                safe_message=protection_review.get("safe_message"),
+            )
+            finalized_turn = new_state.turns[-1]
         return self._save_with_conflict_retry(
             base_snapshot=base_snapshot,
             new_state=new_state,
@@ -857,6 +867,15 @@ class HarnessExecutor:
             },
             deep=True,
         )
+        protection_review = context.metadata.get("protection_review", {})
+        if isinstance(protection_review, dict) and protection_review.get(
+            "purge_requested"
+        ):
+            new_state = scrub_state_for_protection(
+                new_state,
+                safe_message=protection_review.get("safe_message"),
+            )
+            finalized_turn = new_state.turns[-1]
         return self._save_with_conflict_retry(
             base_snapshot=base_snapshot,
             new_state=new_state,
