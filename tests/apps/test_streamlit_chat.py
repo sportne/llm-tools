@@ -787,6 +787,20 @@ def test_streamlit_chat_theme_css_covers_widget_surfaces() -> None:
     assert '[data-testid="stCode"]' in css
     assert '[data-testid="stCodeBlock"]' in css
     assert '[data-testid="stHeader"]' in css
+    assert '[data-testid="stExpandSidebarButton"]' in css
+    assert '[data-testid="stExpandSidebarButton"]:hover' in css
+    assert '[data-testid="stExpandSidebarButton"]:focus-visible' in css
+    assert '[data-testid="stSidebarCollapseButton"]' in css
+    assert '[data-testid="stSidebarCollapseButton"] button:hover' in css
+    assert '[data-testid="stSidebarCollapseButton"] button:focus-visible' in css
+    assert 'button svg path' in css
+    assert '[data-testid="stIconMaterial"]' in css
+    assert "background: var(--llm-tools-surface) !important;" in css
+    assert "border: 1px solid var(--llm-tools-border) !important;" in css
+    assert "color: var(--llm-tools-text) !important;" in css
+    assert "fill: var(--llm-tools-text) !important;" in css
+    assert "stroke: var(--llm-tools-text) !important;" in css
+    assert "box-shadow: 0 10px 24px var(--llm-tools-shadow);" in css
     assert ".stAppToolbar" in css
     assert ".stMainBlockContainer" in css
     assert ".stMain .block-container" in css
