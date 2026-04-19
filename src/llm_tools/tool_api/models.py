@@ -64,9 +64,11 @@ class ToolSpec(BaseModel):
     requires_network: bool = False
     requires_filesystem: bool = False
     requires_subprocess: bool = False
+    writes_internal_workspace_cache: bool = False
     required_secrets: list[str] = Field(default_factory=list)
 
     cost_hint: str | None = None
+    retain_output_in_execution_record: bool = True
 
 
 class SourceProvenanceRef(BaseModel):

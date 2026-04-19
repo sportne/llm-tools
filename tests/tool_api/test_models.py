@@ -106,6 +106,7 @@ def test_tool_spec_defaults_match_the_canonical_contract() -> None:
     assert spec.requires_subprocess is False
     assert spec.required_secrets == []
     assert spec.cost_hint is None
+    assert spec.retain_output_in_execution_record is True
 
 
 def test_tool_context_defaults_include_observability_sinks() -> None:
@@ -185,8 +186,10 @@ def test_tool_spec_serializes_enums_as_json_values() -> None:
         "requires_network": True,
         "requires_filesystem": False,
         "requires_subprocess": False,
+        "writes_internal_workspace_cache": False,
         "required_secrets": [],
         "cost_hint": None,
+        "retain_output_in_execution_record": True,
     }
 
 

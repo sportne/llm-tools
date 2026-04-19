@@ -23,6 +23,14 @@ LOCAL_READ_SPEC = ToolSpec(
     side_effects=SideEffectClass.LOCAL_READ,
     requires_filesystem=True,
 )
+CACHE_WRITING_READ_SPEC = ToolSpec(
+    name="cached_read_file",
+    description="Read a file and populate internal cache.",
+    tags=["filesystem", "read"],
+    side_effects=SideEffectClass.LOCAL_READ,
+    requires_filesystem=True,
+    writes_internal_workspace_cache=True,
+)
 LOCAL_WRITE_SPEC = ToolSpec(
     name="write_file",
     description="Write a file.",
@@ -70,6 +78,23 @@ def test_default_policy_allows_local_read_tools() -> None:
 
     assert decision.allowed is True
     assert decision.reason == "allowed"
+
+
+def test_default_policy_allows_internal_workspace_cache_writes() -> None:
+    decision = ToolPolicy().evaluate(CACHE_WRITING_READ_SPEC, _context())
+
+    assert decision.allowed is True
+    assert decision.reason == "allowed"
+
+
+def test_internal_workspace_cache_writes_can_be_denied_separately() -> None:
+    decision = ToolPolicy(allow_internal_workspace_cache_writes=False).evaluate(
+        CACHE_WRITING_READ_SPEC, _context()
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "internal workspace cache writes denied"
+    assert decision.metadata["writes_internal_workspace_cache"] is True
 
 
 def test_default_policy_denies_local_write_tools() -> None:

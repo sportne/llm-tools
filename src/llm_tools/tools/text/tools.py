@@ -11,6 +11,8 @@ from llm_tools.tool_api import (
     ToolRegistry,
     ToolSpec,
 )
+from llm_tools.tool_api.execution import get_workspace_root
+from llm_tools.tools.filesystem._content import _get_read_file_cache_root
 from llm_tools.tools.filesystem.models import SourceFilters, ToolLimits
 from llm_tools.tools.text._ops import search_text_impl
 from llm_tools.tools.text.models import TextSearchResult
@@ -41,6 +43,7 @@ class SearchTextTool(Tool[SearchTextInput, SearchTextOutput]):
         tags=["text", "search", "read"],
         side_effects=SideEffectClass.LOCAL_READ,
         requires_filesystem=True,
+        writes_internal_workspace_cache=True,
     )
     input_model = SearchTextInput
     output_model = SearchTextOutput
@@ -50,8 +53,7 @@ class SearchTextTool(Tool[SearchTextInput, SearchTextOutput]):
         context: ToolExecutionContext,
         args: SearchTextInput,
     ) -> SearchTextOutput:
-        filesystem = context.services.require_filesystem()
-        root_path = filesystem.workspace_root()
+        root_path = get_workspace_root(context)
         source_filters, tool_limits = _require_repository_metadata(context)
         result = search_text_impl(
             root_path,
@@ -59,6 +61,7 @@ class SearchTextTool(Tool[SearchTextInput, SearchTextOutput]):
             args.path,
             source_filters=source_filters,
             tool_limits=tool_limits,
+            cache_root=_get_read_file_cache_root(root_path),
         )
         context.log(f"Searched text for '{args.query}'.")
         return SearchTextOutput.model_validate(result.model_dump(mode="json"))

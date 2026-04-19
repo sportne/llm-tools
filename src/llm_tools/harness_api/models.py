@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from enum import Enum
 
 from pydantic import BaseModel, Field, model_validator
@@ -246,6 +246,31 @@ class PendingApprovalRecord(BaseModel):
                 "pending_index must reference an invocation in parsed_response."
             )
         return self
+
+
+def sanitize_pending_approval_context(context: ToolContext) -> ToolContext:
+    """Return the durable subset of tool context safe to persist."""
+    return context.model_copy(
+        update={
+            "env": {},
+            "logs": [],
+            "artifacts": [],
+            "source_provenance": [],
+        },
+        deep=True,
+    )
+
+
+def rehydrate_pending_approval_context(
+    context: ToolContext,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> ToolContext:
+    """Rebuild a persisted approval context with the current process env."""
+    return context.model_copy(
+        update={"env": dict(env or {})},
+        deep=True,
+    )
 
 
 class HarnessTurn(BaseModel):

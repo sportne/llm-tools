@@ -34,6 +34,7 @@ from llm_tools.tool_api.models import (
     ErrorCode,
     ExecutionRecord,
     PolicyDecision,
+    SideEffectClass,
     SourceProvenanceRef,
     ToolError,
     ToolInvocationRequest,
@@ -67,6 +68,7 @@ class _ExecutionState:
     redacted_input: dict[str, Any] | None = None
     validated_output: dict[str, Any] | None = None
     redacted_output: dict[str, Any] | None = None
+    retain_output_in_execution_record: bool = True
     policy_decision: PolicyDecision | None = None
     logs: list[str] | None = None
     artifacts: list[str] | None = None
@@ -147,6 +149,9 @@ class ToolRuntime:
 
         state.tool_name = tool.spec.name
         state.tool_version = tool.spec.version
+        state.retain_output_in_execution_record = (
+            tool.spec.retain_output_in_execution_record
+        )
         redactor = self._new_redactor(state.tool_name)
         state.redaction_summary = redactor.summary
 
@@ -235,15 +240,7 @@ class ToolRuntime:
                 state,
                 context,
                 execution_context if "execution_context" in locals() else None,
-                self._make_error(
-                    code=ErrorCode.EXECUTION_FAILED,
-                    message=f"Tool '{state.tool_name}' execution failed.",
-                    details={
-                        "tool_name": state.tool_name,
-                        "exception_type": type(exc).__name__,
-                        "exception_message": str(exc),
-                    },
-                ),
+                self._make_execution_failed_error(state, tool, exc),
             )
 
         try:
@@ -320,6 +317,9 @@ class ToolRuntime:
 
         state.tool_name = tool.spec.name
         state.tool_version = tool.spec.version
+        state.retain_output_in_execution_record = (
+            tool.spec.retain_output_in_execution_record
+        )
         redactor = self._new_redactor(state.tool_name)
         state.redaction_summary = redactor.summary
 
@@ -412,15 +412,7 @@ class ToolRuntime:
                 state,
                 context,
                 execution_context if "execution_context" in locals() else None,
-                self._make_error(
-                    code=ErrorCode.EXECUTION_FAILED,
-                    message=f"Tool '{state.tool_name}' execution failed.",
-                    details={
-                        "tool_name": state.tool_name,
-                        "exception_type": type(exc).__name__,
-                        "exception_message": str(exc),
-                    },
-                ),
+                self._make_execution_failed_error(state, tool, exc),
             )
 
         try:
@@ -690,8 +682,16 @@ class ToolRuntime:
             request=record_request,
             validated_input=state.validated_input,
             redacted_input=state.redacted_input,
-            validated_output=state.validated_output,
-            redacted_output=state.redacted_output,
+            validated_output=(
+                state.validated_output
+                if state.retain_output_in_execution_record
+                else None
+            ),
+            redacted_output=(
+                state.redacted_output
+                if state.retain_output_in_execution_record
+                else None
+            ),
             ok=state.ok,
             error_code=state.error_code,
             policy_decision=state.policy_decision,
@@ -822,6 +822,39 @@ class ToolRuntime:
             code=code,
             message=message,
             details=details or {},
+        )
+
+    def _make_execution_failed_error(
+        self,
+        state: _ExecutionState,
+        tool: Tool[Any, Any],
+        exc: Exception,
+    ) -> ToolError:
+        details: dict[str, Any] = {
+            "tool_name": state.tool_name,
+            "exception_type": type(exc).__name__,
+        }
+        if self._should_suppress_exception_message(tool):
+            details["failure_reason"] = "filesystem_target_invalid_or_unavailable"
+        else:
+            details["exception_message"] = str(exc)
+        return self._make_error(
+            code=ErrorCode.EXECUTION_FAILED,
+            message=f"Tool '{state.tool_name}' execution failed.",
+            details=details,
+        )
+
+    @staticmethod
+    def _should_suppress_exception_message(tool: Tool[Any, Any]) -> bool:
+        spec = tool.spec
+        return (
+            spec.requires_filesystem
+            and spec.side_effects
+            in {
+                SideEffectClass.LOCAL_READ,
+                SideEffectClass.LOCAL_WRITE,
+            }
+            and bool({"filesystem", "text"}.intersection(spec.tags))
         )
 
     def _make_runtime_error(

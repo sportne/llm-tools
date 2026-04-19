@@ -143,6 +143,7 @@ def _build_text_read_result(
             status=cast(Any, status),
             content=None,
             file_size_bytes=file_size_bytes,
+            max_read_input_bytes=tool_limits.max_read_input_bytes,
             max_file_size_characters=tool_limits.max_file_size_characters,
             full_read_char_limit=full_read_char_limit,
             error_message=error_message,
@@ -158,6 +159,7 @@ def _build_text_read_result(
             content=None,
             character_count=character_count,
             file_size_bytes=file_size_bytes,
+            max_read_input_bytes=tool_limits.max_read_input_bytes,
             max_file_size_characters=tool_limits.max_file_size_characters,
             full_read_char_limit=full_read_char_limit,
             estimated_token_count=estimate_token_count(content),
@@ -184,6 +186,7 @@ def _build_text_read_result(
         start_char=normalized_start,
         end_char=truncated_end,
         file_size_bytes=file_size_bytes,
+        max_read_input_bytes=tool_limits.max_read_input_bytes,
         max_file_size_characters=tool_limits.max_file_size_characters,
         full_read_char_limit=full_read_char_limit,
         estimated_token_count=estimate_token_count(content_slice),
@@ -199,7 +202,11 @@ def _build_attachment_read_result(
     start_char: int | None = None,
     end_char: int | None = None,
 ) -> FileReadResult:
-    loaded_content = load_readable_content(cached_path)
+    loaded_content = load_readable_content(
+        cached_path,
+        tool_limits=tool_limits,
+        cache_root=_get_confluence_attachment_cache_root(),
+    )
     status = loaded_content.status
     return _build_text_read_result(
         requested_path=requested_path,

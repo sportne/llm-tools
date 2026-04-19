@@ -32,6 +32,7 @@ from llm_tools.llm_adapters import ParsedModelResponse
 from llm_tools.tool_api import (
     ErrorCode,
     SideEffectClass,
+    SourceProvenanceRef,
     Tool,
     ToolContext,
     ToolError,
@@ -75,6 +76,27 @@ class _WorkTool(Tool[_WorkInput, _WorkOutput]):
         return _WorkOutput(value=args.value)
 
 
+class _EnvEchoInput(BaseModel):
+    key: str
+
+
+class _EnvEchoOutput(BaseModel):
+    value: str
+
+
+class _EnvEchoTool(Tool[_EnvEchoInput, _EnvEchoOutput]):
+    spec = ToolSpec(
+        name="env_echo",
+        description="Return one value from the tool context env.",
+        side_effects=SideEffectClass.NONE,
+    )
+    input_model = _EnvEchoInput
+    output_model = _EnvEchoOutput
+
+    def invoke(self, context: ToolContext, args: _EnvEchoInput) -> _EnvEchoOutput:
+        return _EnvEchoOutput(value=context.env.get(args.key, ""))
+
+
 class _StaticDriver:
     def __init__(
         self,
@@ -82,6 +104,11 @@ class _StaticDriver:
         workspace: Path,
         selected_task_ids: list[str] | None = None,
         payloads: list[ParsedModelResponse | Exception] | None = None,
+        context_env: dict[str, str] | None = None,
+        context_logs: list[str] | None = None,
+        context_artifacts: list[str] | None = None,
+        context_source_provenance: list[SourceProvenanceRef] | None = None,
+        context_metadata: dict[str, object] | None = None,
     ) -> None:
         self.workspace = workspace
         self._selected_task_ids = selected_task_ids or ["task-1"]
@@ -96,6 +123,11 @@ class _StaticDriver:
             ]
         )
         self.run_calls = 0
+        self._context_env = dict(context_env or {})
+        self._context_logs = list(context_logs or [])
+        self._context_artifacts = list(context_artifacts or [])
+        self._context_source_provenance = list(context_source_provenance or [])
+        self._context_metadata = dict(context_metadata or {})
 
     def select_task_ids(self, *, state: HarnessState) -> list[str]:
         if state.session.stop_reason is not None:
@@ -118,6 +150,11 @@ class _StaticDriver:
         return ToolContext(
             invocation_id=f"turn-{turn_index}",
             workspace=str(self.workspace),
+            env=dict(self._context_env),
+            logs=list(self._context_logs),
+            artifacts=list(self._context_artifacts),
+            source_provenance=list(self._context_source_provenance),
+            metadata=dict(self._context_metadata),
         )
 
     def run_turn(
@@ -235,6 +272,7 @@ class _ConflictOnceStore(InMemoryHarnessStateStore):
 def _workflow_executor(tmp_path: Path) -> WorkflowExecutor:
     registry = ToolRegistry()
     registry.register(_WorkTool())
+    registry.register(_EnvEchoTool())
     register_filesystem_tools(registry)
     return WorkflowExecutor(
         registry,
@@ -392,6 +430,17 @@ def test_harness_executor_persists_pending_approval_and_can_resume(
                 ]
             )
         ],
+        context_env={"PERSISTED_SECRET": "should-not-save"},
+        context_logs=["driver-log"],
+        context_artifacts=["artifact-ref"],
+        context_source_provenance=[
+            SourceProvenanceRef(
+                source_kind="file",
+                source_id="README.md",
+                content_hash="abc123",
+            )
+        ],
+        context_metadata={"keep": "yes"},
     )
     executor = HarnessExecutor(
         store=store,
@@ -405,6 +454,12 @@ def test_harness_executor_persists_pending_approval_and_can_resume(
     assert waiting.resumed.disposition is ResumeDisposition.WAITING_FOR_APPROVAL
     assert len(waiting.snapshot.state.pending_approvals) == 1
     assert waiting.snapshot.state.turns[-1].decision is None
+    pending = waiting.snapshot.state.pending_approvals[0]
+    assert pending.base_context.metadata == {"keep": "yes"}
+    assert pending.base_context.env == {}
+    assert pending.base_context.logs == []
+    assert pending.base_context.artifacts == []
+    assert pending.base_context.source_provenance == []
 
     approved = executor.resume(
         waiting.snapshot.session_id,
@@ -419,6 +474,47 @@ def test_harness_executor_persists_pending_approval_and_can_resume(
         approved.snapshot.state.turns[-1].workflow_result.outcomes[0].status
         is WorkflowInvocationStatus.EXECUTED
     )
+
+
+def test_harness_executor_resume_rehydrates_current_environment(
+    tmp_path: Path,
+    _workflow_executor: WorkflowExecutor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("HARNESS_RESUME_SECRET", raising=False)
+    store = InMemoryHarnessStateStore()
+    driver = _StaticDriver(
+        workspace=tmp_path,
+        payloads=[
+            ParsedModelResponse(
+                invocations=[
+                    {"tool_name": "list_directory", "arguments": {"path": "."}},
+                    {
+                        "tool_name": "env_echo",
+                        "arguments": {"key": "HARNESS_RESUME_SECRET"},
+                    },
+                ]
+            )
+        ],
+    )
+    executor = HarnessExecutor(
+        store=store,
+        workflow_executor=_workflow_executor,
+        driver=driver,
+        applier=_RootTaskApplier(),
+    )
+
+    waiting = executor.run(_state())
+    monkeypatch.setenv("HARNESS_RESUME_SECRET", "available-on-resume")
+
+    approved = executor.resume(
+        waiting.snapshot.session_id,
+        approval_resolution=ApprovalResolution.APPROVE,
+    )
+
+    outcome = approved.snapshot.state.turns[-1].workflow_result.outcomes[1]
+    assert outcome.tool_result is not None
+    assert outcome.tool_result.output == {"value": "available-on-resume"}
 
 
 @pytest.mark.parametrize(

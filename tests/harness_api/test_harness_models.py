@@ -27,8 +27,16 @@ from llm_tools.harness_api import (
     VerificationOutcome,
     VerificationStatus,
 )
+from llm_tools.harness_api.models import (
+    rehydrate_pending_approval_context,
+    sanitize_pending_approval_context,
+)
 from llm_tools.llm_adapters import ParsedModelResponse
-from llm_tools.tool_api import ToolContext, ToolInvocationRequest
+from llm_tools.tool_api import (
+    SourceProvenanceRef,
+    ToolContext,
+    ToolInvocationRequest,
+)
 from llm_tools.workflow_api.models import ApprovalRequest, WorkflowTurnResult
 
 
@@ -70,6 +78,41 @@ def _pending_approval_record() -> PendingApprovalRecord:
         base_context=ToolContext(invocation_id="turn-1"),
         pending_index=1,
     )
+
+
+def test_pending_approval_context_helpers_scrub_and_rehydrate() -> None:
+    context = ToolContext(
+        invocation_id="turn-1",
+        workspace="/workspace",
+        env={"SECRET": "value"},
+        logs=["log"],
+        artifacts=["artifact"],
+        source_provenance=[
+            SourceProvenanceRef(
+                source_kind="file",
+                source_id="README.md",
+                content_hash="abc123",
+            )
+        ],
+        metadata={"keep": "yes"},
+    )
+
+    sanitized = sanitize_pending_approval_context(context)
+
+    assert sanitized.invocation_id == context.invocation_id
+    assert sanitized.workspace == context.workspace
+    assert sanitized.metadata == {"keep": "yes"}
+    assert sanitized.env == {}
+    assert sanitized.logs == []
+    assert sanitized.artifacts == []
+    assert sanitized.source_provenance == []
+
+    rehydrated = rehydrate_pending_approval_context(
+        sanitized, env={"CURRENT_SECRET": "present"}
+    )
+
+    assert rehydrated.env == {"CURRENT_SECRET": "present"}
+    assert rehydrated.metadata == sanitized.metadata
 
 
 def test_enum_values_are_stable() -> None:

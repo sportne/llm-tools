@@ -115,7 +115,7 @@ def test_harness_research_chat_example_loads_cleanly() -> None:
     assert config.llm.provider.value == "ollama"
     assert config.workspace.default_root == "."
     assert config.research.enabled is True
-    assert config.research.store_dir == ".llm-tools/research"
+    assert config.research.store_dir is None
     assert config.research.max_recent_sessions == 8
     assert config.research.default_max_turns == 12
     assert config.research.default_max_tool_invocations == 48

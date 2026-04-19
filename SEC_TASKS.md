@@ -9,7 +9,7 @@ The goal is to evaluate the codebase module by module and as an integrated
 system so repository security status can be stated with high confidence.
 
 The root `SEC_TASKS.md` remains the canonical backlog for security review
-execution and post-review hardening follow-up in this repository.
+execution and for tracking security hardening follow-up in this repository.
 
 ## Status conventions
 
@@ -21,14 +21,17 @@ execution and post-review hardening follow-up in this repository.
 ## Current state
 
 - The codebase has explicit architectural layers enforced by tests.
-- Central runtime mediation, policy, and redaction exist in `tool_api`.
+- Central runtime mediation, policy, and redaction exist in `tool_api`, and
+  recent hardening has landed in runtime safety and output-retention handling.
 - Security-sensitive shipped surfaces include filesystem, network, and
   subprocess-capable tools, OpenAI-compatible provider integration, persisted
-  harness sessions, and interactive app and CLI entrypoints.
-- `streamlit_chat` is deprecated but still shipped, so it remains in scope
-  until removed.
-- The repository already includes security-relevant tests, but it does not yet
-  have a dedicated security backlog document.
+  harness sessions, and assistant and CLI entrypoints.
+- `streamlit_chat` has been removed from shipped surfaces; remaining app review
+  scope centers on `streamlit_assistant`, `harness_cli`, and shared app
+  compatibility code that still affects those entrypoints.
+- This document is the dedicated security backlog, and recent hardening work
+  has already landed across `tool_api`, built-in tools, adapters and
+  providers, `harness_api`, and assistant-facing app defaults.
 
 ## Phased backlog
 
@@ -102,7 +105,7 @@ Phase 0 decisions:
   - a phase can be marked done only when its review is complete, all accepted
     findings are logged, and any deferred fixes are called out explicitly.
 
-### [ ] Phase 1: Core execution substrate (`tool_api`)
+### [~] Phase 1: Core execution substrate (`tool_api`)
 
 Outcome: validate that the central execution and policy layer enforces the
 intended safety invariants.
@@ -117,8 +120,11 @@ intended safety invariants.
   paths, and denial-of-service exposure.
 - [ ] Identify missing negative tests for policy bypass, unsafe defaults,
   oversized payloads, and malformed tool results.
+- [x] Landed hardening: tighten runtime safety, policy enforcement coverage,
+  and raw output-retention behavior touched by recent filesystem, text, and git
+  security fixes.
 
-### [ ] Phase 2: Tool implementations (`tools`)
+### [~] Phase 2: Tool implementations (`tools`)
 
 Outcome: assess every built-in tool family against its real side effects and
 trust boundaries.
@@ -134,8 +140,12 @@ trust boundaries.
   content assumptions.
 - [ ] Cross-check every built-in tool spec against actual side effects,
   capability flags, and required secrets.
+- [x] Landed hardening: filesystem and text path, cache, and runtime safety
+  updates are merged.
+- [x] Landed hardening: git tool subprocess, output-retention, and integration
+  safety updates are merged.
 
-### [ ] Phase 3: Model mediation path (`llm_adapters`, `llm_providers`, `workflow_api`)
+### [~] Phase 3: Model mediation path (`llm_adapters`, `llm_providers`, `workflow_api`)
 
 Outcome: confirm model output cannot bypass the typed execution boundary or
 silently widen privileges.
@@ -148,8 +158,10 @@ silently widen privileges.
   one-turn control flow for approval, replay, and partial-failure safety.
 - [ ] Identify attack paths where model-controlled content could trigger
   unexpected tool execution, unbounded work, or sensitive data disclosure.
+- [x] Landed hardening: adapter parsing and OpenAI-compatible provider fallback
+  coverage updates are merged.
 
-### [ ] Phase 4: Durable orchestration (`harness_api`)
+### [~] Phase 4: Durable orchestration (`harness_api`)
 
 Outcome: assess multi-turn session orchestration, persistence, replay, and
 verification as a security-critical control plane.
@@ -162,8 +174,10 @@ verification as a security-critical control plane.
   scrubbing for privilege escalation or leakage across turns.
 - [ ] Assess stop conditions, no-progress handling, retries, and recovery
   logic for abuse, infinite work, or unsafe resumptions.
+- [x] Landed hardening: harness approval persistence and session-safety updates
+  are merged.
 
-### [ ] Phase 5: User-facing surfaces (`apps`)
+### [~] Phase 5: User-facing surfaces (`apps`)
 
 Outcome: validate that interactive clients and CLI entrypoints preserve
 lower-layer security guarantees.
@@ -173,10 +187,13 @@ lower-layer security guarantees.
 - [ ] Review `streamlit_assistant` as the primary supported client for session
   isolation, persisted research controls, and prompt and config trust
   boundaries.
-- [ ] Review deprecated `streamlit_chat` because it still ships: session
-  persistence, export paths, approval UX, and deprecated-surface risk.
+- [ ] Review remaining app compatibility surfaces and shared repository-chat
+  helpers that still influence assistant or CLI behavior after
+  `streamlit_chat` removal.
 - [ ] Review `harness_cli` and related app entrypoints for unsafe argument
   handling, persistence assumptions, and bypass of normal protections.
+- [x] Landed hardening: assistant defaults, config examples, and related app
+  entrypoint protections are merged.
 
 ### [ ] Phase 6: System-of-systems and supply chain review
 

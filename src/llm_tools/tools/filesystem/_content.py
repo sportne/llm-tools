@@ -5,8 +5,8 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 import re
-import tempfile
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -47,6 +47,7 @@ _LOG4J_SIMPLE_LOGGER_ARG = (
 _MPXJ_JVM_LOCK = threading.Lock()
 _MPXJ_JVM_READY = False
 _MPXJ_READER_CLASS: Any | None = None
+_TOOL_CACHE_PATH_PARTS = (".llm_tools", "cache", "read_file")
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,37 +68,51 @@ class ConversionBackend:
     convert: Callable[[Path], str]
 
 
-def _get_read_file_cache_root() -> Path:
+def _get_read_file_cache_root(workspace_root: Path) -> Path:
     """Return the cache root for converted file content."""
-    return Path(tempfile.gettempdir()) / "llm_tools" / "read_file_cache"
+    return workspace_root.joinpath(*_TOOL_CACHE_PATH_PARTS)
 
 
-def _get_cached_conversion_paths(resolved: Path) -> tuple[Path, Path]:
+def _get_cached_conversion_paths(
+    resolved: Path, *, cache_root: Path
+) -> tuple[Path, Path]:
     """Return the markdown and metadata cache paths for a source file."""
     cache_key = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()
-    cache_dir = _get_read_file_cache_root() / cache_key
+    cache_dir = cache_root / cache_key
     return cache_dir / "content.md", cache_dir / "metadata.json"
 
 
-def _read_cached_conversion(resolved: Path) -> str | None:
+def _read_cached_conversion(resolved: Path, *, cache_root: Path) -> str | None:
     """Return cached converted markdown when the source has not changed."""
-    content_path, metadata_path = _get_cached_conversion_paths(resolved)
+    content_path, metadata_path = _get_cached_conversion_paths(
+        resolved, cache_root=cache_root
+    )
     if not content_path.exists() or not metadata_path.exists():
         return None
 
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    stat = resolved.stat()
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        stat = resolved.stat()
+    except (OSError, json.JSONDecodeError):
+        return None
     if (
         metadata.get("mtime_ns") != stat.st_mtime_ns
         or metadata.get("size_bytes") != stat.st_size
     ):
         return None
-    return content_path.read_text(encoding="utf-8")
+    try:
+        return content_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
 
 
-def _write_cached_conversion(resolved: Path, markdown: str) -> Path:
+def _write_cached_conversion(
+    resolved: Path, markdown: str, *, cache_root: Path
+) -> Path:
     """Persist converted markdown and source metadata for future reads."""
-    content_path, metadata_path = _get_cached_conversion_paths(resolved)
+    content_path, metadata_path = _get_cached_conversion_paths(
+        resolved, cache_root=cache_root
+    )
     content_path.parent.mkdir(parents=True, exist_ok=True)
     content_path.write_text(markdown, encoding="utf-8")
     stat = resolved.stat()
@@ -131,8 +146,42 @@ def read_searchable_text(path: Path) -> str | None:
     return content
 
 
-def load_readable_content(path: Path) -> LoadedReadableContent:
+def _default_read_kind(path: Path) -> FileReadKind:
+    """Return the default read kind inferred from one file path."""
+    backend = _get_conversion_backend(path)
+    if backend is not None:
+        return backend.read_kind
+    return "text"
+
+
+def _sanitize_conversion_error_message(exc: Exception) -> str:
+    """Return a stable conversion error message without leaking local paths."""
+    fallback = "Failed to extract readable content from the file"
+    message = str(exc).strip()
+    if not message or "\n" in message or "\r" in message:
+        return fallback
+    if any(sep in message for sep in (os.sep, "/", "\\")):
+        return fallback
+    if isinstance(exc, (ImportError, RuntimeError)):
+        return message
+    return fallback
+
+
+def load_readable_content(
+    path: Path,
+    *,
+    tool_limits: ToolLimits,
+    cache_root: Path | None = None,
+) -> LoadedReadableContent:
     """Return deterministic readable content for one file."""
+    if path.stat().st_size > tool_limits.max_read_input_bytes:
+        return LoadedReadableContent(
+            read_kind=_default_read_kind(path),
+            status="too_large",
+            content=None,
+            error_message="File exceeds the configured readable byte limit",
+        )
+
     text_content = read_searchable_text(path)
     if text_content is not None:
         return LoadedReadableContent(
@@ -148,13 +197,14 @@ def load_readable_content(path: Path) -> LoadedReadableContent:
             error_message="File type is not supported for repository reads",
         )
 
-    cached = _read_cached_conversion(path)
-    if cached is not None:
-        return LoadedReadableContent(
-            read_kind=backend.read_kind,
-            status="ok",
-            content=cached,
-        )
+    if cache_root is not None:
+        cached = _read_cached_conversion(path, cache_root=cache_root)
+        if cached is not None:
+            return LoadedReadableContent(
+                read_kind=backend.read_kind,
+                status="ok",
+                content=cached,
+            )
 
     try:
         converted = backend.convert(path)
@@ -163,10 +213,11 @@ def load_readable_content(path: Path) -> LoadedReadableContent:
             read_kind=backend.read_kind,
             status="error",
             content=None,
-            error_message=str(exc),
+            error_message=_sanitize_conversion_error_message(exc),
         )
 
-    _write_cached_conversion(path, converted)
+    if cache_root is not None:
+        _write_cached_conversion(path, converted, cache_root=cache_root)
     return LoadedReadableContent(
         read_kind=backend.read_kind,
         status="ok",
@@ -677,7 +728,10 @@ def build_file_info_result(
     size_bytes = resolved_file.stat().st_size
     content = loaded_content.content
     character_count = len(content) if content is not None else None
-    within_size_limit = is_within_character_limit(content, tool_limits=tool_limits)
+    within_size_limit = (
+        loaded_content.status != "too_large"
+        and is_within_character_limit(content, tool_limits=tool_limits)
+    )
     return FileInfoResult(
         requested_path=requested_path,
         resolved_path=resolved_path,
@@ -696,6 +750,7 @@ def build_file_info_result(
             if content is not None
             else None
         ),
+        max_read_input_bytes=tool_limits.max_read_input_bytes,
         max_file_size_characters=tool_limits.max_file_size_characters,
         within_size_limit=within_size_limit,
         full_read_char_limit=full_read_char_limit,

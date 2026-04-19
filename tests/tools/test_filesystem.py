@@ -81,6 +81,8 @@ def test_read_file_tool_reads_text_files(tmp_path: str) -> None:
     assert result.truncated is False
     assert result.resolved_path == "hello.txt"
     assert tool_result.artifacts == ["[REDACTED]"]
+    assert tool_result.source_provenance[0].source_id == "workspace:hello.txt"
+    assert tool_result.source_provenance[0].metadata["path"] == "hello.txt"
 
 
 def test_read_file_tool_automatically_converts_non_text_files(
@@ -102,7 +104,7 @@ def test_read_file_tool_automatically_converts_non_text_files(
     fake_module.MarkItDown = FakeMarkItDown
     monkeypatch.setitem(sys.modules, "markitdown", fake_module)
     monkeypatch.setattr(
-        filesystem_tools, "_get_read_file_cache_root", lambda: cache_root
+        filesystem_tools, "_get_read_file_cache_root", lambda root: cache_root
     )
 
     first, first_result = _invoke_read(
@@ -119,6 +121,7 @@ def test_read_file_tool_automatically_converts_non_text_files(
     assert second.content == first.content
     assert convert_calls == [str(file_path.resolve())]
     assert first_result.artifacts == ["[REDACTED]"]
+    assert any(cache_root.iterdir())
 
 
 def test_read_file_tool_rebuilds_cached_markdown_when_source_changes(
@@ -142,7 +145,7 @@ def test_read_file_tool_rebuilds_cached_markdown_when_source_changes(
     fake_module.MarkItDown = FakeMarkItDown
     monkeypatch.setitem(sys.modules, "markitdown", fake_module)
     monkeypatch.setattr(
-        filesystem_tools, "_get_read_file_cache_root", lambda: cache_root
+        filesystem_tools, "_get_read_file_cache_root", lambda root: cache_root
     )
 
     first, _ = _invoke_read(
@@ -159,6 +162,40 @@ def test_read_file_tool_rebuilds_cached_markdown_when_source_changes(
 
     assert first.content != second.content
     assert convert_calls == [str(file_path.resolve()), str(file_path.resolve())]
+
+
+def test_read_file_tool_rejects_large_input_before_conversion(
+    tmp_path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path
+    file_path = workspace / "report.docx"
+    file_path.write_bytes(b"x" * 32)
+
+    fake_module = ModuleType("markitdown")
+    convert_calls: list[str] = []
+
+    class FakeMarkItDown:
+        def convert(self, path: str) -> SimpleNamespace:
+            convert_calls.append(path)
+            return SimpleNamespace(text_content=f"converted:{path}")
+
+    fake_module.MarkItDown = FakeMarkItDown
+    monkeypatch.setitem(sys.modules, "markitdown", fake_module)
+
+    result = _runtime().execute(
+        ToolInvocationRequest(tool_name="read_file", arguments={"path": "report.docx"}),
+        ToolContext(
+            invocation_id="inv-oversize",
+            workspace=str(workspace),
+            metadata={"tool_limits": {"max_read_input_bytes": 8}},
+        ),
+    )
+
+    assert result.ok is True, result.error
+    output = ReadFileTool.output_model.model_validate(result.output)
+    assert output.status == "too_large"
+    assert output.error_message == "File exceeds the configured readable byte limit"
+    assert convert_calls == []
 
 
 def test_read_file_tool_returns_bounded_character_ranges(tmp_path: str) -> None:
@@ -212,7 +249,9 @@ def test_read_file_tool_rejects_invalid_character_ranges(tmp_path: str) -> None:
     assert result.ok is False
     assert result.error is not None
     assert result.error.code is ErrorCode.EXECUTION_FAILED
-    assert "end_char" in result.error.details["exception_message"]
+    assert result.error.details["failure_reason"] == (
+        "filesystem_target_invalid_or_unavailable"
+    )
 
 
 def test_write_file_tool_writes_text_and_creates_parents(tmp_path: str) -> None:
@@ -227,6 +266,7 @@ def test_write_file_tool_writes_text_and_creates_parents(tmp_path: str) -> None:
 
     target = workspace / "nested" / "output.txt"
     assert result.created is True
+    assert result.resolved_path == "nested/output.txt"
     assert result.bytes_written == len(b"hello")
     assert target.read_text(encoding="utf-8") == "hello"
     assert tool_result.artifacts == ["[REDACTED]"]
@@ -250,7 +290,43 @@ def test_write_file_tool_rejects_existing_files_without_overwrite(
     assert result.ok is False
     assert result.error is not None
     assert result.error.code is ErrorCode.EXECUTION_FAILED
-    assert "already exists" in result.error.details["exception_message"]
+    assert result.error.details["failure_reason"] == (
+        "filesystem_target_invalid_or_unavailable"
+    )
+
+
+def test_write_file_tool_rejects_absolute_and_symlinked_paths(tmp_path: str) -> None:
+    workspace = tmp_path
+    (workspace / "real").mkdir()
+    (workspace / "real" / "target.txt").write_text("old", encoding="utf-8")
+    (workspace / "link-dir").symlink_to(workspace / "real", target_is_directory=True)
+    (workspace / "link-file.txt").symlink_to(workspace / "real" / "target.txt")
+    (workspace / "dangling.txt").symlink_to(workspace / "missing.txt")
+
+    cases = [
+        (
+            {"path": str((workspace / "absolute.txt").resolve()), "content": "new"},
+            "relative",
+        ),
+        ({"path": "link-dir/out.txt", "content": "new"}, "symlinked directory"),
+        (
+            {"path": "link-file.txt", "content": "new", "overwrite": True},
+            "symlinked file",
+        ),
+        ({"path": "dangling.txt", "content": "new"}, "symlinked file"),
+    ]
+
+    for index, (arguments, _expected) in enumerate(cases, start=1):
+        result = _runtime(allow_write=True).execute(
+            ToolInvocationRequest(tool_name="write_file", arguments=arguments),
+            ToolContext(invocation_id=f"inv-link-{index}", workspace=str(workspace)),
+        )
+        assert result.ok is False
+        assert result.error is not None
+        assert result.error.code is ErrorCode.EXECUTION_FAILED
+        assert result.error.details["failure_reason"] == (
+            "filesystem_target_invalid_or_unavailable"
+        )
 
 
 def test_list_directory_tool_lists_entries_in_stable_order(tmp_path: str) -> None:

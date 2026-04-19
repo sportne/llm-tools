@@ -42,7 +42,7 @@ def test_content_helpers_cover_text_binary_markitdown_and_limits(
     binary_file = tmp_path / "demo.bin"
     binary_file.write_bytes(b"\x00abc")
     assert read_searchable_text(binary_file) is None
-    unsupported = load_readable_content(binary_file)
+    unsupported = load_readable_content(binary_file, tool_limits=ToolLimits())
     assert unsupported.status == "unsupported"
 
     doc_file = tmp_path / "doc.pdf"
@@ -55,14 +55,17 @@ def test_content_helpers_cover_text_binary_markitdown_and_limits(
 
     fake_module.MarkItDown = FakeMarkItDown
     monkeypatch.setitem(sys.modules, "markitdown", fake_module)
-    monkeypatch.setattr(
-        "llm_tools.tools.filesystem._content._get_read_file_cache_root",
-        lambda: tmp_path / "cache-root",
-    )
+    cache_root = tmp_path / "cache-root"
 
-    converted = load_readable_content(doc_file)
-    cached = load_readable_content(doc_file)
-    cache_paths = _get_cached_conversion_paths(doc_file.resolve())
+    converted = load_readable_content(
+        doc_file, tool_limits=ToolLimits(), cache_root=cache_root
+    )
+    cached = load_readable_content(
+        doc_file, tool_limits=ToolLimits(), cache_root=cache_root
+    )
+    cache_paths = _get_cached_conversion_paths(
+        doc_file.resolve(), cache_root=cache_root
+    )
     assert converted.content == f"converted:{doc_file.resolve()}"
     assert cached.content == converted.content
     assert cache_paths[0].exists()
@@ -101,6 +104,7 @@ def test_build_file_info_result_and_ops_edge_cases(tmp_path: Path) -> None:
         max_search_matches=1,
         max_file_size_characters=3,
         max_read_file_chars=2,
+        max_files_scanned=3,
     )
 
     (root / "src").mkdir()
@@ -137,7 +141,11 @@ def test_build_file_info_result_and_ops_edge_cases(tmp_path: Path) -> None:
         "hit",
         ".",
         source_filters=source_filters,
-        tool_limits=ToolLimits(max_search_matches=1, max_file_size_characters=100),
+        tool_limits=ToolLimits(
+            max_search_matches=1,
+            max_file_size_characters=100,
+            max_files_scanned=10,
+        ),
     )
     assert text_search.truncated is True
     assert text_search.matches[0].path == "src/one.py"
@@ -147,7 +155,11 @@ def test_build_file_info_result_and_ops_edge_cases(tmp_path: Path) -> None:
         "hit",
         "src/one.py",
         source_filters=source_filters,
-        tool_limits=ToolLimits(max_search_matches=5, max_file_size_characters=100),
+        tool_limits=ToolLimits(
+            max_search_matches=5,
+            max_file_size_characters=100,
+            max_files_scanned=10,
+        ),
     )
     assert len(single_file_search.matches) == 2
 
@@ -159,7 +171,10 @@ def test_build_file_info_result_and_ops_edge_cases(tmp_path: Path) -> None:
     info_result = get_file_info_impl(
         root,
         ["src/one.py", "src/two.py"],
-        tool_limits=ToolLimits(max_file_size_characters=100, max_read_file_chars=4),
+        tool_limits=ToolLimits(
+            max_file_size_characters=100,
+            max_read_file_chars=4,
+        ),
     )
     assert len(info_result.results) == 2
 
@@ -175,7 +190,10 @@ def test_build_file_info_result_and_ops_edge_cases(tmp_path: Path) -> None:
     ok_read = read_file_impl(
         root,
         "src/two.py",
-        tool_limits=ToolLimits(max_file_size_characters=100, max_read_file_chars=2),
+        tool_limits=ToolLimits(
+            max_file_size_characters=100,
+            max_read_file_chars=2,
+        ),
         start_char=0,
         end_char=10,
     )
@@ -189,7 +207,10 @@ def test_build_file_info_result_and_ops_edge_cases(tmp_path: Path) -> None:
         candidate_file=root / "src" / "one.py",
         resolved_file=(root / "src" / "one.py").resolve(),
         relative_candidate_path=Path("src/one.py"),
-        tool_limits=ToolLimits(max_file_size_characters=100, max_read_file_chars=100),
+        tool_limits=ToolLimits(
+            max_file_size_characters=100,
+            max_read_file_chars=100,
+        ),
         loaded_content=LoadedReadableContent(
             read_kind="text", status="ok", content="hit\n"
         ),
