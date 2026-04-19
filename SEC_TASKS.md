@@ -111,7 +111,7 @@ Outcome: validate that the central execution and policy layer enforces the
 intended safety invariants.
 
 - [ ] Review model validation boundaries in `models.py`, `tool.py`,
-  `registry.py`, and `runtime.py`.
+  `registry.py`, `runtime.py`, and `execution.py`.
 - [ ] Audit policy enforcement for allow, deny, and approval behavior,
   capability flags, secret requirements, and error normalization.
 - [ ] Audit redaction behavior for inputs, outputs, logs, artifacts, and
@@ -120,9 +120,12 @@ intended safety invariants.
   paths, and denial-of-service exposure.
 - [ ] Identify missing negative tests for policy bypass, unsafe defaults,
   oversized payloads, and malformed tool results.
-- [x] Landed hardening: tighten runtime safety, policy enforcement coverage,
-  and raw output-retention behavior touched by recent filesystem, text, and git
-  security fixes.
+- [x] Landed hardening: tighten runtime safety, brokered-execution controls,
+  policy enforcement coverage, secret-view isolation, and raw output-retention
+  behavior touched by recent filesystem, text, and git security fixes.
+- [x] Landed hardening: add `tool_api` execution-broker coverage in
+  `tests/tool_api/test_execution.py` and extend adjacent runtime, policy, and
+  mediation tests.
 
 ### [~] Phase 2: Tool implementations (`tools`)
 
