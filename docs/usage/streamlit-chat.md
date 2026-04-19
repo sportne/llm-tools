@@ -1,8 +1,9 @@
 # Streamlit Chat
 
-`llm_tools.apps.streamlit_chat` is an interactive Streamlit repository chat
+`llm_tools.apps.streamlit_chat` is the interactive Streamlit repository chat
 client built on top of the existing `llm-tools` runtime, adapter, provider, and
-workflow layers.
+workflow layers. It remains the repository-focused lane alongside the newer
+assistant-oriented Streamlit app.
 
 It reuses the current repository-chat config shape and the same fixed read-only
 tool set as the Textual lane, while exposing Streamlit-native controls for the

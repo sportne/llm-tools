@@ -33,6 +33,7 @@ dependencies = [
 llm-tools-harness = "llm_tools.apps.harness_cli:main"
 llm-tools-chat = "llm_tools.apps.textual_chat:main"
 llm-tools-streamlit-chat = "llm_tools.apps.streamlit_chat:main"
+llm-tools-streamlit-assistant = "llm_tools.apps.streamlit_assistant:main"
 llm-tools-workbench = "llm_tools.apps.textual_workbench:main"
 
 [project.optional-dependencies]
@@ -122,6 +123,7 @@ addopts = "-ra"
 [tool.coverage.run]
 source = ["llm_tools"]
 branch = true
+omit = ["src/llm_tools/apps/streamlit_assistant/app.py"]
 
 [tool.coverage.report]
 fail_under = 90

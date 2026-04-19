@@ -137,6 +137,7 @@ def _import_modules(
 
 _TEXTUAL_CHAT_MODULES: SimpleNamespace | None = None
 _STREAMLIT_CHAT_MODULES: SimpleNamespace | None = None
+_STREAMLIT_ASSISTANT_MODULES: SimpleNamespace | None = None
 _TEXTUAL_WORKBENCH_MODULES: SimpleNamespace | None = None
 
 
@@ -216,6 +217,30 @@ def import_streamlit_chat_modules() -> SimpleNamespace:
             main=main,
         )
     return _STREAMLIT_CHAT_MODULES
+
+
+def import_streamlit_assistant_modules() -> SimpleNamespace:
+    """Import Streamlit assistant modules while shielding heavy provider imports."""
+    global _STREAMLIT_ASSISTANT_MODULES
+    if _STREAMLIT_ASSISTANT_MODULES is None:
+        package, app, main = _import_modules(
+            (
+                "llm_tools.apps.streamlit_assistant",
+                "llm_tools.apps.streamlit_assistant.app",
+                "llm_tools.apps.streamlit_assistant.__main__",
+            ),
+            reset_modules=(
+                "llm_tools.apps.streamlit_assistant",
+                "llm_tools.apps.streamlit_assistant.app",
+                "llm_tools.apps.streamlit_assistant.__main__",
+            ),
+        )
+        _STREAMLIT_ASSISTANT_MODULES = SimpleNamespace(
+            package=package,
+            app=app,
+            main=main,
+        )
+    return _STREAMLIT_ASSISTANT_MODULES
 
 
 def load_module_from_path(

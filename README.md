@@ -22,8 +22,9 @@ The core v0.1 foundation is implemented:
 - a current `workflow_api` bridge for one parsed model turn plus an interactive
   repository-chat session runner
 - dual sync/async execution paths across runtime, provider, and workflow layers
-- optional app layers with Textual and Streamlit repository chat clients plus a
-  developer-facing Textual workbench
+- optional app layers with Textual and Streamlit repository chat clients, a
+  separate Streamlit assistant client, and a developer-facing Textual
+  workbench
 - `harness_api` durable session orchestration with persisted traces, replay,
   summaries, a public Python session API, and a minimal persisted-session CLI
 
@@ -162,6 +163,30 @@ Streamlit server flags, run Streamlit directly:
 
 ```bash
 streamlit run src/llm_tools/apps/streamlit_chat/app.py -- <directory> --config <path>
+```
+
+## Streamlit Assistant App
+
+Launch the optional Streamlit assistant app with either:
+
+```bash
+python -m llm_tools.apps.streamlit_assistant <directory> --config <path>
+```
+
+or:
+
+```bash
+llm-tools-streamlit-assistant <directory> --config <path>
+```
+
+The assistant is the broader chat client: it can answer normal questions
+without tools, optionally use the full built-in tool registry, and launch
+harness-backed research sessions for durable investigation work.
+
+To pass regular Streamlit server flags, run Streamlit directly:
+
+```bash
+streamlit run src/llm_tools/apps/streamlit_assistant/app.py -- <directory> --config <path>
 ```
 
 ## Examples
