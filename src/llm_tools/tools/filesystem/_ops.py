@@ -103,23 +103,31 @@ def find_files_impl(
     resolved_request = resolve_directory_path(root_path, path)
     matches: list[FileMatch] = []
     truncated = False
+    files_scanned = 0
 
-    def walk_directory(directory: Path) -> bool:
-        nonlocal truncated
+    def walk_directory(directory: Path, *, depth: int) -> bool:
+        nonlocal truncated, files_scanned
         for child in sorted(directory.iterdir(), key=lambda item: item.name):
             relative_child = child.relative_to(resolved_request.root)
             if child.is_symlink():
                 continue
             if child.is_dir():
+                if depth >= tool_limits.max_recursive_depth:
+                    truncated = True
+                    continue
                 if should_prune_directory(
                     relative_child, source_filters=source_filters
                 ):
                     continue
-                if not walk_directory(child):
+                if not walk_directory(child, depth=depth + 1):
                     return False
                 continue
             if not child.is_file():
                 continue
+            files_scanned += 1
+            if files_scanned > tool_limits.max_files_scanned:
+                truncated = True
+                return False
             if not should_include_entry(relative_child, source_filters=source_filters):
                 continue
             if not matches_path_glob(relative_child, normalized_pattern):
@@ -130,7 +138,7 @@ def find_files_impl(
             matches.append(build_file_match(resolved_request.root, child))
         return True
 
-    walk_directory(resolved_request.resolved)
+    walk_directory(resolved_request.resolved, depth=1)
     return FileSearchResult(
         requested_path=resolved_request.requested_path,
         resolved_path=resolved_request.resolved_path,
@@ -150,25 +158,24 @@ def resolve_search_file_or_directory(
     if requested_path.is_absolute():
         raise ValueError("Tool paths must be relative to the configured root.")
     resolved_root = root_path.resolve()
-    candidate_target = resolved_root / requested_path
-    resolved_target = candidate_target.resolve()
-    if not resolved_target.is_relative_to(resolved_root):
+    candidate_target = (resolved_root / requested_path).resolve(strict=False)
+    if not candidate_target.is_relative_to(resolved_root):
         raise ValueError("Requested tool path escapes the configured root.")
-    resolved_relative = resolved_target.relative_to(resolved_root)
-    if candidate_target.is_symlink():
-        symlink_kind = (
-            "directory"
-            if resolved_target.exists() and resolved_target.is_dir()
-            else "file"
-        )
-        raise ValueError(
-            f"Requested path must not be a symlinked {symlink_kind}: {normalized_path}"
-        )
     if not candidate_target.exists():
         raise ValueError(
             f"Requested file or directory does not exist: {normalized_path}"
         )
-    return normalized_path, resolved_root, candidate_target, resolved_relative
+    if candidate_target.is_dir():
+        resolved_request = resolve_directory_path(root_path, path)
+    else:
+        resolved_request = resolve_file_path(root_path, path)
+    resolved_relative = resolved_request.resolved.relative_to(resolved_request.root)
+    return (
+        normalized_path,
+        resolved_request.root,
+        resolved_request.resolved,
+        resolved_relative,
+    )
 
 
 def get_file_info_impl(
@@ -176,6 +183,7 @@ def get_file_info_impl(
     path: str | list[str],
     *,
     tool_limits: ToolLimits,
+    cache_root: Path | None = None,
 ) -> FileInfoResult | FileInfoBatchResult:
     """Return deterministic metadata for one or more root-confined files."""
     if isinstance(path, str):
@@ -183,6 +191,7 @@ def get_file_info_impl(
             root_path,
             path,
             tool_limits=tool_limits,
+            cache_root=cache_root,
         )
     return FileInfoBatchResult(
         results=[
@@ -190,6 +199,7 @@ def get_file_info_impl(
                 root_path,
                 item,
                 tool_limits=tool_limits,
+                cache_root=cache_root,
             )
             for item in path
         ]
@@ -201,9 +211,14 @@ def _get_single_file_info(
     path: str,
     *,
     tool_limits: ToolLimits,
+    cache_root: Path | None,
 ) -> FileInfoResult:
     resolved_request = resolve_file_path(root_path, path)
-    loaded_content = load_readable_content(resolved_request.resolved)
+    loaded_content = load_readable_content(
+        resolved_request.resolved,
+        tool_limits=tool_limits,
+        cache_root=cache_root,
+    )
     return build_file_info_result(
         requested_path=resolved_request.requested_path,
         resolved_path=resolved_request.resolved_path,
@@ -224,10 +239,15 @@ def read_file_impl(
     tool_limits: ToolLimits,
     start_char: int | None,
     end_char: int | None,
+    cache_root: Path | None = None,
 ) -> FileReadResult:
     """Return bounded text or markdown content for one root-confined file."""
     resolved_request = resolve_file_path(root_path, path)
-    loaded_content = load_readable_content(resolved_request.resolved)
+    loaded_content = load_readable_content(
+        resolved_request.resolved,
+        tool_limits=tool_limits,
+        cache_root=cache_root,
+    )
     full_read_char_limit = effective_full_read_char_limit(tool_limits)
     if loaded_content.status != "ok" or loaded_content.content is None:
         return FileReadResult(
@@ -237,6 +257,7 @@ def read_file_impl(
             status=loaded_content.status,
             content=None,
             file_size_bytes=resolved_request.resolved.stat().st_size,
+            max_read_input_bytes=tool_limits.max_read_input_bytes,
             max_file_size_characters=tool_limits.max_file_size_characters,
             full_read_char_limit=full_read_char_limit,
             error_message=loaded_content.error_message,
@@ -252,6 +273,7 @@ def read_file_impl(
             content=None,
             character_count=character_count,
             file_size_bytes=resolved_request.resolved.stat().st_size,
+            max_read_input_bytes=tool_limits.max_read_input_bytes,
             max_file_size_characters=tool_limits.max_file_size_characters,
             full_read_char_limit=full_read_char_limit,
             estimated_token_count=estimate_token_count(content),
@@ -277,6 +299,7 @@ def read_file_impl(
         start_char=normalized_start,
         end_char=truncated_end,
         file_size_bytes=resolved_request.resolved.stat().st_size,
+        max_read_input_bytes=tool_limits.max_read_input_bytes,
         max_file_size_characters=tool_limits.max_file_size_characters,
         full_read_char_limit=full_read_char_limit,
         estimated_token_count=estimate_token_count(content_slice),

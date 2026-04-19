@@ -15,7 +15,7 @@ from llm_tools.tool_api import (
     ToolRegistry,
     ToolSpec,
 )
-from llm_tools.tools._path_utils import get_workspace_root, resolve_workspace_path
+from llm_tools.tools._path_utils import get_workspace_root, relative_display_path
 from llm_tools.tools.filesystem._content import (
     _get_cached_conversion_paths,
     _get_read_file_cache_root,
@@ -28,6 +28,7 @@ from llm_tools.tools.filesystem._ops import (
     list_directory_impl,
     read_file_impl,
 )
+from llm_tools.tools.filesystem._paths import resolve_writable_file_path
 from llm_tools.tools.filesystem.models import (
     DirectoryListingResult,
     FileInfoResult,
@@ -40,16 +41,16 @@ from llm_tools.tools.filesystem.models import (
 
 
 def _append_local_source_provenance(
-    context: ToolContext, *, resolved_path: Path
+    context: ToolContext, *, relative_path: str
 ) -> None:
-    source_id = str(resolved_path.resolve())
+    source_id = f"workspace:{relative_path}"
     context.source_provenance.append(
         SourceProvenanceRef(
             source_kind="local_file",
             source_id=source_id,
             content_hash=hashlib.sha256(source_id.encode("utf-8")).hexdigest(),
             whole_source_reproduction_allowed=True,
-            metadata={"path": source_id},
+            metadata={"path": relative_path},
         )
     )
 
@@ -81,6 +82,7 @@ class ReadFileTool(Tool[ReadFileInput, ReadFileOutput]):
         tags=["filesystem", "read"],
         side_effects=SideEffectClass.LOCAL_READ,
         requires_filesystem=True,
+        writes_internal_workspace_cache=True,
     )
     input_model = ReadFileInput
     output_model = ReadFileOutput
@@ -93,11 +95,11 @@ class ReadFileTool(Tool[ReadFileInput, ReadFileOutput]):
             tool_limits=tool_limits,
             start_char=args.start_char,
             end_char=args.end_char,
+            cache_root=_get_read_file_cache_root(root_path),
         )
-        resolved_path = (root_path / args.path).resolve()
-        context.logs.append(f"Read file '{args.path}'.")
-        context.artifacts.append(str(resolved_path))
-        _append_local_source_provenance(context, resolved_path=resolved_path)
+        context.logs.append(f"Read file '{result.resolved_path}'.")
+        context.artifacts.append(result.resolved_path)
+        _append_local_source_provenance(context, relative_path=result.resolved_path)
         return ReadFileOutput.model_validate(result.model_dump(mode="json"))
 
 
@@ -129,30 +131,30 @@ class WriteFileTool(Tool[WriteFileInput, WriteFileOutput]):
     output_model = WriteFileOutput
 
     def invoke(self, context: ToolContext, args: WriteFileInput) -> WriteFileOutput:
-        resolved = resolve_workspace_path(
-            context,
-            args.path,
-            expect_directory=False,
-            must_exist=False,
-        )
-        created = not resolved.exists()
-        if resolved.exists() and not args.overwrite:
-            raise FileExistsError(f"Path '{resolved}' already exists.")
+        root_path = get_workspace_root(context)
+        resolved_request = resolve_writable_file_path(root_path, args.path)
+        target = resolved_request.resolved
+        created = not target.exists()
+        if target.exists() and not args.overwrite:
+            raise FileExistsError(
+                f"Path '{resolved_request.resolved_path}' already exists."
+            )
 
-        if not resolved.parent.exists():
+        if not target.parent.exists():
             if not args.create_parents:
+                parent_path = relative_display_path(root_path, target.parent)
                 raise FileNotFoundError(
-                    f"Parent directory '{resolved.parent}' does not exist."
+                    f"Parent directory '{parent_path}' does not exist."
                 )
-            resolved.parent.mkdir(parents=True, exist_ok=True)
+            target.parent.mkdir(parents=True, exist_ok=True)
 
-        resolved.write_text(args.content, encoding=args.encoding)
+        target.write_text(args.content, encoding=args.encoding)
         bytes_written = len(args.content.encode(args.encoding))
-        context.logs.append(f"Wrote file '{resolved}'.")
-        context.artifacts.append(str(resolved))
+        context.logs.append(f"Wrote file '{resolved_request.resolved_path}'.")
+        context.artifacts.append(resolved_request.resolved_path)
         return WriteFileOutput(
             path=args.path,
-            resolved_path=str(resolved),
+            resolved_path=resolved_request.resolved_path,
             bytes_written=bytes_written,
             created=created,
         )
@@ -246,6 +248,7 @@ class GetFileInfoTool(Tool[GetFileInfoInput, GetFileInfoOutput]):
         tags=["filesystem", "read"],
         side_effects=SideEffectClass.LOCAL_READ,
         requires_filesystem=True,
+        writes_internal_workspace_cache=True,
     )
     input_model = GetFileInfoInput
     output_model = GetFileInfoOutput
@@ -259,6 +262,7 @@ class GetFileInfoTool(Tool[GetFileInfoInput, GetFileInfoOutput]):
             root_path,
             path_argument,
             tool_limits=tool_limits,
+            cache_root=_get_read_file_cache_root(root_path),
         )
         context.logs.append("Collected file metadata.")
         if isinstance(result, FileInfoResult):

@@ -79,6 +79,12 @@ def test_runtime_executes_filesystem_and_text_builtins(tmp_path: str) -> None:
     )
 
     assert write_result.ok is True
+    assert write_result.output == {
+        "path": "docs/note.txt",
+        "resolved_path": "docs/note.txt",
+        "bytes_written": 11,
+        "created": True,
+    }
     assert read_result.output == {
         "requested_path": "docs/note.txt",
         "resolved_path": "docs/note.txt",
@@ -91,6 +97,7 @@ def test_runtime_executes_filesystem_and_text_builtins(tmp_path: str) -> None:
         "start_char": 0,
         "end_char": 11,
         "file_size_bytes": 11,
+        "max_read_input_bytes": 1048576,
         "max_file_size_characters": 262144,
         "full_read_char_limit": 4000,
         "estimated_token_count": 2,
@@ -122,6 +129,10 @@ def test_runtime_normalizes_workspace_root_enforcement_failures(
     assert result.ok is False
     assert result.error is not None
     assert result.error.code is ErrorCode.EXECUTION_FAILED
+    assert result.error.details["failure_reason"] == (
+        "filesystem_target_invalid_or_unavailable"
+    )
+    assert "exception_message" not in result.error.details
 
 
 def test_runtime_executes_git_builtins_with_mocked_subprocess(
@@ -360,6 +371,7 @@ def test_runtime_executes_confluence_builtins_with_mocked_client(
         "start_char": 0,
         "end_char": 16,
         "file_size_bytes": 16,
+        "max_read_input_bytes": 1048576,
         "max_file_size_characters": 262144,
         "full_read_char_limit": 4000,
         "estimated_token_count": 2,
@@ -467,6 +479,7 @@ def test_runtime_executes_gitlab_builtins_with_mocked_client(
         "start_char": 0,
         "end_char": 17,
         "file_size_bytes": 17,
+        "max_read_input_bytes": 1048576,
         "max_file_size_characters": 262144,
         "full_read_char_limit": 4000,
         "estimated_token_count": 3,

@@ -62,3 +62,16 @@ def test_builtin_tools_expose_valid_contracts() -> None:
                 f"Built-in tool '{tool_name}' uses local filesystem side effects and "
                 "must declare requires_filesystem=True."
             )
+
+        if spec.writes_internal_workspace_cache:
+            assert spec.requires_filesystem is True, (
+                f"Built-in tool '{tool_name}' writes internal workspace cache data "
+                "and must declare requires_filesystem=True."
+            )
+            assert spec.side_effects in {
+                SideEffectClass.LOCAL_READ,
+                SideEffectClass.LOCAL_WRITE,
+            }, (
+                f"Built-in tool '{tool_name}' writes internal workspace cache data "
+                "and must declare a local filesystem side effect class."
+            )

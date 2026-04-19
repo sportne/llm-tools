@@ -104,6 +104,10 @@ def test_path_helpers_cover_matching_and_resolution(tmp_path: Path) -> None:
         should_prune_directory(Path(".hidden"), source_filters=SourceFilters()) is True
     )
     assert should_prune_directory(Path("src"), source_filters=exclude_filters) is False
+    assert (
+        should_prune_directory(Path(".llm_tools"), source_filters=SourceFilters())
+        is True
+    )
     assert is_hidden(Path(".hidden/item")) is True
 
     assert resolve_directory_path(tmp_path, "src").resolved_path == "src"
@@ -118,6 +122,12 @@ def test_path_helpers_cover_matching_and_resolution(tmp_path: Path) -> None:
         resolve_directory_path(tmp_path, "link-src")
     with pytest.raises(ValueError):
         resolve_file_path(tmp_path, "link-app.py")
+    with pytest.raises(ValueError):
+        resolve_file_path(tmp_path, "link-src/app.py")
+    with pytest.raises(ValueError, match="internal tool-managed"):
+        resolve_directory_path(tmp_path, ".llm_tools")
+    with pytest.raises(ValueError, match="internal tool-managed"):
+        resolve_file_path(tmp_path, ".llm_tools/cache/read_file/content.md")
 
     built_entry = build_entry(tmp_path, tmp_path / "src", depth=1)
     built_match = build_file_match(tmp_path, tmp_path / "src" / "app.py")
@@ -172,7 +182,7 @@ def test_ops_cover_recursive_listing_and_file_edge_cases(
     monkeypatch.setattr(
         text_ops_module,
         "load_readable_content",
-        lambda path: LoadedReadableContent(
+        lambda path, **kwargs: LoadedReadableContent(
             read_kind="unsupported",
             status="unsupported",
             content=None,
@@ -191,7 +201,7 @@ def test_ops_cover_recursive_listing_and_file_edge_cases(
     monkeypatch.setattr(
         text_ops_module,
         "load_readable_content",
-        lambda path: LoadedReadableContent(
+        lambda path, **kwargs: LoadedReadableContent(
             read_kind="text",
             status="ok",
             content="needle\nneedle\n",
@@ -209,7 +219,7 @@ def test_ops_cover_recursive_listing_and_file_edge_cases(
     monkeypatch.setattr(
         filesystem_ops_module,
         "load_readable_content",
-        lambda path: LoadedReadableContent(
+        lambda path, **kwargs: LoadedReadableContent(
             read_kind="unsupported",
             status="unsupported",
             content=None,
@@ -297,7 +307,7 @@ def test_ops_cover_remaining_control_flow_edges(
         "**/*.py",
         ".",
         source_filters=SourceFilters(include_hidden=False),
-        tool_limits=ToolLimits(max_entries_per_call=20),
+        tool_limits=ToolLimits(max_entries_per_call=20, max_files_scanned=20),
     )
     assert [match.path for match in file_matches.matches] == [
         "src/one.py",
@@ -305,7 +315,7 @@ def test_ops_cover_remaining_control_flow_edges(
         "unsupported.py",
     ]
 
-    def _load_content(path: Path) -> LoadedReadableContent:
+    def _load_content(path: Path, **kwargs: object) -> LoadedReadableContent:
         if path.name == "unsupported.py":
             return LoadedReadableContent(
                 read_kind="text",
@@ -331,14 +341,18 @@ def test_ops_cover_remaining_control_flow_edges(
         "needle",
         ".",
         source_filters=SourceFilters(include_hidden=False),
-        tool_limits=ToolLimits(max_search_matches=5, max_file_size_characters=7),
+        tool_limits=ToolLimits(
+            max_search_matches=5,
+            max_file_size_characters=7,
+            max_files_scanned=20,
+        ),
     )
     assert [match.path for match in directory_search.matches] == ["src/one.py"]
 
     monkeypatch.setattr(
         text_ops_module,
         "load_readable_content",
-        lambda path: LoadedReadableContent(
+        lambda path, **kwargs: LoadedReadableContent(
             read_kind="text",
             status="ok",
             content="skip\nneedle\nneedle\n",
@@ -353,3 +367,56 @@ def test_ops_cover_remaining_control_flow_edges(
     )
     assert single_file_search.truncated is True
     assert len(single_file_search.matches) == 1
+
+
+def test_find_and_search_honor_recursive_depth_and_scan_budgets(tmp_path: Path) -> None:
+    (tmp_path / "nested" / "deeper").mkdir(parents=True)
+    (tmp_path / "shallow.py").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "nested" / "deeper" / "deep.py").write_text(
+        "needle\n", encoding="utf-8"
+    )
+    (tmp_path / "other.py").write_text("miss\n", encoding="utf-8")
+
+    file_matches = find_files_impl(
+        tmp_path,
+        "**/*.py",
+        ".",
+        source_filters=SourceFilters(),
+        tool_limits=ToolLimits(
+            max_entries_per_call=20,
+            max_recursive_depth=1,
+            max_files_scanned=20,
+        ),
+    )
+    assert file_matches.truncated is True
+    assert [match.path for match in file_matches.matches] == ["other.py", "shallow.py"]
+
+    directory_search = search_text_impl(
+        tmp_path,
+        "needle",
+        ".",
+        source_filters=SourceFilters(),
+        tool_limits=ToolLimits(
+            max_recursive_depth=1,
+            max_search_matches=20,
+            max_file_size_characters=100,
+            max_files_scanned=20,
+        ),
+    )
+    assert directory_search.truncated is True
+    assert [match.path for match in directory_search.matches] == ["shallow.py"]
+
+    scan_limited_search = search_text_impl(
+        tmp_path,
+        "absent",
+        ".",
+        source_filters=SourceFilters(),
+        tool_limits=ToolLimits(
+            max_recursive_depth=5,
+            max_search_matches=20,
+            max_file_size_characters=100,
+            max_files_scanned=1,
+        ),
+    )
+    assert scan_limited_search.matches == []
+    assert scan_limited_search.truncated is True

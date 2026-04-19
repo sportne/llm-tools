@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 DirectoryEntryType = Literal["file", "directory", "symlink", "other"]
 FileReadKind = Literal["text", "markitdown", "project", "unsupported"]
-FileInfoStatus = Literal["ok", "unsupported", "error"]
+FileInfoStatus = Literal["ok", "too_large", "unsupported", "error"]
 FileReadStatus = Literal["ok", "too_large", "unsupported", "error"]
 
 
@@ -33,8 +33,10 @@ class ToolLimits(BaseModel):
 
     max_entries_per_call: int = 200
     max_recursive_depth: int = 12
+    max_files_scanned: int = 2000
     max_search_matches: int = 50
     max_read_lines: int = 200
+    max_read_input_bytes: int = 1048576
     max_file_size_characters: int = 262144
     max_read_file_chars: int | None = None
     max_tool_result_chars: int = 24000
@@ -42,8 +44,10 @@ class ToolLimits(BaseModel):
     @field_validator(
         "max_entries_per_call",
         "max_recursive_depth",
+        "max_files_scanned",
         "max_search_matches",
         "max_read_lines",
+        "max_read_input_bytes",
         "max_file_size_characters",
         "max_tool_result_chars",
     )
@@ -116,6 +120,7 @@ class FileInfoResult(BaseModel):
     estimated_token_count: int | None = None
     character_count: int | None = None
     line_count: int | None = None
+    max_read_input_bytes: int
     max_file_size_characters: int
     within_size_limit: bool
     full_read_char_limit: int
@@ -143,6 +148,7 @@ class FileReadResult(BaseModel):
     start_char: int | None = None
     end_char: int | None = None
     file_size_bytes: int
+    max_read_input_bytes: int
     max_file_size_characters: int
     full_read_char_limit: int
     estimated_token_count: int | None = None

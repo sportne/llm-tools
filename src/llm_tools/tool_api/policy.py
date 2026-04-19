@@ -43,6 +43,7 @@ class ToolPolicy(BaseModel):
     allow_network: bool = True
     allow_filesystem: bool = True
     allow_subprocess: bool = True
+    allow_internal_workspace_cache_writes: bool = True
     redaction: RedactionConfig = Field(default_factory=RedactionConfig)
     redacted_field_names: set[str] = Field(
         default_factory=lambda: set(DEFAULT_SENSITIVE_FIELD_NAMES)
@@ -87,6 +88,7 @@ class ToolPolicy(BaseModel):
             self._evaluate_name_rules(tool_name),
             self._evaluate_tag_rules(tool_name, tool_tags),
             self._evaluate_side_effect_rules(tool_name, tool.spec),
+            self._evaluate_internal_cache_write_rules(tool_name, tool.spec),
             self._evaluate_secret_rules(tool_name, tool.spec, context),
         ):
             if decision is not None:
@@ -168,6 +170,22 @@ class ToolPolicy(BaseModel):
                     metadata={"blocked_capability": capability_name},
                 )
 
+        return None
+
+    def _evaluate_internal_cache_write_rules(
+        self,
+        tool_name: str,
+        spec: ToolSpec,
+    ) -> PolicyDecision | None:
+        if (
+            spec.writes_internal_workspace_cache
+            and not self.allow_internal_workspace_cache_writes
+        ):
+            return self._deny(
+                tool_name,
+                reason="internal workspace cache writes denied",
+                metadata={"writes_internal_workspace_cache": True},
+            )
         return None
 
     def _evaluate_secret_rules(

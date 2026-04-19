@@ -14,6 +14,7 @@ from llm_tools.tool_api.models import (
     ErrorCode,
     ExecutionRecord,
     PolicyDecision,
+    SideEffectClass,
     ToolContext,
     ToolError,
     ToolInvocationRequest,
@@ -156,15 +157,7 @@ class ToolRuntime:
             return self._finalize_failure(
                 state,
                 context,
-                self._make_error(
-                    code=ErrorCode.EXECUTION_FAILED,
-                    message=f"Tool '{state.tool_name}' execution failed.",
-                    details={
-                        "tool_name": state.tool_name,
-                        "exception_type": type(exc).__name__,
-                        "exception_message": str(exc),
-                    },
-                ),
+                self._make_execution_failed_error(state, tool, exc),
             )
 
         try:
@@ -298,15 +291,7 @@ class ToolRuntime:
             return self._finalize_failure(
                 state,
                 context,
-                self._make_error(
-                    code=ErrorCode.EXECUTION_FAILED,
-                    message=f"Tool '{state.tool_name}' execution failed.",
-                    details={
-                        "tool_name": state.tool_name,
-                        "exception_type": type(exc).__name__,
-                        "exception_message": str(exc),
-                    },
-                ),
+                self._make_execution_failed_error(state, tool, exc),
             )
 
         try:
@@ -548,6 +533,39 @@ class ToolRuntime:
             code=code,
             message=message,
             details=details or {},
+        )
+
+    def _make_execution_failed_error(
+        self,
+        state: _ExecutionState,
+        tool: Tool[Any, Any],
+        exc: Exception,
+    ) -> ToolError:
+        details: dict[str, Any] = {
+            "tool_name": state.tool_name,
+            "exception_type": type(exc).__name__,
+        }
+        if self._should_suppress_exception_message(tool):
+            details["failure_reason"] = "filesystem_target_invalid_or_unavailable"
+        else:
+            details["exception_message"] = str(exc)
+        return self._make_error(
+            code=ErrorCode.EXECUTION_FAILED,
+            message=f"Tool '{state.tool_name}' execution failed.",
+            details=details,
+        )
+
+    @staticmethod
+    def _should_suppress_exception_message(tool: Tool[Any, Any]) -> bool:
+        spec = tool.spec
+        return (
+            spec.requires_filesystem
+            and spec.side_effects
+            in {
+                SideEffectClass.LOCAL_READ,
+                SideEffectClass.LOCAL_WRITE,
+            }
+            and bool({"filesystem", "text"}.intersection(spec.tags))
         )
 
     def _make_runtime_error(

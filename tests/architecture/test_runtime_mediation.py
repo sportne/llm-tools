@@ -38,9 +38,8 @@ def test_runtime_returns_structured_result_envelopes_for_filesystem_builtins(
     assert write_result.output is not None
     assert write_result.output["path"] == "docs/note.txt"
     assert write_result.output["bytes_written"] == len(b"hello runtime")
-    assert write_result.logs == [
-        f"Wrote file '{(tmp_path / 'docs' / 'note.txt').resolve()}'."
-    ]
+    assert write_result.logs == ["Wrote file 'docs/note.txt'."]
+    assert write_result.artifacts == ["docs/note.txt"]
 
     execution_record = write_result.metadata.get("execution_record")
     assert isinstance(execution_record, dict)
@@ -64,6 +63,7 @@ def test_runtime_returns_structured_result_envelopes_for_filesystem_builtins(
     assert read_result.output["content"] == "hello runtime"
     assert read_result.output["status"] == "ok"
     assert read_result.metadata["execution_record"]["tool_name"] == "read_file"
+    assert read_result.source_provenance[0].metadata["path"] == "docs/note.txt"
     assert read_result.metadata["execution_record"]["ok"] is True
 
 

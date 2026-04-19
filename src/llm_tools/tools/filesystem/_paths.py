@@ -13,6 +13,8 @@ from llm_tools.tools.filesystem.models import (
     SourceFilters,
 )
 
+_INTERNAL_TOOL_PATH_PART = ".llm_tools"
+
 
 @dataclass(frozen=True, slots=True)
 class ResolvedRootPath:
@@ -83,6 +85,63 @@ def matches_path_glob(relative_path: Path, pattern: str) -> bool:
     return match_parts(0, 0)
 
 
+def _normalized_request_path(path: str) -> tuple[str, Path, Path]:
+    """Normalize one user path and reject absolute or internal tool paths."""
+    normalized_request = normalize_requested_path(path)
+    requested_path = Path(normalized_request)
+    if requested_path.is_absolute():
+        raise ValueError("Tool paths must be relative to the configured root.")
+    if requested_path.parts and requested_path.parts[0] == _INTERNAL_TOOL_PATH_PART:
+        raise ValueError(
+            "Tool paths must not target internal tool-managed directories."
+        )
+    return (
+        normalized_request,
+        requested_path,
+        Path() if normalized_request == "." else requested_path,
+    )
+
+
+def _resolve_relative_display_path(root_path: Path, resolved_target: Path) -> str:
+    """Return a stable root-relative display path."""
+    resolved_relative = resolved_target.relative_to(root_path)
+    return resolved_relative.as_posix() if resolved_relative.as_posix() else "."
+
+
+def _validate_root_confined_candidate(
+    resolved_root: Path,
+    requested_path: Path,
+    *,
+    normalized_request: str,
+    final_kind: str,
+) -> Path:
+    """Validate a relative candidate path stays root-confined and symlink-free."""
+    current = resolved_root
+    for index, part in enumerate(requested_path.parts):
+        if part == ".":
+            continue
+        current = current / part
+        is_final = index == len(requested_path.parts) - 1
+        if current.is_symlink():
+            if is_final:
+                raise ValueError(
+                    "Requested path must not be a symlinked "
+                    f"{final_kind}: {normalized_request}"
+                )
+            raise ValueError(
+                "Requested path must not traverse a symlinked directory: "
+                f"{normalized_request}"
+            )
+        if not current.resolve(strict=False).is_relative_to(resolved_root):
+            raise ValueError("Requested tool path escapes the configured root.")
+        if not is_final and current.exists() and not current.is_dir():
+            raise ValueError(
+                "Requested path has a non-directory parent component: "
+                f"{normalized_request}"
+            )
+    return resolved_root / requested_path
+
+
 def resolve_root_confined_path(
     root_path: Path,
     path: str,
@@ -91,19 +150,18 @@ def resolve_root_confined_path(
     reject_symlink: bool,
 ) -> ResolvedRootPath:
     """Resolve a relative path inside the root and enforce kind constraints."""
-    normalized_request = normalize_requested_path(path)
-    requested_path = Path(normalized_request)
-    if requested_path.is_absolute():
-        raise ValueError("Tool paths must be relative to the configured root.")
+    normalized_request, _requested_path, normalized_parts = _normalized_request_path(
+        path
+    )
+    del reject_symlink
 
     resolved_root = root_path.resolve()
-    candidate_target = resolved_root / requested_path
-    if reject_symlink and candidate_target.is_symlink():
-        raise ValueError(
-            "Requested path must not be a symlinked "
-            f"{expected_kind}: {normalized_request}"
-        )
-
+    candidate_target = _validate_root_confined_candidate(
+        resolved_root,
+        normalized_parts,
+        normalized_request=normalized_request,
+        final_kind=expected_kind,
+    )
     resolved_target = candidate_target.resolve()
     if not resolved_target.is_relative_to(resolved_root):
         raise ValueError("Requested tool path escapes the configured root.")
@@ -122,16 +180,12 @@ def resolve_root_confined_path(
             f"Requested path is not a {expected_kind}: {normalized_request}"
         )
 
-    resolved_relative = resolved_target.relative_to(resolved_root)
-    resolved_path = (
-        resolved_relative.as_posix() if resolved_relative.as_posix() else "."
-    )
     return ResolvedRootPath(
         root=resolved_root,
         candidate=candidate_target,
         resolved=resolved_target,
         requested_path=normalized_request,
-        resolved_path=resolved_path,
+        resolved_path=_resolve_relative_display_path(resolved_root, resolved_target),
     )
 
 
@@ -153,6 +207,37 @@ def resolve_file_path(root_path: Path, path: str) -> ResolvedRootPath:
         expected_kind="file",
         reject_symlink=True,
     )
+
+
+def resolve_writable_file_path(root_path: Path, path: str) -> ResolvedRootPath:
+    """Resolve one writable file path inside the configured root."""
+    normalized_request, _, normalized_parts = _normalized_request_path(path)
+    resolved_root = root_path.resolve()
+    candidate_target = _validate_root_confined_candidate(
+        resolved_root,
+        normalized_parts,
+        normalized_request=normalized_request,
+        final_kind="file",
+    )
+    resolved_target = candidate_target.resolve(strict=False)
+    if not resolved_target.is_relative_to(resolved_root):
+        raise ValueError("Requested tool path escapes the configured root.")
+    if resolved_target.exists() and resolved_target.is_dir():
+        raise IsADirectoryError(
+            f"Requested path is a directory, not a file: {normalized_request}"
+        )
+    return ResolvedRootPath(
+        root=resolved_root,
+        candidate=candidate_target,
+        resolved=resolved_target,
+        requested_path=normalized_request,
+        resolved_path=_resolve_relative_display_path(resolved_root, resolved_target),
+    )
+
+
+def is_internal_tool_path(path: Path) -> bool:
+    """Return whether a path targets the tool-managed cache subtree."""
+    return bool(path.parts) and path.parts[0] == _INTERNAL_TOOL_PATH_PART
 
 
 def is_hidden(path: Path) -> bool:
@@ -177,6 +262,8 @@ def should_include_entry(
     source_filters: SourceFilters,
 ) -> bool:
     """Return whether an entry should be exposed to the model."""
+    if is_internal_tool_path(relative_path):
+        return False
     if is_hidden(relative_path) and not source_filters.include_hidden:
         return False
     if matches_patterns(relative_path, source_filters.exclude):
@@ -193,6 +280,8 @@ def should_prune_directory(
     source_filters: SourceFilters,
 ) -> bool:
     """Return whether a directory subtree should be skipped entirely."""
+    if is_internal_tool_path(relative_path):
+        return True
     if is_hidden(relative_path) and not source_filters.include_hidden:
         return True
     return matches_patterns(relative_path, source_filters.exclude)

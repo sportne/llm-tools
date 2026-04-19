@@ -185,6 +185,7 @@ def test_tool_spec_serializes_enums_as_json_values() -> None:
         "requires_network": True,
         "requires_filesystem": False,
         "requires_subprocess": False,
+        "writes_internal_workspace_cache": False,
         "required_secrets": [],
         "cost_hint": None,
     }

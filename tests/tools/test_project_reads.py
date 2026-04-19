@@ -354,14 +354,14 @@ def test_load_readable_content_converts_project_files_and_reuses_cache(
     file_path = tmp_path / "plan.mpp"
     file_path.write_bytes(bytes.fromhex("fffe0010"))
     fake_jpype = _install_fake_mpxj(monkeypatch)
-    monkeypatch.setattr(
-        filesystem_content,
-        "_get_read_file_cache_root",
-        lambda: tmp_path / "cache-root",
-    )
+    cache_root = tmp_path / "cache-root"
 
-    first = load_readable_content(file_path)
-    second = load_readable_content(file_path)
+    first = load_readable_content(
+        file_path, tool_limits=ToolLimits(), cache_root=cache_root
+    )
+    second = load_readable_content(
+        file_path, tool_limits=ToolLimits(), cache_root=cache_root
+    )
 
     assert first.read_kind == "project"
     assert first.status == "ok"
@@ -383,7 +383,7 @@ def test_load_readable_content_surfaces_project_runtime_and_parse_errors(
         "_import_mpxj_runtime",
         lambda: (_ for _ in ()).throw(ImportError("missing mpxj")),
     )
-    missing_runtime = load_readable_content(file_path)
+    missing_runtime = load_readable_content(file_path, tool_limits=ToolLimits())
     assert missing_runtime.read_kind == "project"
     assert missing_runtime.status == "error"
     assert missing_runtime.error_message is not None
@@ -393,7 +393,7 @@ def test_load_readable_content_surfaces_project_runtime_and_parse_errors(
         monkeypatch,
         jpype=FakeJPype(fail_on_start=True),
     )
-    jvm_error = load_readable_content(file_path)
+    jvm_error = load_readable_content(file_path, tool_limits=ToolLimits())
     assert jvm_error.status == "error"
     assert (
         jvm_error.error_message
@@ -403,7 +403,7 @@ def test_load_readable_content_surfaces_project_runtime_and_parse_errors(
 
     _install_fake_mpxj(monkeypatch, reader_class=FailingReader)
     FailingReader.read_exception = RuntimeError("File is password protected")
-    parse_error = load_readable_content(file_path)
+    parse_error = load_readable_content(file_path, tool_limits=ToolLimits())
     assert parse_error.status == "error"
     assert parse_error.error_message == "File is password protected"
 
@@ -440,16 +440,13 @@ def test_get_file_info_and_search_text_support_project_content(
     file_path = tmp_path / "plan.mpp"
     file_path.write_bytes(bytes.fromhex("fffe0010"))
     _install_fake_mpxj(monkeypatch)
-    monkeypatch.setattr(
-        filesystem_content,
-        "_get_read_file_cache_root",
-        lambda: tmp_path / "cache-root",
-    )
+    cache_root = tmp_path / "cache-root"
 
     info = get_file_info_impl(
         tmp_path,
         "plan.mpp",
         tool_limits=ToolLimits(max_file_size_characters=100_000),
+        cache_root=cache_root,
     )
     assert info.read_kind == "project"
     assert info.status == "ok"
@@ -462,6 +459,7 @@ def test_get_file_info_and_search_text_support_project_content(
         "plan.mpp",
         source_filters=SourceFilters(),
         tool_limits=ToolLimits(max_file_size_characters=100_000),
+        cache_root=cache_root,
     )
     assert len(search.matches) >= 1
     assert all(match.path == "plan.mpp" for match in search.matches)

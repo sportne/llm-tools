@@ -33,7 +33,9 @@ def test_read_file_tool_reads_text_files(tmp_path: str) -> None:
     assert result.character_count == 11
     assert result.truncated is False
     assert result.resolved_path == "hello.txt"
-    assert context.artifacts == [str(file_path.resolve())]
+    assert context.artifacts == ["hello.txt"]
+    assert context.source_provenance[0].source_id == "workspace:hello.txt"
+    assert context.source_provenance[0].metadata["path"] == "hello.txt"
 
 
 def test_read_file_tool_automatically_converts_non_text_files(
@@ -55,7 +57,7 @@ def test_read_file_tool_automatically_converts_non_text_files(
     fake_module.MarkItDown = FakeMarkItDown
     monkeypatch.setitem(sys.modules, "markitdown", fake_module)
     monkeypatch.setattr(
-        filesystem_tools, "_get_read_file_cache_root", lambda: cache_root
+        filesystem_tools, "_get_read_file_cache_root", lambda root: cache_root
     )
 
     tool = ReadFileTool()
@@ -73,7 +75,8 @@ def test_read_file_tool_automatically_converts_non_text_files(
     assert first.content == f"converted:{file_path.resolve()}"
     assert second.content == first.content
     assert convert_calls == [str(file_path.resolve())]
-    assert context.artifacts == [str(file_path.resolve())]
+    assert context.artifacts == ["report.docx"]
+    assert any(cache_root.iterdir())
 
 
 def test_read_file_tool_rebuilds_cached_markdown_when_source_changes(
@@ -97,7 +100,7 @@ def test_read_file_tool_rebuilds_cached_markdown_when_source_changes(
     fake_module.MarkItDown = FakeMarkItDown
     monkeypatch.setitem(sys.modules, "markitdown", fake_module)
     monkeypatch.setattr(
-        filesystem_tools, "_get_read_file_cache_root", lambda: cache_root
+        filesystem_tools, "_get_read_file_cache_root", lambda root: cache_root
     )
 
     tool = ReadFileTool()
@@ -115,6 +118,38 @@ def test_read_file_tool_rebuilds_cached_markdown_when_source_changes(
 
     assert first.content != second.content
     assert convert_calls == [str(file_path.resolve()), str(file_path.resolve())]
+
+
+def test_read_file_tool_rejects_large_input_before_conversion(
+    tmp_path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path
+    file_path = workspace / "report.docx"
+    file_path.write_bytes(b"x" * 32)
+
+    fake_module = ModuleType("markitdown")
+    convert_calls: list[str] = []
+
+    class FakeMarkItDown:
+        def convert(self, path: str) -> SimpleNamespace:
+            convert_calls.append(path)
+            return SimpleNamespace(text_content=f"converted:{path}")
+
+    fake_module.MarkItDown = FakeMarkItDown
+    monkeypatch.setitem(sys.modules, "markitdown", fake_module)
+
+    result = ReadFileTool().invoke(
+        ToolContext(
+            invocation_id="inv-oversize",
+            workspace=str(workspace),
+            metadata={"tool_limits": {"max_read_input_bytes": 8}},
+        ),
+        ReadFileTool.input_model(path="report.docx"),
+    )
+
+    assert result.status == "too_large"
+    assert result.error_message == "File exceeds the configured readable byte limit"
+    assert convert_calls == []
 
 
 def test_read_file_tool_returns_bounded_character_ranges(tmp_path: str) -> None:
@@ -179,9 +214,10 @@ def test_write_file_tool_writes_text_and_creates_parents(tmp_path: str) -> None:
 
     target = workspace / "nested" / "output.txt"
     assert result.created is True
+    assert result.resolved_path == "nested/output.txt"
     assert result.bytes_written == len(b"hello")
     assert target.read_text(encoding="utf-8") == "hello"
-    assert context.artifacts == [str(target.resolve())]
+    assert context.artifacts == ["nested/output.txt"]
 
 
 def test_write_file_tool_rejects_existing_files_without_overwrite(
@@ -196,6 +232,41 @@ def test_write_file_tool_rejects_existing_files_without_overwrite(
         tool.invoke(
             ToolContext(invocation_id="inv-4", workspace=str(workspace)),
             WriteFileTool.input_model(path="exists.txt", content="new"),
+        )
+
+
+def test_write_file_tool_rejects_absolute_and_symlinked_paths(tmp_path: str) -> None:
+    workspace = tmp_path
+    (workspace / "real").mkdir()
+    (workspace / "real" / "target.txt").write_text("old", encoding="utf-8")
+    (workspace / "link-dir").symlink_to(workspace / "real", target_is_directory=True)
+    (workspace / "link-file.txt").symlink_to(workspace / "real" / "target.txt")
+    (workspace / "dangling.txt").symlink_to(workspace / "missing.txt")
+
+    tool = WriteFileTool()
+    with pytest.raises(ValueError, match="relative"):
+        tool.invoke(
+            ToolContext(invocation_id="inv-abs", workspace=str(workspace)),
+            WriteFileTool.input_model(
+                path=str((workspace / "absolute.txt").resolve()), content="new"
+            ),
+        )
+    with pytest.raises(ValueError, match="symlinked directory"):
+        tool.invoke(
+            ToolContext(invocation_id="inv-link-dir", workspace=str(workspace)),
+            WriteFileTool.input_model(path="link-dir/out.txt", content="new"),
+        )
+    with pytest.raises(ValueError, match="symlinked file"):
+        tool.invoke(
+            ToolContext(invocation_id="inv-link-file", workspace=str(workspace)),
+            WriteFileTool.input_model(
+                path="link-file.txt", content="new", overwrite=True
+            ),
+        )
+    with pytest.raises(ValueError, match="symlinked file"):
+        tool.invoke(
+            ToolContext(invocation_id="inv-dangling", workspace=str(workspace)),
+            WriteFileTool.input_model(path="dangling.txt", content="new"),
         )
 
 
