@@ -101,6 +101,9 @@ class _FakeBlock:
     def columns(self, spec: int | list[int]) -> list[_FakeBlock]:
         return self._streamlit.columns(spec)
 
+    def expander(self, label: str, expanded: bool = False) -> _FakeBlock:
+        return self._streamlit.expander(label, expanded=expanded)
+
     def markdown(self, text: str, **kwargs: object) -> None:
         self._streamlit.markdown(text, **kwargs)
 
@@ -246,6 +249,11 @@ class _FakeStreamlit:
         count = spec if isinstance(spec, int) else len(spec)
         return [_FakeBlock(self) for _ in range(count)]
 
+    def expander(self, label: str, expanded: bool = False) -> _FakeBlock:
+        del expanded
+        self.button_labels.append(label)
+        return _FakeBlock(self)
+
     def chat_message(self, role: str) -> _FakeBlock:
         self.chat_roles.append(role)
         return _FakeBlock(self)
@@ -330,6 +338,127 @@ def _make_app_state(*, session_id: str = "session-1", root_path: str | None = No
         active_session_id=session_id,
         preferences=_MODULES.app.StreamlitPreferences(theme_mode="light"),
         turn_states={session_id: _MODULES.app.AssistantTurnState()},
+    )
+
+
+class _FakeModel(SimpleNamespace):
+    def model_dump(self, mode: str = "json") -> dict[str, object]:
+        del mode
+
+        def _convert(value: object) -> object:
+            if hasattr(value, "model_dump"):
+                return value.model_dump(mode="json")
+            if isinstance(value, list):
+                return [_convert(item) for item in value]
+            if isinstance(value, dict):
+                return {key: _convert(item) for key, item in value.items()}
+            if isinstance(value, SimpleNamespace):
+                return {key: _convert(item) for key, item in vars(value).items()}
+            return value
+
+        return {key: _convert(item) for key, item in vars(self).items()}
+
+
+def _fake_research_inspection(
+    *,
+    session_id: str = "research-1",
+    stop_reason: str | None = None,
+    total_turns: int = 3,
+    pending_approval_ids: list[str] | None = None,
+    resumed_disposition=None,
+    latest_decision_summary: str | None = "waiting",
+    replay_limitations: list[str] | None = None,
+) -> _FakeModel:
+    approval_ids = (
+        ["approval-1"] if pending_approval_ids is None else pending_approval_ids
+    )
+    disposition = (
+        resumed_disposition or _MODULES.app.ResumeDisposition.WAITING_FOR_APPROVAL
+    )
+    approval_request = None
+    pending_approval = None
+    if approval_ids:
+        approval_request = _FakeModel(
+            approval_id=approval_ids[0],
+            tool_name="read_file",
+            expires_at="2026-04-19T10:30:00Z",
+            request=_FakeModel(tool_name="read_file", arguments={"path": "note.txt"}),
+        )
+        pending_approval = _FakeModel(approval_request=approval_request)
+    invocation = _FakeModel(
+        invocation_index=1,
+        tool_name="read_file",
+        status=SimpleNamespace(value="approval_requested"),
+        approval_id=approval_ids[0] if approval_ids else None,
+        error_code=None,
+        policy_snapshot=_FakeModel(
+            reason="approval required",
+            requires_approval=bool(approval_ids),
+        ),
+        logs=["checked workspace"],
+        artifacts=["artifact-1"],
+    )
+    turn = _FakeModel(
+        turn_index=1,
+        selected_task_ids=["task-1"],
+        planner_selected_task_ids=["task-1"],
+        replanning_triggers=["new evidence"],
+        workflow_outcome_statuses=[SimpleNamespace(value="approval_requested")],
+        verification_status_by_task_id={"task-1": "not_run"},
+        pending_approval_id=approval_ids[0] if approval_ids else None,
+        no_progress_signals=["stalled"],
+        decision_action=SimpleNamespace(value="stop"),
+        decision_summary="Need approval before reading the file.",
+        invocation_traces=[invocation],
+    )
+    return _FakeModel(
+        summary=_FakeModel(
+            session_id=session_id,
+            stop_reason=None
+            if stop_reason is None
+            else SimpleNamespace(value=stop_reason),
+            total_turns=total_turns,
+            completed_task_ids=["task-1"] if stop_reason else [],
+            active_task_ids=[] if stop_reason else ["task-1"],
+            pending_approval_ids=approval_ids,
+            verification_status_counts={"not_run": 1},
+            latest_decision_summary=latest_decision_summary,
+        ),
+        resumed=_FakeModel(
+            disposition=disposition,
+            pending_approval=pending_approval,
+            issues=[],
+        ),
+        snapshot=_FakeModel(
+            revision="7",
+            saved_at="2026-04-19T10:00:00Z",
+            state=_FakeModel(
+                session=_FakeModel(root_task_id="task-1"),
+                tasks=[_FakeModel(task_id="task-1", title="Investigate regression")],
+            ),
+            artifacts=_FakeModel(
+                trace=_FakeModel(
+                    final_stop_reason=None
+                    if stop_reason is None
+                    else SimpleNamespace(value=stop_reason),
+                    turns=[turn],
+                )
+            ),
+        ),
+        replay=_FakeModel(
+            steps=[
+                _FakeModel(
+                    turn_index=1,
+                    selected_task_ids=["task-1"],
+                    decision_action=SimpleNamespace(value="stop"),
+                    decision_stop_reason=None
+                    if stop_reason is None
+                    else SimpleNamespace(value=stop_reason),
+                    decision_summary="Need approval before continuing.",
+                )
+            ],
+            limitations=replay_limitations or ["Replay omitted tool payload bodies."],
+        ),
     )
 
 
@@ -1294,6 +1423,10 @@ def test_streamlit_assistant_research_controls_resume_with_explicit_approval_res
 ) -> None:
     fake_st = _FakeStreamlit(button_values={"research-approve:research-1": True})
     monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    inspection = _fake_research_inspection(
+        session_id="research-1",
+        pending_approval_ids=["approval-1"],
+    )
 
     class _FakeController:
         def __init__(self) -> None:
@@ -1303,16 +1436,18 @@ def test_streamlit_assistant_research_controls_resume_with_explicit_approval_res
             raise AssertionError(prompt)
 
         def list_recent(self) -> object:
-            summary = SimpleNamespace(
-                session_id="research-1",
-                stop_reason=SimpleNamespace(value="awaiting_approval"),
-                total_turns=3,
-                pending_approval_ids=["approval-1"],
+            return SimpleNamespace(
+                sessions=[
+                    SimpleNamespace(
+                        summary=inspection.summary,
+                        snapshot=inspection.snapshot,
+                    )
+                ]
             )
-            return SimpleNamespace(sessions=[SimpleNamespace(summary=summary)])
 
         def inspect(self, session_id: str) -> object:
-            return SimpleNamespace(session_id=session_id)
+            assert session_id == "research-1"
+            return inspection
 
         def resume(
             self,
@@ -1320,15 +1455,20 @@ def test_streamlit_assistant_research_controls_resume_with_explicit_approval_res
             *,
             approval_resolution: ApprovalResolution | None = None,
         ) -> object:
+            assert session_id == "research-1"
             self.resolutions.append(approval_resolution)
-            return SimpleNamespace(session_id=session_id)
+            return inspection
 
         def stop(self, session_id: str) -> object:
-            return SimpleNamespace(session_id=session_id)
+            assert session_id == "research-1"
+            return inspection
 
     controller = _FakeController()
     monkeypatch.setattr(
         _MODULES.app, "_build_research_controller", lambda **kwargs: controller
+    )
+    monkeypatch.setattr(
+        _MODULES.app, "resume_session", lambda snapshot: inspection.resumed
     )
     appended: list[object] = []
     monkeypatch.setattr(
@@ -1347,7 +1487,253 @@ def test_streamlit_assistant_research_controls_resume_with_explicit_approval_res
     )
 
     assert controller.resolutions == [ApprovalResolution.APPROVE]
-    assert appended and appended[0].session_id == "research-1"
+    assert appended and appended[0].summary.session_id == "research-1"
+    assert any("awaiting approval" in item for item in fake_st.caption_messages)
+
+
+def test_streamlit_assistant_research_controls_show_states_and_select_details(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit(button_values={"research-view:resumable-1": True})
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    running = _fake_research_inspection(
+        session_id="running-1",
+        pending_approval_ids=[],
+        resumed_disposition=_MODULES.app.ResumeDisposition.RUNNABLE,
+        total_turns=0,
+        latest_decision_summary=None,
+    )
+    resumable = _fake_research_inspection(
+        session_id="resumable-1",
+        pending_approval_ids=[],
+        resumed_disposition=_MODULES.app.ResumeDisposition.RUNNABLE,
+        total_turns=2,
+    )
+    stopped = _fake_research_inspection(
+        session_id="stopped-1",
+        stop_reason="completed",
+        pending_approval_ids=[],
+        resumed_disposition=_MODULES.app.ResumeDisposition.TERMINAL,
+    )
+
+    class _FakeController:
+        def launch(self, *, prompt: str) -> object:
+            raise AssertionError(prompt)
+
+        def list_recent(self) -> object:
+            return SimpleNamespace(
+                sessions=[
+                    SimpleNamespace(summary=running.summary, snapshot=running.snapshot),
+                    SimpleNamespace(
+                        summary=resumable.summary, snapshot=resumable.snapshot
+                    ),
+                    SimpleNamespace(summary=stopped.summary, snapshot=stopped.snapshot),
+                ]
+            )
+
+    monkeypatch.setattr(
+        _MODULES.app,
+        "_build_research_controller",
+        lambda **kwargs: _FakeController(),
+    )
+    resumptions = {
+        id(running.snapshot): running.resumed,
+        id(resumable.snapshot): resumable.resumed,
+        id(stopped.snapshot): stopped.resumed,
+    }
+    monkeypatch.setattr(
+        _MODULES.app,
+        "resume_session",
+        lambda snapshot: resumptions[id(snapshot)],
+    )
+    app_state = _make_app_state(root_path=str(tmp_path))
+    active = app_state.sessions[app_state.active_session_id]
+    active.transcript.append(
+        _MODULES.app.StreamlitTranscriptEntry(
+            role="system",
+            text="Research session: stopped-1\nStop reason: completed",
+        )
+    )
+
+    _MODULES.app._render_sidebar_research_controls(
+        app_state,
+        config=StreamlitAssistantConfig(),
+        runtime=active.runtime,
+        active=active,
+    )
+
+    assert any("running | turns=0" in item for item in fake_st.caption_messages)
+    assert any("resumable | turns=2" in item for item in fake_st.caption_messages)
+    assert any("stopped | turns=3" in item for item in fake_st.caption_messages)
+    assert any("summarized" in item for item in fake_st.caption_messages)
+    assert (
+        fake_st.session_state[_MODULES.app._SELECTED_RESEARCH_SESSION_SLOT]
+        == "resumable-1"
+    )
+
+
+def test_streamlit_assistant_render_research_session_details_shows_replay_and_trace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    fake_st.session_state[_MODULES.app._SELECTED_RESEARCH_SESSION_SLOT] = "research-1"
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    inspection = _fake_research_inspection(session_id="research-1")
+
+    class _FakeController:
+        def inspect(self, session_id: str) -> object:
+            assert session_id == "research-1"
+            return inspection
+
+    monkeypatch.setattr(
+        _MODULES.app, "_build_research_controller", lambda **kwargs: _FakeController()
+    )
+    app_state = _make_app_state(root_path=str(tmp_path))
+    active = app_state.sessions[app_state.active_session_id]
+
+    _MODULES.app._render_research_session_details(
+        app_state,
+        config=StreamlitAssistantConfig(),
+        runtime=active.runtime,
+        active=active,
+    )
+
+    assert "Research session details" in fake_st.button_labels
+    assert "Turn 1" in fake_st.button_labels
+    assert "Raw inspection payload" in fake_st.button_labels
+    assert any("**Replay**" in item for item in fake_st.markdown_messages)
+    assert any("**Trace**" in item for item in fake_st.markdown_messages)
+    assert any("Limitations:" in item for item in fake_st.caption_messages)
+    assert any("approval=approval-1" in item for item in fake_st.caption_messages)
+
+
+def test_streamlit_assistant_research_detail_resolves_approval_and_appends_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit(button_values={"research-detail-deny:research-1": True})
+    fake_st.session_state[_MODULES.app._SELECTED_RESEARCH_SESSION_SLOT] = "research-1"
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    initial = _fake_research_inspection(session_id="research-1")
+    updated = _fake_research_inspection(
+        session_id="research-1",
+        stop_reason="approval_denied",
+        pending_approval_ids=[],
+        resumed_disposition=_MODULES.app.ResumeDisposition.TERMINAL,
+    )
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.resolutions: list[ApprovalResolution | None] = []
+
+        def inspect(self, session_id: str) -> object:
+            assert session_id == "research-1"
+            return initial
+
+        def resume(
+            self,
+            session_id: str,
+            *,
+            approval_resolution: ApprovalResolution | None = None,
+        ) -> object:
+            assert session_id == "research-1"
+            self.resolutions.append(approval_resolution)
+            return updated
+
+        def stop(self, session_id: str) -> object:
+            raise AssertionError(session_id)
+
+    controller = _FakeController()
+    monkeypatch.setattr(
+        _MODULES.app, "_build_research_controller", lambda **kwargs: controller
+    )
+    appended: list[object] = []
+    monkeypatch.setattr(
+        _MODULES.app,
+        "_append_research_summary",
+        lambda active, inspection, app_state: appended.append(inspection),
+    )
+    app_state = _make_app_state(root_path=str(tmp_path))
+    active = app_state.sessions[app_state.active_session_id]
+
+    _MODULES.app._render_research_session_details(
+        app_state,
+        config=StreamlitAssistantConfig(),
+        runtime=active.runtime,
+        active=active,
+    )
+
+    assert controller.resolutions == [ApprovalResolution.DENY]
+    assert appended and appended[0].summary.stop_reason.value == "approval_denied"
+
+
+def test_streamlit_assistant_research_detail_shows_resume_for_resumable_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    fake_st.session_state[_MODULES.app._SELECTED_RESEARCH_SESSION_SLOT] = "research-2"
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    inspection = _fake_research_inspection(
+        session_id="research-2",
+        pending_approval_ids=[],
+        resumed_disposition=_MODULES.app.ResumeDisposition.RUNNABLE,
+    )
+
+    class _FakeController:
+        def inspect(self, session_id: str) -> object:
+            assert session_id == "research-2"
+            return inspection
+
+    monkeypatch.setattr(
+        _MODULES.app, "_build_research_controller", lambda **kwargs: _FakeController()
+    )
+    app_state = _make_app_state(root_path=str(tmp_path))
+    active = app_state.sessions[app_state.active_session_id]
+
+    _MODULES.app._render_research_session_details(
+        app_state,
+        config=StreamlitAssistantConfig(),
+        runtime=active.runtime,
+        active=active,
+    )
+
+    assert "Resume" in fake_st.button_labels
+    assert "Approve" not in fake_st.button_labels
+    assert "Deny" not in fake_st.button_labels
+
+
+def test_streamlit_assistant_research_detail_warns_when_inspection_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    fake_st.session_state[_MODULES.app._SELECTED_RESEARCH_SESSION_SLOT] = "missing-1"
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+
+    class _FakeController:
+        def inspect(self, session_id: str) -> object:
+            raise RuntimeError(f"missing session: {session_id}")
+
+    monkeypatch.setattr(
+        _MODULES.app, "_build_research_controller", lambda **kwargs: _FakeController()
+    )
+    app_state = _make_app_state(root_path=str(tmp_path))
+    active = app_state.sessions[app_state.active_session_id]
+
+    _MODULES.app._render_research_session_details(
+        app_state,
+        config=StreamlitAssistantConfig(),
+        runtime=active.runtime,
+        active=active,
+    )
+
+    assert any(
+        "Research inspection failed for missing-1" in item
+        for item in fake_st.warning_messages
+    )
 
 
 def test_streamlit_assistant_build_research_controller_filters_blocked_tools(

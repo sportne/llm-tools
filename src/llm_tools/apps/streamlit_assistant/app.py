@@ -46,6 +46,7 @@ from llm_tools.harness_api import (
     ApprovalResolution,
     BudgetPolicy,
     FileHarnessStateStore,
+    HarnessInvocationTrace,
     HarnessSessionCreateRequest,
     HarnessSessionInspection,
     HarnessSessionInspectRequest,
@@ -55,6 +56,10 @@ from llm_tools.harness_api import (
     HarnessSessionRunRequest,
     HarnessSessionService,
     HarnessSessionStopRequest,
+    HarnessTurnTrace,
+    ResumedHarnessSession,
+    ResumeDisposition,
+    resume_session,
 )
 from llm_tools.llm_providers import OpenAICompatibleProvider
 from llm_tools.tool_api import SideEffectClass, ToolSpec
@@ -77,6 +82,7 @@ from llm_tools.workflow_api.chat_session import (
 
 _APP_STATE_SLOT = "llm_tools_streamlit_assistant_app_state"
 _ACTIVE_TURN_STATE_SLOT = "llm_tools_streamlit_assistant_active_turn"
+_SELECTED_RESEARCH_SESSION_SLOT = "llm_tools_streamlit_assistant_research_selection"
 _SECRET_CACHE_STATE_SLOT = "llm_tools_streamlit_assistant_secret_cache"  # noqa: S105
 _STREAMLIT_BROWSER_USAGE_STATS_FLAG = "--browser.gatherUsageStats=false"
 _STREAMLIT_TOOLBAR_MODE_FLAG = "--client.toolbarMode=minimal"
@@ -148,6 +154,20 @@ class AssistantWorkspaceState:
     turn_states: dict[str, AssistantTurnState] = field(default_factory=dict)
     drafts: dict[str, str] = field(default_factory=dict)
     startup_notices: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class AssistantResearchSessionView:
+    """Assistant-side view model for one durable research session."""
+
+    session_id: str
+    state_label: str
+    state_detail: str
+    summarized: bool
+    can_resume: bool
+    waiting_for_approval: bool
+    is_stopped: bool
+    issue_messages: list[str] = field(default_factory=list)
 
 
 class AssistantResearchSessionController:
@@ -222,21 +242,23 @@ class AssistantResearchSessionController:
 
     @staticmethod
     def summary_text(inspection: HarnessSessionInspection) -> str:
-        summary = inspection.summary
-        lines = [
-            f"Research session: {summary.session_id}",
-            f"Stop reason: {summary.stop_reason.value if summary.stop_reason else 'running'}",
-            f"Turns: {summary.total_turns}",
-            ("Completed tasks: " + (", ".join(summary.completed_task_ids) or "none")),
-            f"Active tasks: {', '.join(summary.active_task_ids) or 'none'}",
-        ]
-        if summary.pending_approval_ids:
-            lines.append(
-                "Pending approvals: " + ", ".join(summary.pending_approval_ids)
-            )
-        if summary.latest_decision_summary:
-            lines.append(f"Latest decision: {summary.latest_decision_summary}")
-        return "\n".join(lines)
+        return _research_summary_text(inspection.summary)
+
+
+def _research_summary_text(summary: Any) -> str:
+    """Return the assistant transcript summary for one research session."""
+    lines = [
+        f"Research session: {summary.session_id}",
+        f"Stop reason: {summary.stop_reason.value if summary.stop_reason else 'running'}",
+        f"Turns: {summary.total_turns}",
+        ("Completed tasks: " + (", ".join(summary.completed_task_ids) or "none")),
+        f"Active tasks: {', '.join(summary.active_task_ids) or 'none'}",
+    ]
+    if summary.pending_approval_ids:
+        lines.append("Pending approvals: " + ", ".join(summary.pending_approval_ids))
+    if summary.latest_decision_summary:
+        lines.append(f"Latest decision: {summary.latest_decision_summary}")
+    return "\n".join(lines)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1765,6 +1787,598 @@ def _append_research_summary(
     _save_workspace_state(app_state)
 
 
+def _selected_research_session_id() -> str | None:
+    st = _streamlit_module()
+    value = st.session_state.get(_SELECTED_RESEARCH_SESSION_SLOT)
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _select_research_session(session_id: str | None) -> None:
+    st = _streamlit_module()
+    st.session_state[_SELECTED_RESEARCH_SESSION_SLOT] = session_id
+
+
+def _research_summary_inserted(
+    record: StreamlitPersistedSessionRecord,
+    *,
+    session_id: str,
+) -> bool:
+    prefix = f"Research session: {session_id}\n"
+    return any(
+        entry.role == "system" and entry.text.startswith(prefix)
+        for entry in record.transcript
+    )
+
+
+def _research_issue_messages(resumed: ResumedHarnessSession) -> list[str]:
+    return [issue.message for issue in resumed.issues]
+
+
+def _build_research_session_view(
+    summary: Any,
+    *,
+    resumed: ResumedHarnessSession,
+    summarized: bool,
+) -> AssistantResearchSessionView:
+    waiting_for_approval = resumed.disposition is ResumeDisposition.WAITING_FOR_APPROVAL
+    can_resume = resumed.disposition is ResumeDisposition.RUNNABLE
+    issue_messages = _research_issue_messages(resumed)
+    is_stopped = summary.stop_reason is not None or resumed.disposition in {
+        ResumeDisposition.TERMINAL,
+        ResumeDisposition.APPROVAL_EXPIRED,
+        ResumeDisposition.CORRUPT,
+        ResumeDisposition.INCOMPATIBLE_SCHEMA,
+    }
+    if waiting_for_approval:
+        state_label = "awaiting approval"
+    elif can_resume:
+        state_label = "running" if summary.total_turns == 0 else "resumable"
+    else:
+        state_label = "stopped"
+    detail_bits = [
+        f"turns={summary.total_turns}",
+        f"active={len(summary.active_task_ids)}",
+    ]
+    if summary.pending_approval_ids:
+        detail_bits.append(f"approvals={len(summary.pending_approval_ids)}")
+    if summary.stop_reason is not None:
+        detail_bits.append(f"reason={summary.stop_reason.value}")
+    if summarized:
+        detail_bits.append("summarized")
+    if issue_messages:
+        detail_bits.append("needs attention")
+    return AssistantResearchSessionView(
+        session_id=summary.session_id,
+        state_label=state_label,
+        state_detail=" | ".join(detail_bits),
+        summarized=summarized,
+        can_resume=can_resume,
+        waiting_for_approval=waiting_for_approval,
+        is_stopped=is_stopped,
+        issue_messages=issue_messages,
+    )
+
+
+def _payload_for_display(value: object) -> object:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    return value
+
+
+def _research_session_title(inspection: HarnessSessionInspection) -> str | None:
+    state = inspection.snapshot.state
+    root_task_id = state.session.root_task_id
+    for task in state.tasks:
+        if task.task_id == root_task_id:
+            return task.title
+    return None
+
+
+def _research_verification_copy(summary: Any) -> str:
+    if not summary.verification_status_counts:
+        return "No verification recorded yet."
+    ordered = sorted(summary.verification_status_counts.items())
+    return " | ".join(f"{name}={count}" for name, count in ordered)
+
+
+def _render_research_invocation_trace(
+    invocation: HarnessInvocationTrace,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    status = invocation.status.value
+    label = (
+        f"{invocation.tool_name} [{status}] | invocation={invocation.invocation_index}"
+    )
+    st.caption(label)
+    extra_bits: list[str] = []
+    if invocation.approval_id is not None:
+        extra_bits.append(f"approval={invocation.approval_id}")
+    if invocation.error_code is not None:
+        extra_bits.append(f"error={invocation.error_code.value}")
+    if invocation.policy_snapshot is not None:
+        extra_bits.append(f"policy={invocation.policy_snapshot.reason}")
+        if invocation.policy_snapshot.requires_approval:
+            extra_bits.append("approval required")
+    if extra_bits:
+        st.caption(" | ".join(extra_bits))
+    if invocation.logs:
+        st.markdown("Logs")
+        for item in invocation.logs:
+            st.code(item)
+    if invocation.artifacts:
+        st.caption("Artifacts: " + ", ".join(invocation.artifacts))
+    st.code(pretty_json(_payload_for_display(invocation)))
+
+
+def _render_research_turn_trace(turn: HarnessTurnTrace) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    summary_bits: list[str] = []
+    if turn.selected_task_ids:
+        summary_bits.append("tasks=" + ", ".join(turn.selected_task_ids))
+    if turn.pending_approval_id is not None:
+        summary_bits.append(f"pending approval={turn.pending_approval_id}")
+    if turn.decision_action is not None:
+        summary_bits.append(f"decision={turn.decision_action.value}")
+    with st.expander(f"Turn {turn.turn_index}", expanded=False):
+        if summary_bits:
+            st.caption(" | ".join(summary_bits))
+        if turn.planner_selected_task_ids:
+            st.caption("Planner selected: " + ", ".join(turn.planner_selected_task_ids))
+        if turn.replanning_triggers:
+            st.caption("Replanning: " + ", ".join(turn.replanning_triggers))
+        if turn.workflow_outcome_statuses:
+            st.caption(
+                "Outcomes: "
+                + ", ".join(status.value for status in turn.workflow_outcome_statuses)
+            )
+        if turn.verification_status_by_task_id:
+            st.caption(
+                "Verification: "
+                + ", ".join(
+                    f"{task_id}={status}"
+                    for task_id, status in sorted(
+                        turn.verification_status_by_task_id.items()
+                    )
+                )
+            )
+        if turn.no_progress_signals:
+            st.caption("No-progress signals: " + ", ".join(turn.no_progress_signals))
+        if turn.decision_summary:
+            st.markdown(turn.decision_summary)
+        for invocation in turn.invocation_traces:
+            _render_research_invocation_trace(invocation)
+        st.code(pretty_json(_payload_for_display(turn)))
+
+
+def _run_research_action(
+    session_id: str,
+    *,
+    action: Callable[[], HarnessSessionInspection],
+    failure_prefix: str,
+) -> HarnessSessionInspection | None:
+    st = _streamlit_module()
+    try:
+        inspection = action()
+    except Exception as exc:
+        st.warning(f"{failure_prefix} for {session_id}: {exc}")
+        return None
+    _select_research_session(inspection.summary.session_id)
+    return inspection
+
+
+def _run_and_append_research_action(
+    *,
+    active: StreamlitPersistedSessionRecord,
+    inspection_action: Callable[[], HarnessSessionInspection],
+    app_state: AssistantWorkspaceState,
+    session_id: str,
+    failure_prefix: str,
+) -> HarnessSessionInspection | None:
+    inspection = _run_research_action(
+        session_id,
+        action=inspection_action,
+        failure_prefix=failure_prefix,
+    )
+    if inspection is not None:
+        _append_research_summary(active, inspection, app_state)
+    return inspection
+
+
+def _conditional_button(
+    container: Any,
+    *,
+    visible: bool,
+    label: str,
+    key: str,
+) -> bool:
+    if not visible:
+        return False
+    return bool(container.button(label, key=key, use_container_width=True))
+
+
+def _updated_research_view(
+    inspection: HarnessSessionInspection,
+    *,
+    active: StreamlitPersistedSessionRecord,
+) -> AssistantResearchSessionView:
+    return _build_research_session_view(
+        inspection.summary,
+        resumed=inspection.resumed,
+        summarized=_research_summary_inserted(
+            active,
+            session_id=inspection.summary.session_id,
+        ),
+    )
+
+
+def _apply_research_action_result(
+    inspection: HarnessSessionInspection,
+    *,
+    updated: HarnessSessionInspection | None,
+) -> HarnessSessionInspection:
+    if updated is None:
+        return inspection
+    return updated
+
+
+def _render_research_detail_header(
+    inspection: HarnessSessionInspection,
+    *,
+    view: AssistantResearchSessionView,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    title = _research_session_title(inspection)
+    if title:
+        st.markdown(f"### {title}")
+    st.markdown(f"`{inspection.summary.session_id}`")
+    st.caption(
+        f"{view.state_label} | {view.state_detail}"
+        f" | revision={inspection.snapshot.revision}"
+        f" | saved={inspection.snapshot.saved_at}"
+    )
+    for message in view.issue_messages:
+        st.warning(message)
+
+
+def _render_research_detail_actions(
+    inspection: HarnessSessionInspection,
+    *,
+    controller: AssistantResearchSessionController,
+    active: StreamlitPersistedSessionRecord,
+    app_state: AssistantWorkspaceState,
+    view: AssistantResearchSessionView,
+) -> HarnessSessionInspection:  # pragma: no cover
+    st = _streamlit_module()
+    session_id = inspection.summary.session_id
+    action_cols = st.columns(5)
+    if action_cols[0].button(
+        "Insert summary",
+        key=f"research-detail-insert:{session_id}",
+        use_container_width=True,
+    ):
+        _append_research_summary(active, inspection, app_state)
+    inspection = _apply_research_action_result(
+        inspection,
+        updated=_run_and_append_research_action(
+            active=active,
+            inspection_action=lambda: controller.resume(
+                session_id,
+                approval_resolution=ApprovalResolution.APPROVE,
+            ),
+            app_state=app_state,
+            session_id=session_id,
+            failure_prefix="Research approval failed",
+        )
+        if _conditional_button(
+            action_cols[1],
+            visible=view.waiting_for_approval,
+            label="Approve",
+            key=f"research-detail-approve:{session_id}",
+        )
+        else None,
+    )
+    inspection = _apply_research_action_result(
+        inspection,
+        updated=_run_and_append_research_action(
+            active=active,
+            inspection_action=lambda: controller.resume(
+                session_id,
+                approval_resolution=ApprovalResolution.DENY,
+            ),
+            app_state=app_state,
+            session_id=session_id,
+            failure_prefix="Research denial failed",
+        )
+        if _conditional_button(
+            action_cols[2],
+            visible=view.waiting_for_approval,
+            label="Deny",
+            key=f"research-detail-deny:{session_id}",
+        )
+        else None,
+    )
+    inspection = _apply_research_action_result(
+        inspection,
+        updated=_run_and_append_research_action(
+            active=active,
+            inspection_action=lambda: controller.resume(session_id),
+            app_state=app_state,
+            session_id=session_id,
+            failure_prefix="Research resume failed",
+        )
+        if _conditional_button(
+            action_cols[3],
+            visible=view.can_resume and not view.waiting_for_approval,
+            label="Resume",
+            key=f"research-detail-resume:{session_id}",
+        )
+        else None,
+    )
+    inspection = _apply_research_action_result(
+        inspection,
+        updated=_run_and_append_research_action(
+            active=active,
+            inspection_action=lambda: controller.stop(session_id),
+            app_state=app_state,
+            session_id=session_id,
+            failure_prefix="Research stop failed",
+        )
+        if _conditional_button(
+            action_cols[4],
+            visible=not view.is_stopped,
+            label="Stop",
+            key=f"research-detail-stop:{session_id}",
+        )
+        else None,
+    )
+    return inspection
+
+
+def _render_research_overview(
+    inspection: HarnessSessionInspection,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    st.markdown("**Overview**")
+    st.caption(f"Turns: {inspection.summary.total_turns}")
+    st.caption(
+        "Completed tasks: "
+        + (", ".join(inspection.summary.completed_task_ids) or "none")
+    )
+    st.caption(
+        "Active tasks: " + (", ".join(inspection.summary.active_task_ids) or "none")
+    )
+    if inspection.summary.pending_approval_ids:
+        st.caption(
+            "Pending approvals: " + ", ".join(inspection.summary.pending_approval_ids)
+        )
+    if inspection.summary.latest_decision_summary:
+        st.markdown(inspection.summary.latest_decision_summary)
+    st.caption(_research_verification_copy(inspection.summary))
+
+
+def _render_research_approval_state(
+    inspection: HarnessSessionInspection,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    if inspection.resumed.pending_approval is None:
+        return
+    approval_request = inspection.resumed.pending_approval.approval_request
+    st.markdown("**Approval state**")
+    st.caption(
+        f"Approval {approval_request.approval_id}"
+        f" | tool={approval_request.tool_name}"
+        f" | expires={approval_request.expires_at}"
+    )
+    st.code(pretty_json(_payload_for_display(approval_request)))
+
+
+def _render_research_replay(
+    inspection: HarnessSessionInspection,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    if inspection.replay is None:
+        return
+    st.markdown("**Replay**")
+    if inspection.replay.limitations:
+        st.caption("Limitations: " + "; ".join(inspection.replay.limitations))
+    for step in inspection.replay.steps:
+        step_bits = [
+            f"Turn {step.turn_index}",
+            f"tasks={', '.join(step.selected_task_ids) or 'none'}",
+        ]
+        if step.decision_action is not None:
+            step_bits.append(f"decision={step.decision_action.value}")
+        if step.decision_stop_reason is not None:
+            step_bits.append(f"stop={step.decision_stop_reason.value}")
+        st.caption(" | ".join(step_bits))
+        if step.decision_summary:
+            st.markdown(step.decision_summary)
+        st.code(pretty_json(_payload_for_display(step)))
+
+
+def _render_research_trace(
+    inspection: HarnessSessionInspection,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    trace = inspection.snapshot.artifacts.trace
+    if trace is None or not trace.turns:
+        return
+    st.markdown("**Trace**")
+    if trace.final_stop_reason is not None:
+        st.caption(f"Final stop reason: {trace.final_stop_reason.value}")
+    for turn in trace.turns:
+        _render_research_turn_trace(turn)
+
+
+def _render_research_raw_payload(
+    inspection: HarnessSessionInspection,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    with st.expander("Raw inspection payload", expanded=False):
+        st.code(pretty_json(_payload_for_display(inspection)))
+
+
+def _render_research_session_details(
+    app_state: AssistantWorkspaceState,
+    *,
+    config: StreamlitAssistantConfig,
+    runtime: StreamlitRuntimeConfig,
+    active: StreamlitPersistedSessionRecord,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    if not config.research.enabled:
+        return
+    session_id = _selected_research_session_id()
+    if session_id is None:
+        return
+    controller = _build_research_controller(config=config, runtime=runtime)
+    inspection = _run_research_action(
+        session_id,
+        action=lambda: controller.inspect(session_id),
+        failure_prefix="Research inspection failed",
+    )
+    if inspection is None:
+        return
+    with st.expander("Research session details", expanded=True):
+        view = _updated_research_view(inspection, active=active)
+        _render_research_detail_header(inspection, view=view)
+        inspection = _render_research_detail_actions(
+            inspection,
+            controller=controller,
+            active=active,
+            app_state=app_state,
+            view=view,
+        )
+        _render_research_overview(inspection)
+        _render_research_approval_state(inspection)
+        _render_research_replay(inspection)
+        _render_research_trace(inspection)
+        _render_research_raw_payload(inspection)
+
+
+def _launch_research_task(
+    prompt: str,
+    *,
+    controller: AssistantResearchSessionController,
+    active: StreamlitPersistedSessionRecord,
+    app_state: AssistantWorkspaceState,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    cleaned = prompt.strip()
+    if not cleaned:
+        st.warning("Enter a research task first.")
+        return
+    inspection = _run_and_append_research_action(
+        active=active,
+        inspection_action=lambda: controller.launch(prompt=cleaned),
+        app_state=app_state,
+        session_id=_title_from_prompt(cleaned),
+        failure_prefix="Research launch failed",
+    )
+    del inspection
+
+
+def _render_sidebar_research_session_item(
+    item: Any,
+    *,
+    controller: AssistantResearchSessionController,
+    active: StreamlitPersistedSessionRecord,
+    app_state: AssistantWorkspaceState,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    summary = item.summary
+    session_id = summary.session_id
+    view = _build_research_session_view(
+        summary,
+        resumed=resume_session(item.snapshot),
+        summarized=_research_summary_inserted(active, session_id=session_id),
+    )
+    st.markdown(f"`{session_id}`")
+    st.caption(f"{view.state_label} | {view.state_detail}")
+    for message in view.issue_messages:
+        st.caption(message)
+    columns = st.columns(5)
+    if columns[0].button(
+        "View details",
+        key=f"research-view:{session_id}",
+        use_container_width=True,
+    ):
+        _select_research_session(session_id)
+    if columns[1].button(
+        "Insert summary",
+        key=f"research-insert:{session_id}",
+        use_container_width=True,
+    ):
+        _run_and_append_research_action(
+            active=active,
+            inspection_action=lambda: controller.inspect(session_id),
+            app_state=app_state,
+            session_id=session_id,
+            failure_prefix="Research inspection failed",
+        )
+    if _conditional_button(
+        columns[2],
+        visible=view.waiting_for_approval,
+        label="Approve",
+        key=f"research-approve:{session_id}",
+    ):
+        _run_and_append_research_action(
+            active=active,
+            inspection_action=lambda: controller.resume(
+                session_id,
+                approval_resolution=ApprovalResolution.APPROVE,
+            ),
+            app_state=app_state,
+            session_id=session_id,
+            failure_prefix="Research approval failed",
+        )
+    if _conditional_button(
+        columns[3],
+        visible=view.waiting_for_approval,
+        label="Deny",
+        key=f"research-deny:{session_id}",
+    ):
+        _run_and_append_research_action(
+            active=active,
+            inspection_action=lambda: controller.resume(
+                session_id,
+                approval_resolution=ApprovalResolution.DENY,
+            ),
+            app_state=app_state,
+            session_id=session_id,
+            failure_prefix="Research denial failed",
+        )
+    if _conditional_button(
+        columns[2],
+        visible=view.can_resume and not view.waiting_for_approval,
+        label="Resume",
+        key=f"research-resume:{session_id}",
+    ):
+        _run_and_append_research_action(
+            active=active,
+            inspection_action=lambda: controller.resume(session_id),
+            app_state=app_state,
+            session_id=session_id,
+            failure_prefix="Research resume failed",
+        )
+    if _conditional_button(
+        columns[4],
+        visible=not view.is_stopped,
+        label="Stop",
+        key=f"research-stop:{session_id}",
+    ):
+        _run_and_append_research_action(
+            active=active,
+            inspection_action=lambda: controller.stop(session_id),
+            app_state=app_state,
+            session_id=session_id,
+            failure_prefix="Research stop failed",
+        )
+
+
 def _render_sidebar_research_controls(
     app_state: AssistantWorkspaceState,
     *,
@@ -1785,12 +2399,12 @@ def _render_sidebar_research_controls(
         key="assistant-research-prompt",
     )
     if st.button("Start research task", use_container_width=True):
-        prompt = research_prompt.strip()
-        if prompt:
-            inspection = controller.launch(prompt=prompt)
-            _append_research_summary(active, inspection, app_state)
-        else:
-            st.warning("Enter a research task first.")
+        _launch_research_task(
+            research_prompt,
+            controller=controller,
+            active=active,
+            app_state=app_state,
+        )
     try:
         recent = controller.list_recent()
     except Exception as exc:
@@ -1798,46 +2412,12 @@ def _render_sidebar_research_controls(
         return
 
     for item in recent.sessions:
-        summary = item.summary
-        st.markdown(f"`{summary.session_id}`")
-        st.caption(
-            f"state={summary.stop_reason.value if summary.stop_reason else 'running'} | turns={summary.total_turns} | approvals={len(summary.pending_approval_ids)}"
+        _render_sidebar_research_session_item(
+            item,
+            controller=controller,
+            active=active,
+            app_state=app_state,
         )
-        if summary.pending_approval_ids:
-            cols = st.columns(4)
-            if cols[0].button(
-                "Insert summary", key=f"research-insert:{summary.session_id}"
-            ):
-                inspection = controller.inspect(summary.session_id)
-                _append_research_summary(active, inspection, app_state)
-            if cols[1].button("Approve", key=f"research-approve:{summary.session_id}"):
-                inspection = controller.resume(
-                    summary.session_id,
-                    approval_resolution=ApprovalResolution.APPROVE,
-                )
-                _append_research_summary(active, inspection, app_state)
-            if cols[2].button("Deny", key=f"research-deny:{summary.session_id}"):
-                inspection = controller.resume(
-                    summary.session_id,
-                    approval_resolution=ApprovalResolution.DENY,
-                )
-                _append_research_summary(active, inspection, app_state)
-            if cols[3].button("Stop", key=f"research-stop:{summary.session_id}"):
-                inspection = controller.stop(summary.session_id)
-                _append_research_summary(active, inspection, app_state)
-            continue
-        cols = st.columns(3)
-        if cols[0].button(
-            "Insert summary", key=f"research-insert:{summary.session_id}"
-        ):
-            inspection = controller.inspect(summary.session_id)
-            _append_research_summary(active, inspection, app_state)
-        if cols[1].button("Resume", key=f"research-resume:{summary.session_id}"):
-            inspection = controller.resume(summary.session_id)
-            _append_research_summary(active, inspection, app_state)
-        if cols[2].button("Stop", key=f"research-stop:{summary.session_id}"):
-            inspection = controller.stop(summary.session_id)
-            _append_research_summary(active, inspection, app_state)
 
 
 def _render_sidebar(
@@ -1971,6 +2551,7 @@ def run_streamlit_assistant_app(
             config=config,
         )
     st.session_state.setdefault(_ACTIVE_TURN_STATE_SLOT, None)
+    st.session_state.setdefault(_SELECTED_RESEARCH_SESSION_SLOT, None)
     st.session_state.setdefault(_SECRET_CACHE_STATE_SLOT, {})
     app_state: AssistantWorkspaceState = st.session_state[_APP_STATE_SLOT]
 
@@ -1983,6 +2564,12 @@ def run_streamlit_assistant_app(
     app_state.startup_notices.clear()
 
     _render_summary_chips(active_record)
+    _render_research_session_details(
+        app_state,
+        config=config,
+        runtime=active_record.runtime,
+        active=active_record,
+    )
 
     if pending_prompt is not None:
         pending_session_id, pending_text = pending_prompt

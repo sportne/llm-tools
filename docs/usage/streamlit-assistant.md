@@ -100,6 +100,17 @@ If you send another prompt while the assistant is still working, the UI keeps on
 queued follow-up prompt for that session and sends it automatically when the
 active turn finishes or is stopped.
 
+The research panel stays in the sidebar for launch and recent-session controls,
+while the main pane can show a collapsible detail view for the selected durable
+research session. That detail view surfaces inspection, replay, trace,
+approval-resolution, resumability, and raw inspection payloads without turning
+research sessions into the main assistant transcript.
+
+Research session state copy now distinguishes running, awaiting approval,
+resumable, stopped, and summarized states. A session is treated as summarized
+for the current assistant chat once its summary has been inserted back into that
+chat transcript.
+
 The UI surfaces capability state for each enabled tool and source group with
 assistant-facing readiness hints such as:
 
