@@ -3,9 +3,6 @@
 These examples are small, runnable entry points that show the implemented
 public APIs working together.
 
-For an interactive terminal UI over the same core surfaces, see the optional
-Textual workbench in `llm_tools.apps.textual_workbench`.
-
 ## Assistant Config Examples
 
 These YAML files configure `llm_tools.apps.streamlit_assistant` for common

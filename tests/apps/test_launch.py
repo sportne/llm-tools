@@ -1,4 +1,4 @@
-"""Launcher and packaging tests for the Textual workbench."""
+"""Launcher and packaging tests for the remaining app entrypoints."""
 
 from __future__ import annotations
 
@@ -9,60 +9,118 @@ import tomllib
 from pathlib import Path
 
 import pytest
-from tests.apps._imports import import_textual_workbench_modules
+from tests.apps._imports import (
+    import_streamlit_assistant_modules,
+    import_streamlit_chat_modules,
+)
 
 
-def test_textual_workbench_package_imports_without_loading_textual() -> None:
-    module = importlib.import_module("llm_tools.apps.textual_workbench")
-    main_module = importlib.import_module("llm_tools.apps.textual_workbench.__main__")
+@pytest.mark.parametrize(
+    ("module_name", "main_module_name", "runner_name"),
+    [
+        (
+            "llm_tools.apps.streamlit_chat",
+            "llm_tools.apps.streamlit_chat.__main__",
+            "run_streamlit_chat_app",
+        ),
+        (
+            "llm_tools.apps.streamlit_assistant",
+            "llm_tools.apps.streamlit_assistant.__main__",
+            "run_streamlit_assistant_app",
+        ),
+    ],
+)
+def test_streamlit_packages_export_main_and_runner(
+    module_name: str,
+    main_module_name: str,
+    runner_name: str,
+) -> None:
+    module = importlib.import_module(module_name)
+    main_module = importlib.import_module(main_module_name)
 
     assert hasattr(module, "main")
-    assert hasattr(module, "run_workbench_app")
+    assert hasattr(module, runner_name)
     assert hasattr(main_module, "main")
 
 
+@pytest.mark.parametrize(
+    ("package_name", "runner_path", "main_path"),
+    [
+        (
+            "llm_tools.apps.streamlit_chat",
+            "llm_tools.apps.streamlit_chat.app.run_streamlit_chat_app",
+            "llm_tools.apps.streamlit_chat.app.main",
+        ),
+        (
+            "llm_tools.apps.streamlit_assistant",
+            "llm_tools.apps.streamlit_assistant.app.run_streamlit_assistant_app",
+            "llm_tools.apps.streamlit_assistant.app.main",
+        ),
+    ],
+)
 def test_package_main_and_runner_dispatch_to_app_layer(
+    package_name: str,
+    runner_path: str,
+    main_path: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    package = importlib.import_module("llm_tools.apps.textual_workbench")
+    package = importlib.import_module(package_name)
     called: list[str] = []
 
-    monkeypatch.setattr(
-        "llm_tools.apps.textual_workbench.app.run_workbench_app",
-        lambda: called.append("run"),
-    )
-    monkeypatch.setattr(
-        "llm_tools.apps.textual_workbench.app.main",
-        lambda: called.append("main") or 0,
-    )
+    monkeypatch.setattr(runner_path, lambda **kwargs: called.append(f"run:{kwargs!r}"))
+    monkeypatch.setattr(main_path, lambda argv=None: called.append("main") or 0)
 
-    package.run_workbench_app()
+    getattr(package, next(name for name in dir(package) if name.startswith("run_")))(
+        root_path=None,
+        config=None,
+    )
     assert package.main() == 0
-    assert called == ["run", "main"]
+    assert len(called) == 2
+    assert called[1] == "main"
 
 
-def test_console_script_target_is_declared_in_pyproject() -> None:
+def test_remaining_console_scripts_are_declared_and_textual_scripts_are_gone() -> None:
     pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
     pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    scripts = pyproject["project"]["scripts"]
 
+    assert scripts["llm-tools-harness"] == "llm_tools.apps.harness_cli:main"
+    assert scripts["llm-tools-streamlit-chat"] == "llm_tools.apps.streamlit_chat:main"
     assert (
-        pyproject["project"]["scripts"]["llm-tools-workbench"]
-        == "llm_tools.apps.textual_workbench:main"
+        scripts["llm-tools-streamlit-assistant"]
+        == "llm_tools.apps.streamlit_assistant:main"
     )
+    assert "llm-tools-chat" not in scripts
+    assert "llm-tools-workbench" not in scripts
 
 
-def test_apps_optional_dependency_group_is_declared() -> None:
+def test_textual_dependency_hooks_are_removed() -> None:
     pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
     pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    optional_dependencies = pyproject["project"]["optional-dependencies"]
+    dev_dependencies = optional_dependencies["dev"]
 
-    assert "textual>=0.89.1,<1" in pyproject["project"]["optional-dependencies"]["apps"]
+    assert "apps" not in optional_dependencies
+    assert all("textual" not in dependency for dependency in dev_dependencies)
 
 
+@pytest.mark.parametrize(
+    ("package_name", "main_module_name"),
+    [
+        ("llm_tools.apps.streamlit_chat", "llm_tools.apps.streamlit_chat.__main__"),
+        (
+            "llm_tools.apps.streamlit_assistant",
+            "llm_tools.apps.streamlit_assistant.__main__",
+        ),
+    ],
+)
 def test_module_main_helpers_dispatch_to_package_main(
+    package_name: str,
+    main_module_name: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    package = importlib.import_module("llm_tools.apps.textual_workbench")
-    main_module = importlib.import_module("llm_tools.apps.textual_workbench.__main__")
+    package = importlib.import_module(package_name)
+    main_module = importlib.import_module(main_module_name)
 
     monkeypatch.setattr(package, "main", lambda: 7)
 
@@ -70,34 +128,55 @@ def test_module_main_helpers_dispatch_to_package_main(
     assert main_module.main() == 7
 
 
+@pytest.mark.parametrize(
+    ("package_name", "main_module_name"),
+    [
+        ("llm_tools.apps.streamlit_chat", "llm_tools.apps.streamlit_chat.__main__"),
+        (
+            "llm_tools.apps.streamlit_assistant",
+            "llm_tools.apps.streamlit_assistant.__main__",
+        ),
+    ],
+)
 def test_module_entrypoint_raises_system_exit_with_main_return_code(
+    package_name: str,
+    main_module_name: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    package = importlib.import_module("llm_tools.apps.textual_workbench")
+    package = importlib.import_module(package_name)
     called: list[str] = []
     monkeypatch.setattr(package, "main", lambda: called.append("main") or 0)
 
-    sys.modules.pop("llm_tools.apps.textual_workbench.__main__", None)
+    sys.modules.pop(main_module_name, None)
     with pytest.raises(SystemExit) as exc:
-        runpy.run_module(
-            "llm_tools.apps.textual_workbench.__main__", run_name="__main__"
-        )
+        runpy.run_module(main_module_name, run_name="__main__")
 
     assert exc.value.code == 0
     assert called == ["main"]
 
 
-def test_app_module_run_helpers_dispatch_to_textual_app_run(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("importer", "app_module_path", "runner_class_path"),
+    [
+        (
+            import_streamlit_chat_modules,
+            "llm_tools.apps.streamlit_chat.app",
+            "run_streamlit_chat_app",
+        ),
+        (
+            import_streamlit_assistant_modules,
+            "llm_tools.apps.streamlit_assistant.app",
+            "run_streamlit_assistant_app",
+        ),
+    ],
+)
+def test_app_module_run_helpers_exist(
+    importer: object,
+    app_module_path: str,
+    runner_class_path: str,
 ) -> None:
-    app_module = import_textual_workbench_modules().app
-    called: list[str] = []
+    del app_module_path
+    app_module = importer().app
 
-    monkeypatch.setattr(
-        "llm_tools.apps.textual_workbench.app.TextualWorkbenchApp.run",
-        lambda self: called.append("run"),
-    )
-
-    app_module.run_workbench_app()
-    assert app_module.main() == 0
-    assert called == ["run", "run"]
+    assert hasattr(app_module, runner_class_path)
+    assert hasattr(app_module, "main")

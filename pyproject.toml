@@ -32,16 +32,10 @@ dependencies = [
 
 [project.scripts]
 llm-tools-harness = "llm_tools.apps.harness_cli:main"
-llm-tools-chat = "llm_tools.apps.textual_chat:main"
 llm-tools-streamlit-chat = "llm_tools.apps.streamlit_chat:main"
 llm-tools-streamlit-assistant = "llm_tools.apps.streamlit_assistant:main"
-llm-tools-workbench = "llm_tools.apps.textual_workbench:main"
 
 [project.optional-dependencies]
-apps = [
-  "PyYAML>=6,<7",
-  "textual>=0.89.1,<1",
-]
 streamlit = [
   "PyYAML>=6,<7",
   "streamlit>=1.41,<2",
@@ -55,7 +49,6 @@ dev = [
   "ruff>=0.6,<1",
   "setuptools>=82,<83",
   "streamlit>=1.41,<2",
-  "textual>=0.89.1,<1",
   "wheel>=0.46,<0.47",
 ]
 
@@ -98,10 +91,6 @@ strict = true
 warn_unused_configs = true
 pretty = true
 show_error_codes = true
-
-[[tool.mypy.overrides]]
-module = ["textual", "textual.*"]
-ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["streamlit", "streamlit.*"]

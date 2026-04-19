@@ -135,64 +135,8 @@ def _import_modules(
         )
 
 
-_TEXTUAL_CHAT_MODULES: SimpleNamespace | None = None
 _STREAMLIT_CHAT_MODULES: SimpleNamespace | None = None
 _STREAMLIT_ASSISTANT_MODULES: SimpleNamespace | None = None
-_TEXTUAL_WORKBENCH_MODULES: SimpleNamespace | None = None
-
-
-def import_textual_chat_modules() -> SimpleNamespace:
-    """Import chat modules while shielding them from the heavy provider import."""
-    global _TEXTUAL_CHAT_MODULES
-    if _TEXTUAL_CHAT_MODULES is None:
-        package, app, controller, main = _import_modules(
-            (
-                "llm_tools.apps.textual_chat",
-                "llm_tools.apps.textual_chat.app",
-                "llm_tools.apps.textual_chat.controller",
-                "llm_tools.apps.textual_chat.__main__",
-            ),
-            reset_modules=(
-                "llm_tools.apps.textual_chat",
-                "llm_tools.apps.textual_chat.app",
-                "llm_tools.apps.textual_chat.controller",
-                "llm_tools.apps.textual_chat.__main__",
-            ),
-        )
-        _TEXTUAL_CHAT_MODULES = SimpleNamespace(
-            package=package,
-            app=app,
-            controller=controller,
-            main=main,
-        )
-    return _TEXTUAL_CHAT_MODULES
-
-
-def import_textual_workbench_modules() -> SimpleNamespace:
-    """Import workbench modules while shielding them from the heavy provider import."""
-    global _TEXTUAL_WORKBENCH_MODULES
-    if _TEXTUAL_WORKBENCH_MODULES is None:
-        package, app, controller, main = _import_modules(
-            (
-                "llm_tools.apps.textual_workbench",
-                "llm_tools.apps.textual_workbench.app",
-                "llm_tools.apps.textual_workbench.controller",
-                "llm_tools.apps.textual_workbench.__main__",
-            ),
-            reset_modules=(
-                "llm_tools.apps.textual_workbench",
-                "llm_tools.apps.textual_workbench.app",
-                "llm_tools.apps.textual_workbench.controller",
-                "llm_tools.apps.textual_workbench.__main__",
-            ),
-        )
-        _TEXTUAL_WORKBENCH_MODULES = SimpleNamespace(
-            package=package,
-            app=app,
-            controller=controller,
-            main=main,
-        )
-    return _TEXTUAL_WORKBENCH_MODULES
 
 
 def import_streamlit_chat_modules() -> SimpleNamespace:

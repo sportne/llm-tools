@@ -2,12 +2,13 @@
 
 `llm_tools.apps.streamlit_chat` is the interactive Streamlit repository chat
 client built on top of the existing `llm-tools` runtime, adapter, provider, and
-workflow layers. It remains the repository-focused lane alongside the newer
-assistant-oriented Streamlit app.
+workflow layers. It is deprecated and retained only as temporary migration and
+setup guidance while repository-chat usage is absorbed into the assistant
+documentation and examples.
 
 It reuses the current repository-chat config shape and the same fixed read-only
-tool set as the Textual lane, while exposing Streamlit-native controls for the
-same session features:
+tool set, while exposing Streamlit-native controls for the same session
+features:
 
 - transcript-style user and assistant turns
 - in-memory chat session history
@@ -24,8 +25,12 @@ same session features:
 ## Install
 
 ```bash
-.venv/bin/python -m pip install -e .[streamlit]
+~/.venvs/llm-tools/bin/python -m pip install -e .[streamlit]
 ```
+
+The default development environment is shared at `~/.venvs/llm-tools` across
+the main checkout and any git worktrees. Re-run `make install-dev` from the
+checkout you want the shared environment to point at before launching the app.
 
 ## Launch
 
@@ -46,7 +51,8 @@ streamlit run src/llm_tools/apps/streamlit_chat/app.py -- <directory> --config <
 
 ## Config Shape
 
-The Streamlit app reuses the same YAML shape as `llm_tools.apps.textual_chat`:
+The Streamlit app reuses the repository-chat YAML shape exposed by
+`llm_tools.apps.chat_config`:
 
 - `llm`
 - `source_filters`
@@ -115,3 +121,7 @@ alongside the same slash-command aliases:
 
 `quit` and `exit` do not stop the Streamlit server. They add a system notice
 telling you to clear the chat or close the browser tab instead.
+
+This client should not be treated as a long-term peer product to
+`streamlit_assistant`; it remains only until its useful setup guidance has been
+moved into the assistant-facing surfaces.

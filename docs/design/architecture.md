@@ -319,14 +319,14 @@ project/
         __init__.py
         openai_compatible.py
       apps/
-        textual_workbench/
+        streamlit_assistant/
           __init__.py
           __main__.py
           app.py
-          controller.py
-          models.py
-          presentation.py
-          screens.py
+        streamlit_chat/
+          __init__.py
+          __main__.py
+          app.py
       tools/
         __init__.py
         _path_utils.py

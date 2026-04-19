@@ -22,9 +22,8 @@ The core v0.1 foundation is implemented:
 - a current `workflow_api` bridge for one parsed model turn plus an interactive
   repository-chat session runner
 - dual sync/async execution paths across runtime, provider, and workflow layers
-- optional app layers with Textual and Streamlit repository chat clients, a
-  separate Streamlit assistant client, and a developer-facing Textual
-  workbench
+- optional Streamlit app layers for the long-term assistant client plus the
+  deprecated repository-chat reference client
 - `harness_api` durable session orchestration with persisted traces, replay,
   summaries, a public Python session API, and a minimal persisted-session CLI
 
@@ -38,7 +37,7 @@ The core v0.1 foundation is implemented:
 - providers handle model requests through OpenAI-compatible endpoints
 - `WorkflowExecutor` currently bridges one parsed model turn into sequential
   tool execution
-- the optional workbench app helps inspect those layers interactively
+- the optional Streamlit assistant app is the long-term interactive client
 
 ## Package Layout
 
@@ -71,16 +70,10 @@ Native Microsoft Project (`.mpp`/`.mpt`) reads now use MPXJ. That dependency is
 installed with the base package, and a working Java runtime must be available
 wherever those file reads are expected to work.
 
-To install the optional Textual apps:
+To install the optional Streamlit apps:
 
 ```bash
-~/.venvs/llm-tools/bin/python -m pip install -e .[apps]
-```
-
-To install the optional Streamlit chat app:
-
-```bash
-.venv/bin/python -m pip install -e .[streamlit]
+~/.venvs/llm-tools/bin/python -m pip install -e .[streamlit]
 ```
 
 ## Development
@@ -102,34 +95,6 @@ make package
 - [Extension Docs](docs/extensions/README.md)
 - [Agent Conventions](AGENTS.md)
 
-## Workbench
-
-Launch the optional Textual workbench with either:
-
-```bash
-python -m llm_tools.apps.textual_workbench
-```
-
-or:
-
-```bash
-llm-tools-workbench
-```
-
-## Chat App
-
-Launch the optional Textual repository chat app with either:
-
-```bash
-python -m llm_tools.apps.textual_chat <directory> --config <path>
-```
-
-or:
-
-```bash
-llm-tools-chat <directory> --config <path>
-```
-
 ## Harness Sessions
 
 Launch the minimal persisted harness CLI with either:
@@ -149,6 +114,10 @@ injectable session control, replay inspection, or a minimal built-in runner for
 scripted and approval-aware harness tests.
 
 ## Streamlit Chat App
+
+`llm_tools.apps.streamlit_chat` is deprecated. It remains in the repository
+only as temporary setup and reference guidance while the assistant transition
+is documented elsewhere.
 
 Launch the optional Streamlit repository chat app with either:
 
@@ -186,6 +155,8 @@ llm-tools-streamlit-assistant <directory> --config <path>
 The assistant is the broader chat client: it can answer normal questions
 without tools, optionally use the full built-in tool registry, and launch
 harness-backed research sessions for durable investigation work.
+
+This is the only long-term interactive client the repository plans to keep.
 
 To pass regular Streamlit server flags, run Streamlit directly:
 

@@ -517,6 +517,4 @@ approval handling available without binding those flows to the existing apps.
 
 The current repository scope stops at shared seams plus the documented
 integration plan in `docs/implementation/harness-app-integration-plan.md`.
-Textual chat, Streamlit chat, and the Textual workbench should consume the
-public session service and stored artifacts rather than reimplementing harness
-orchestration or trace models in app code.
+The remaining Streamlit apps should consume the public session service and stored artifacts rather than reimplementing harness orchestration or trace models in app code.

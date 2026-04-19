@@ -4,6 +4,8 @@
 on top of the existing `llm-tools` runtime, adapter, provider, workflow, and
 harness layers.
 
+It is the only long-term interactive client the repository plans to keep.
+
 It is intentionally different from the repository-focused chat clients:
 
 - normal chat answers can be returned without any tool use
@@ -16,8 +18,12 @@ It is intentionally different from the repository-focused chat clients:
 ## Install
 
 ```bash
-.venv/bin/python -m pip install -e .[streamlit]
+~/.venvs/llm-tools/bin/python -m pip install -e .[streamlit]
 ```
+
+The default development environment is shared at `~/.venvs/llm-tools` across
+the main checkout and any git worktrees. Re-run `make install-dev` from the
+checkout you want the shared environment to point at before launching the app.
 
 ## Launch
 
