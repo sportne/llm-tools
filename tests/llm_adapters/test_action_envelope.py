@@ -71,6 +71,35 @@ def test_parse_model_output_with_typed_actions() -> None:
     ]
 
 
+def test_parse_model_output_uses_validated_typed_arguments_not_raw_payload() -> None:
+    adapter = ActionEnvelopeAdapter()
+    response_model = adapter.build_response_model(_specs(), _input_models())
+
+    parsed = adapter.parse_model_output(
+        {
+            "actions": [
+                {
+                    "tool_name": "read_file",
+                    "arguments": {
+                        "path": "README.md",
+                        "encoding": "utf-8",
+                        "extra_flag": True,
+                    },
+                }
+            ],
+            "final_response": None,
+        },
+        response_model=response_model,
+    )
+
+    assert parsed.invocations == [
+        ToolInvocationRequest(
+            tool_name="read_file",
+            arguments={"path": "README.md", "encoding": "utf-8"},
+        )
+    ]
+
+
 def test_parse_model_output_with_typed_final_response() -> None:
     adapter = ActionEnvelopeAdapter()
     response_model = adapter.build_response_model(_specs(), _input_models())
@@ -82,6 +111,19 @@ def test_parse_model_output_with_typed_final_response() -> None:
 
     assert parsed.invocations == []
     assert parsed.final_response == "done"
+
+
+def test_parse_model_output_preserves_json_like_final_response_string() -> None:
+    adapter = ActionEnvelopeAdapter()
+    response_model = adapter.build_response_model(_specs(), _input_models())
+    final_response = '{"status": "done"}'
+
+    parsed = adapter.parse_model_output(
+        {"actions": [], "final_response": final_response},
+        response_model=response_model,
+    )
+
+    assert parsed.final_response == final_response
 
 
 def test_parse_model_output_accepts_json_strings() -> None:
@@ -221,6 +263,19 @@ class _LooseDictEnvelope(BaseModel):
         return self
 
 
+class _LooseStringActionEnvelope(BaseModel):
+    actions: list[str] = Field(default_factory=list)
+    final_response: str | None = None
+
+    @model_validator(mode="after")
+    def validate_mode(self) -> _LooseStringActionEnvelope:
+        has_actions = len(self.actions) > 0
+        has_final_response = self.final_response is not None
+        if has_actions == has_final_response:
+            raise ValueError("Must contain actions or final response.")
+        return self
+
+
 def test_parse_model_output_rejects_non_object_action_payload() -> None:
     adapter = ActionEnvelopeAdapter()
 
@@ -228,6 +283,19 @@ def test_parse_model_output_rejects_non_object_action_payload() -> None:
         adapter.parse_model_output(
             {"actions": [123], "final_response": None},
             response_model=_LooseAnythingEnvelope,
+        )
+
+
+def test_parse_model_output_rejects_stringified_action_after_validation() -> None:
+    adapter = ActionEnvelopeAdapter()
+
+    with pytest.raises(ValueError):
+        adapter.parse_model_output(
+            {
+                "actions": ['{"tool_name": "echo", "arguments": {"value": "hello"}}'],
+                "final_response": None,
+            },
+            response_model=_LooseStringActionEnvelope,
         )
 
 
