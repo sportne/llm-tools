@@ -797,13 +797,13 @@ def _streamlit_theme_css(
   background: color-mix(in srgb, var(--llm-tools-page) 84%, transparent);
   color: var(--llm-tools-text);
   height: auto;
-  min-height: 1.9rem;
+  min-height: 2.3rem;
 }}
 [data-testid="stHeader"] .stAppToolbar {{
-  min-height: 1.9rem;
-  height: 1.9rem;
-  padding-top: 0.05rem;
-  padding-bottom: 0.05rem;
+  min-height: 2.3rem;
+  height: 2.3rem;
+  padding-top: 0.1rem;
+  padding-bottom: 0.1rem;
 }}
 section[data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child {{
   background: linear-gradient(180deg, var(--llm-tools-sidebar) 0%, var(--llm-tools-page) 100%);
@@ -861,7 +861,7 @@ section[data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child {{
 }}
 .stMainBlockContainer,
 .stMain .block-container {{
-  padding-top: 0.85rem !important;
+  padding-top: 3.25rem !important;
 }}
 .stApp p,
 .stApp label,
