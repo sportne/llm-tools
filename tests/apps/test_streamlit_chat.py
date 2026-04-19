@@ -99,6 +99,9 @@ class _FakeBlock:
     def error(self, text: str) -> None:
         self._streamlit.error(text)
 
+    def form_submit_button(self, label: str, **kwargs: object) -> bool:
+        return self._streamlit.form_submit_button(label, **kwargs)
+
     def download_button(self, label: str, **kwargs: object) -> bool:
         return self._streamlit.download_button(label, **kwargs)
 
@@ -256,7 +259,8 @@ class _FakeStreamlit:
         return [_FakeBlock(self) for _ in names]
 
     def expander(self, label: str, expanded: bool = False) -> _FakeBlock:
-        del label, expanded
+        del expanded
+        self.button_labels.append(label)
         return _FakeBlock(self)
 
     def popover(self, label: str) -> _FakeBlock:
@@ -269,6 +273,23 @@ class _FakeStreamlit:
     def chat_message(self, role: str) -> _FakeBlock:
         self.chat_roles.append(role)
         return _FakeBlock(self)
+
+    def form(self, key: str, **kwargs: object) -> _FakeBlock:
+        del key, kwargs
+        return _FakeBlock(self)
+
+    def form_submit_button(
+        self,
+        label: str,
+        *,
+        key: str | None = None,
+        use_container_width: bool = False,
+        shortcut: str | None = None,
+        disabled: bool = False,
+        **kwargs: object,
+    ) -> bool:
+        del use_container_width, shortcut, kwargs
+        return self.button(label, key=key, disabled=disabled)
 
     def download_button(
         self,
@@ -426,6 +447,36 @@ def test_streamlit_chat_initial_render_uses_new_title_and_no_root_defaults(
     active = app_state.sessions[app_state.active_session_id]
     assert active.runtime.root_path is None
     assert active.runtime.enabled_tools == []
+
+
+def test_streamlit_chat_theme_state_applies_before_sidebar_and_persists_panel(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit(
+        button_values={"settings-panel-toggle": True},
+    )
+    fake_st.session_state[_STREAMLIT_MODULES.app._THEME_TOGGLE_KEY] = False
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setenv(_STREAMLIT_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
+
+    with pytest.raises(_RerunRequestError):
+        _STREAMLIT_MODULES.app.run_streamlit_chat_app(
+            root_path=None,
+            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+        )
+
+    app_state = fake_st.session_state[_STREAMLIT_MODULES.app._APP_STATE_SLOT]
+    assert app_state.preferences.theme_mode == "light"
+    assert app_state.preferences.settings_panel_open is False
+    assert any("#edf3fb" in text for text in fake_st.markdown_messages)
+
+    reloaded = _STREAMLIT_MODULES.app._load_workspace_state(
+        root_path=None,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+    )
+    assert reloaded.preferences.theme_mode == "light"
+    assert reloaded.preferences.settings_panel_open is False
 
 
 def test_streamlit_chat_persists_multiple_sessions_and_deletes_them(
@@ -651,6 +702,45 @@ def test_streamlit_chat_launch_and_script_helpers(
     )
     _STREAMLIT_MODULES.app._run_streamlit_script(["--config", str(config_path)])
     assert called[0][0] is None
+
+
+def test_streamlit_chat_theme_css_covers_widget_surfaces() -> None:
+    css = _STREAMLIT_MODULES.app._streamlit_theme_css("light")
+
+    assert 'div[data-baseweb="select"] > div' in css
+    assert '[data-testid="stExpander"]' in css
+    assert '[data-baseweb="tab"]' in css
+    assert '[data-testid="stDownloadButton"] > button' in css
+    assert '[data-testid="InputInstructions"]' in css
+    assert 'llm-tools-status-line' in css
+
+
+def test_streamlit_chat_fatal_error_renderer_and_script_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
+
+    boom = RuntimeError("boom")
+    _STREAMLIT_MODULES.app._render_fatal_error(boom)
+    assert any("unexpected error" in text for text in fake_st.markdown_messages)
+    assert "Traceback" in fake_st.button_labels
+    assert "fatal-error-traceback" in fake_st.text_area_values
+    assert "RuntimeError: boom" in fake_st.error_messages[-1]
+
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app,
+        "run_streamlit_chat_app",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("wrapper boom")),
+    )
+    called: list[str] = []
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app,
+        "_render_fatal_error",
+        lambda exc: called.append(str(exc)),
+    )
+    _STREAMLIT_MODULES.app._run_streamlit_script([])
+    assert called == ["wrapper boom"]
 
 
 def test_streamlit_chat_helper_defaults_and_model_validators(
@@ -1083,6 +1173,144 @@ def test_streamlit_chat_event_reducers_and_drain(
     assert record.transcript[-1].text == "stopped hard"
 
 
+def test_streamlit_chat_composer_clears_on_next_render_without_mutating_widget_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit(
+        button_values={"send:session-1": True},
+        text_input_values={"composer:session-1": "hello there"},
+    )
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_submit_streamlit_prompt", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_save_workspace_state", lambda app_state: None
+    )
+
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+    with pytest.raises(_RerunRequestError):
+        _STREAMLIT_MODULES.app._render_status_and_composer(
+            app_state,
+            session_id=session_id,
+            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+        )
+
+    assert session_id in app_state.clear_draft_for
+    assert app_state.drafts[session_id] == ""
+
+    fake_st.button_values.clear()
+    fake_st.text_input_values.pop(f"composer:{session_id}", None)
+    _STREAMLIT_MODULES.app._render_status_and_composer(
+        app_state,
+        session_id=session_id,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+    )
+
+    assert session_id not in app_state.clear_draft_for
+    assert fake_st.session_state[f"composer:{session_id}"] == ""
+    assert app_state.drafts[session_id] == ""
+
+
+def test_streamlit_chat_complete_event_finishes_cancelled_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
+
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+    turn_state = _STREAMLIT_MODULES.app._turn_state_for(app_state, session_id)
+    turn_state.busy = True
+    turn_state.cancelling = True
+    turn_state.status_text = "stopping"
+    turn_state.pending_interrupt_draft = "next prompt"
+
+    ignored = _STREAMLIT_MODULES.app._apply_queued_event(
+        app_state,
+        _STREAMLIT_MODULES.app.StreamlitQueuedEvent(
+            kind="status",
+            payload=ChatWorkflowStatusEvent(status="thinking").model_dump(mode="json"),
+            turn_number=1,
+            session_id=session_id,
+        ),
+    )
+    assert ignored is None
+    assert turn_state.status_text == "stopping"
+
+    pending_prompt = _STREAMLIT_MODULES.app._apply_queued_event(
+        app_state,
+        _STREAMLIT_MODULES.app.StreamlitQueuedEvent(
+            kind="complete",
+            payload=None,
+            turn_number=1,
+            session_id=session_id,
+        ),
+    )
+    assert pending_prompt == "next prompt"
+    assert turn_state.busy is False
+    assert turn_state.cancelling is False
+    assert turn_state.status_text == ""
+    assert app_state.sessions[session_id].transcript[-1].text == "Stopped active turn."
+
+
+def test_streamlit_chat_cancel_active_turn_clears_stale_busy_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_st)
+
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+    turn_state = _STREAMLIT_MODULES.app._turn_state_for(app_state, session_id)
+    turn_state.busy = True
+    turn_state.status_text = "thinking"
+
+    _STREAMLIT_MODULES.app._cancel_active_turn(app_state, session_id=session_id)
+
+    assert turn_state.busy is False
+    assert turn_state.status_text == ""
+    assert app_state.sessions[session_id].transcript[-1].text == "Stopped active turn."
+
+
+def test_streamlit_chat_root_warning_only_shows_when_workspace_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_save_workspace_state", lambda app_state: None
+    )
+
+    fake_busy = _FakeStreamlit()
+    monkeypatch.setattr(_STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_busy)
+    busy_state = _make_app_state(root_path=str(tmp_path))
+    busy_session = busy_state.active_session_id
+    _STREAMLIT_MODULES.app._turn_state_for(busy_state, busy_session).busy = True
+    _STREAMLIT_MODULES.app._render_tools_popover(
+        busy_state,
+        session_id=busy_session,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+    )
+    assert "Select a root directory to enable this tool." not in fake_busy.caption_messages
+
+    fake_missing = _FakeStreamlit()
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_missing
+    )
+    missing_state = _make_app_state(root_path=None)
+    missing_session = missing_state.active_session_id
+    _STREAMLIT_MODULES.app._render_tools_popover(
+        missing_state,
+        session_id=missing_session,
+        config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+    )
+    assert "Select a root directory to enable this tool." in fake_missing.caption_messages
+
+
 def test_streamlit_chat_submit_and_command_helpers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1247,6 +1475,12 @@ def test_streamlit_chat_provider_controls_tools_popover_and_composer(
             session_id=session_id,
         )
     assert record.runtime.provider is _STREAMLIT_MODULES.package.ProviderPreset.OPENAI
+    assert fake_provider_change.session_state[
+        _STREAMLIT_MODULES.app._WIDGET_OVERRIDES_STATE_SLOT
+    ][f"model:{session_id}"] == "gpt-4.1-mini"
+    assert fake_provider_change.session_state[
+        _STREAMLIT_MODULES.app._WIDGET_OVERRIDES_STATE_SLOT
+    ][f"base-url:{session_id}"] == ""
 
     app_state = _make_app_state(root_path=None)
     session_id = app_state.active_session_id
@@ -1272,6 +1506,39 @@ def test_streamlit_chat_provider_controls_tools_popover_and_composer(
     assert record.runtime.root_path == str(tmp_path.resolve())
     assert record.transcript[-1].text.startswith("Workspace root updated")
 
+    browse_state = _make_app_state(root_path=None)
+    browse_session = browse_state.active_session_id
+    browse_record = browse_state.sessions[browse_session]
+    fake_browse_root = _FakeStreamlit(
+        button_values={f"root-browse:{browse_session}": True},
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app, "_streamlit_module", lambda: fake_browse_root
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app,
+        "_pick_root_directory",
+        lambda: (str(tmp_path.resolve()), None),
+    )
+    monkeypatch.setattr(
+        _STREAMLIT_MODULES.app,
+        "_available_model_options",
+        lambda *args: (["gemma4:26b"], None),
+    )
+    with pytest.raises(_RerunRequestError):
+        _STREAMLIT_MODULES.app._provider_control_strip(
+            browse_state,
+            config=_STREAMLIT_MODULES.package.TextualChatConfig(),
+            session_id=browse_session,
+        )
+    assert browse_record.runtime.root_path == str(tmp_path.resolve())
+    assert browse_record.transcript[-1].text.startswith("Workspace root updated")
+    assert fake_browse_root.session_state[
+        _STREAMLIT_MODULES.app._WIDGET_OVERRIDES_STATE_SLOT
+    ][f"root-input:{browse_session}"] == str(
+        tmp_path.resolve()
+    )
+
     recent_state = _make_app_state(root_path=None)
     recent_session = recent_state.active_session_id
     recent_record = recent_state.sessions[recent_session]
@@ -1295,7 +1562,9 @@ def test_streamlit_chat_provider_controls_tools_popover_and_composer(
         )
     assert recent_record.runtime.root_path == str(tmp_path.resolve())
     assert recent_record.transcript[-1].text.startswith("Workspace root updated")
-    assert fake_recent_root.session_state[f"recent-root:{recent_session}"] == (
+    assert fake_recent_root.session_state[
+        _STREAMLIT_MODULES.app._WIDGET_OVERRIDES_STATE_SLOT
+    ][f"recent-root:{recent_session}"] == (
         _STREAMLIT_MODULES.app._ROOT_SENTINEL
     )
 
@@ -1319,7 +1588,9 @@ def test_streamlit_chat_provider_controls_tools_popover_and_composer(
     assert stale_record.runtime.root_path is None
     assert stale_record.transcript[-1].role == "error"
     assert "does not exist" in stale_record.transcript[-1].text
-    assert fake_stale_root.session_state[f"recent-root:{stale_session}"] == (
+    assert fake_stale_root.session_state[
+        _STREAMLIT_MODULES.app._WIDGET_OVERRIDES_STATE_SLOT
+    ][f"recent-root:{stale_session}"] == (
         _STREAMLIT_MODULES.app._ROOT_SENTINEL
     )
 
@@ -1372,6 +1643,8 @@ def test_streamlit_chat_provider_controls_tools_popover_and_composer(
             session_id=busy_session,
             config=_STREAMLIT_MODULES.package.TextualChatConfig(),
         )
+    assert any("llm-tools-status-line" in text for text in fake_stop.markdown_messages)
+    assert "Tools" not in fake_stop.button_labels
 
     command_state = _make_app_state(root_path=str(tmp_path))
     command_session = command_state.active_session_id

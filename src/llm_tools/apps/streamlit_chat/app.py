@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import os
 import queue
+import shutil
+import subprocess
 import sys
 import threading
 import time
+import traceback
 from collections.abc import Callable, Sequence
-from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -71,13 +73,15 @@ from llm_tools.workflow_api.chat_session import ChatSessionTurnRunner, ModelTurn
 _APP_STATE_SLOT = "llm_tools_streamlit_chat_app_state"
 _ACTIVE_TURN_STATE_SLOT = "llm_tools_streamlit_chat_active_turn"
 _SECRET_CACHE_STATE_SLOT = "llm_tools_streamlit_chat_secret_cache"  # noqa: S105
+_WIDGET_OVERRIDES_STATE_SLOT = "llm_tools_streamlit_chat_widget_overrides"
 _STREAMLIT_BROWSER_USAGE_STATS_FLAG = "--browser.gatherUsageStats=false"
 _STREAMLIT_TOOLBAR_MODE_FLAG = "--client.toolbarMode=minimal"
-_POLL_INTERVAL_SECONDS = 0.05
+_POLL_INTERVAL_SECONDS = 1.0
 _DEFAULT_THEME_MODE: Literal["dark", "light"] = "dark"
 _STORAGE_ENV_VAR = "LLM_TOOLS_STREAMLIT_STATE_DIR"
 _SESSION_STORAGE_DIR_NAME = "sessions"
 _ROOT_SENTINEL = "__none__"
+_THEME_TOGGLE_KEY = "theme-mode"
 
 
 @dataclass(slots=True)
@@ -91,6 +95,7 @@ class StreamlitTurnState:
     active_turn_number: int = 0
     pending_interrupt_draft: str | None = None
     confidence: float | None = None
+    cancelling: bool = False
 
 
 @dataclass(slots=True)
@@ -141,6 +146,7 @@ class StreamlitWorkspaceState:
     preferences: StreamlitPreferences
     turn_states: dict[str, StreamlitTurnState] = field(default_factory=dict)
     drafts: dict[str, str] = field(default_factory=dict)
+    clear_draft_for: set[str] = field(default_factory=set)
     show_export_for: set[str] = field(default_factory=set)
     startup_notices: list[str] = field(default_factory=list)
 
@@ -234,6 +240,7 @@ def _streamlit_module() -> Any:  # pragma: no cover
 def _page_config() -> dict[str, object]:  # pragma: no cover
     return {
         "page_title": "llm-tools chat",
+        "page_icon": "💬",
         "layout": "wide",
         "initial_sidebar_state": "expanded",
         "menu_items": {
@@ -583,6 +590,29 @@ def _turn_state_for(
     return app_state.turn_states.setdefault(session_id, StreamlitTurnState())
 
 
+def _widget_overrides_state() -> dict[str, object]:
+    st = _streamlit_module()
+    raw = st.session_state.setdefault(_WIDGET_OVERRIDES_STATE_SLOT, {})
+    if isinstance(raw, dict):
+        return cast(dict[str, object], raw)
+    overrides: dict[str, object] = {}
+    st.session_state[_WIDGET_OVERRIDES_STATE_SLOT] = overrides
+    return overrides
+
+
+def _prime_widget_value(key: str, value: object) -> None:
+    st = _streamlit_module()
+    overrides = _widget_overrides_state()
+    if key in overrides:
+        st.session_state[key] = overrides.pop(key)
+        return
+    st.session_state.setdefault(key, value)
+
+
+def _queue_widget_override(key: str, value: object) -> None:
+    _widget_overrides_state()[key] = value
+
+
 def _delete_session(
     app_state: StreamlitWorkspaceState,
     *,
@@ -590,14 +620,20 @@ def _delete_session(
     config: TextualChatConfig,
     root_path: Path | None,
 ) -> None:
-    st = _streamlit_module()
-    handle = st.session_state.get(_ACTIVE_TURN_STATE_SLOT)
+    st: Any | None = None
+    try:
+        st = _streamlit_module()
+    except ModuleNotFoundError:
+        handle = None
+    else:
+        handle = st.session_state.get(_ACTIVE_TURN_STATE_SLOT)
     if (
         isinstance(handle, StreamlitActiveTurnHandle)
         and handle.session_id == session_id
     ):
         handle.runner.cancel()
-        st.session_state[_ACTIVE_TURN_STATE_SLOT] = None
+        if st is not None:
+            st.session_state[_ACTIVE_TURN_STATE_SLOT] = None
     app_state.sessions.pop(session_id, None)
     app_state.turn_states.pop(session_id, None)
     app_state.drafts.pop(session_id, None)
@@ -687,45 +723,123 @@ section[data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child {{
   background: linear-gradient(180deg, var(--llm-tools-sidebar) 0%, var(--llm-tools-page) 100%);
   color: var(--llm-tools-text);
 }}
-.stApp p, .stApp label, .stApp .stMarkdown, .stApp .stCaption {{
+[data-testid="stAppViewBlockContainer"] {{
+  padding-top: 0.75rem;
+}}
+.stApp p,
+.stApp label,
+.stApp .stMarkdown,
+.stApp .stCaption,
+.stApp [data-testid="stWidgetLabel"],
+.stApp [data-testid="stMarkdownContainer"],
+.stApp [data-baseweb="select"] span,
+.stApp [role="tab"],
+.stApp [data-testid="stExpander"] summary {{
+  color: var(--llm-tools-text);
+}}
+.stApp [data-testid="stChatMessage"],
+.stApp [data-testid="stExpander"],
+.stApp [data-testid="stVerticalBlockBorderWrapper"],
+.stApp [data-testid="stTabs"],
+.stApp [data-baseweb="popover"],
+.stApp [data-baseweb="tab-list"] {{
+  background: color-mix(in srgb, var(--llm-tools-surface) 96%, transparent);
+  border-color: var(--llm-tools-border);
   color: var(--llm-tools-text);
 }}
 .stApp [data-testid="stChatMessage"] {{
-  background: color-mix(in srgb, var(--llm-tools-surface) 94%, transparent);
   border: 1px solid var(--llm-tools-border);
   border-radius: 1rem;
   padding: 0.9rem 1rem;
   box-shadow: 0 18px 36px var(--llm-tools-shadow);
 }}
-.stApp textarea, .stApp input, div[data-baseweb="input"] > div, div[data-baseweb="base-input"] > div, div[data-baseweb="textarea"] > div, .stButton > button, [data-testid="stDownloadButton"] > button {{
+.stApp textarea,
+.stApp input,
+.stApp select,
+.stApp div[data-baseweb="input"] > div,
+.stApp div[data-baseweb="base-input"] > div,
+.stApp div[data-baseweb="textarea"] > div,
+.stApp div[data-baseweb="select"] > div,
+.stApp [data-baseweb="tab"],
+.stApp .stButton > button,
+.stApp [data-testid="stDownloadButton"] > button {{
   background: var(--llm-tools-surface);
   color: var(--llm-tools-text);
   border: 1px solid var(--llm-tools-border);
   border-radius: 0.85rem;
 }}
-.stButton > button:hover, [data-testid="stDownloadButton"] > button:hover {{
+.stApp textarea::placeholder,
+.stApp input::placeholder {{
+  color: var(--llm-tools-muted);
+}}
+.stApp .stButton > button:hover,
+.stApp [data-testid="stDownloadButton"] > button:hover,
+.stApp [data-baseweb="tab"]:hover {{
   border-color: var(--llm-tools-accent);
   color: var(--llm-tools-accent);
 }}
-.llm-tools-hero, .llm-tools-chip-row, .llm-tools-status, .llm-tools-empty {{
+.stApp [data-baseweb="tab"][aria-selected="true"] {{
+  background: var(--llm-tools-accent-soft);
+  color: var(--llm-tools-text);
+}}
+.stApp [data-testid="stExpander"] details,
+.stApp [data-testid="stExpander"] summary,
+.stApp [data-testid="stExpanderDetails"] {{
+  background: transparent;
+  color: var(--llm-tools-text);
+}}
+.stApp [data-testid="stCheckbox"] label,
+.stApp [data-testid="stToggle"] label {{
+  color: var(--llm-tools-text);
+}}
+.llm-tools-hero,
+.llm-tools-summary-bar,
+.llm-tools-status-line,
+.llm-tools-empty {{
   border: 1px solid var(--llm-tools-border);
   background: color-mix(in srgb, var(--llm-tools-surface) 96%, transparent);
-  border-radius: 1.1rem;
+  border-radius: 1rem;
   box-shadow: 0 18px 40px var(--llm-tools-shadow);
 }}
+.llm-tools-settings-shell {{
+  border: 1px solid var(--llm-tools-border);
+  background: var(--llm-tools-sidebar);
+  border-radius: 1rem;
+  box-shadow: 0 18px 40px var(--llm-tools-shadow);
+  padding: 0.5rem 0.45rem 0.65rem 0.45rem;
+  min-height: 8rem;
+}}
 .llm-tools-hero {{ padding: 1rem 1.1rem; margin-bottom: 0.9rem; }}
-.llm-tools-chip-row {{ padding: 0.7rem 0.85rem; margin-bottom: 1rem; }}
-.llm-tools-status {{ padding: 0.85rem 0.95rem; margin: 1rem 0 0.7rem 0; }}
+.llm-tools-summary-bar {{ padding: 0.65rem 0.85rem; margin-bottom: 1rem; }}
+.llm-tools-status-line {{ padding: 0.55rem 0.8rem; margin: 1rem 0 0.55rem 0; }}
 .llm-tools-empty {{ padding: 1.4rem; margin: 1rem 0; }}
 .llm-tools-brand {{ font-size: 1.45rem; font-weight: 700; letter-spacing: -0.02em; }}
 .llm-tools-subtitle {{ color: var(--llm-tools-muted); font-size: 0.95rem; }}
-.llm-tools-chip {{ display: inline-block; margin: 0.15rem 0.35rem 0.15rem 0; padding: 0.35rem 0.7rem; border-radius: 999px; background: var(--llm-tools-accent-soft); color: var(--llm-tools-text); border: 1px solid var(--llm-tools-border); font-size: 0.88rem; }}
+.llm-tools-chip {{ display: inline-block; margin: 0.12rem 0.35rem 0.12rem 0; padding: 0.2rem 0.55rem; border-radius: 999px; background: var(--llm-tools-accent-soft); color: var(--llm-tools-text); border: 1px solid var(--llm-tools-border); font-size: 0.82rem; }}
 .llm-tools-session-meta {{ color: var(--llm-tools-muted); font-size: 0.78rem; margin-top: 0.2rem; }}
 .llm-tools-sidebar-title {{ font-weight: 700; letter-spacing: -0.02em; font-size: 1.2rem; margin-bottom: 0.25rem; }}
-.llm-tools-status-label {{ font-size: 0.8rem; color: var(--llm-tools-muted); text-transform: uppercase; letter-spacing: 0.08em; }}
-.llm-tools-status-text {{ font-size: 1rem; font-weight: 600; }}
+.llm-tools-status-text {{ font-size: 0.92rem; font-weight: 600; }}
+.llm-tools-status-label {{ color: var(--llm-tools-muted); margin-right: 0.35rem; }}
+.llm-tools-settings-title {{ font-size: 1.05rem; font-weight: 700; letter-spacing: -0.02em; margin: 0; color: var(--llm-tools-text); }}
+.llm-tools-settings-meta {{ color: var(--llm-tools-muted); font-size: 0.78rem; margin-bottom: 0.5rem; }}
+.llm-tools-settings-rail-label {{ font-size: 0.78rem; color: var(--llm-tools-muted); margin: 0.25rem 0 0.55rem 0; text-transform: uppercase; letter-spacing: 0.06em; text-align: center; }}
+.llm-tools-chevron-button button {{ min-width: 2.25rem; font-weight: 700; }}
+.stApp [data-testid="InputInstructions"] {{ pointer-events: none; }}
 </style>
 """
+
+
+def _theme_mode_for_session(
+    app_state: StreamlitWorkspaceState,
+) -> Literal["dark", "light"]:
+    st = _streamlit_module()
+    theme_enabled = bool(
+        st.session_state.setdefault(
+            _THEME_TOGGLE_KEY,
+            app_state.preferences.theme_mode == "dark",
+        )
+    )
+    return "dark" if theme_enabled else "light"
 
 
 def _render_theme(preferences: StreamlitPreferences) -> None:  # pragma: no cover
@@ -742,6 +856,23 @@ def _render_brand_header() -> None:  # pragma: no cover
         "<div class='llm-tools-hero'><div class='llm-tools-brand'>llm-tools chat</div><div class='llm-tools-subtitle'>Multi-session workspace chat with runtime model, provider, root, and tool controls.</div></div>",
         unsafe_allow_html=True,
     )
+
+
+def _render_fatal_error(exc: Exception) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    traceback_text = "".join(traceback.format_exception(exc)).rstrip()
+    st.markdown(
+        "<div class='llm-tools-hero'><div class='llm-tools-brand'>llm-tools chat</div><div class='llm-tools-subtitle'>The app hit an unexpected error. Streamlit's default exception screen is suppressed for this app.</div></div>",
+        unsafe_allow_html=True,
+    )
+    st.error(f"{type(exc).__name__}: {exc}")
+    with st.expander("Traceback", expanded=True):
+        st.text_area(
+            "Traceback text",
+            value=traceback_text,
+            height=320,
+            key="fatal-error-traceback",
+        )
 
 
 def _transcript_export_text(entries: list[StreamlitTranscriptEntry]) -> str:
@@ -822,7 +953,7 @@ def _render_empty_state(
         st.markdown("### Start a new conversation")
         st.caption(f"Current root: {root_text}")
         st.markdown(
-            "Choose a provider and model above, optionally select a root directory, then ask a grounded question or enable external tools from the composer tools menu."
+            "Choose a provider and model in the settings rail, optionally select a root directory, then ask a grounded question or enable external tools from the settings panel."
         )
 
 
@@ -988,6 +1119,7 @@ def _apply_turn_error(
     turn_state.pending_approval = None
     turn_state.approval_decision_in_flight = False
     turn_state.pending_interrupt_draft = None
+    turn_state.cancelling = False
     _touch_record(record)
 
 
@@ -1053,6 +1185,7 @@ def _apply_turn_result(
         record.confidence = None
     turn_state.status_text = ""
     turn_state.busy = False
+    turn_state.cancelling = False
     pending_prompt = turn_state.pending_interrupt_draft
     turn_state.pending_interrupt_draft = None
     _touch_record(record)
@@ -1073,6 +1206,8 @@ def _apply_queued_event(
     turn_state = _turn_state_for(app_state, queued_event.session_id)
     inspector_state = record.inspector_state
     if queued_event.kind == "status":
+        if turn_state.cancelling:
+            return None
         status_event = ChatWorkflowStatusEvent.model_validate(queued_event.payload)
         turn_state.status_text = status_event.status
         return None
@@ -1148,6 +1283,19 @@ def _apply_queued_event(
         )
         return None
     if queued_event.kind == "complete":
+        if turn_state.busy and turn_state.cancelling:
+            pending_prompt = turn_state.pending_interrupt_draft
+            turn_state.busy = False
+            turn_state.status_text = ""
+            turn_state.pending_approval = None
+            turn_state.approval_decision_in_flight = False
+            turn_state.pending_interrupt_draft = None
+            turn_state.cancelling = False
+            record.transcript.append(
+                StreamlitTranscriptEntry(role="system", text="Stopped active turn.")
+            )
+            _touch_record(record)
+            return pending_prompt
         return None
     raise ValueError(f"Unsupported queued event kind: {queued_event.kind}")
 
@@ -1212,6 +1360,7 @@ def _start_streamlit_turn(  # pragma: no cover
     turn_state.status_text = "thinking"
     turn_state.pending_approval = None
     turn_state.approval_decision_in_flight = False
+    turn_state.cancelling = False
     if record.summary.title == "New chat" and not any(
         entry.role == "user" for entry in record.transcript
     ):
@@ -1342,12 +1491,26 @@ def _cancel_active_turn(  # pragma: no cover
     st = _streamlit_module()
     handle = st.session_state.get(_ACTIVE_TURN_STATE_SLOT)
     turn_state = _turn_state_for(app_state, session_id)
-    if not isinstance(handle, StreamlitActiveTurnHandle):
-        return
-    if handle.session_id != session_id:
+    if not isinstance(handle, StreamlitActiveTurnHandle) or handle.session_id != session_id:
+        if not preserve_pending_prompt:
+            turn_state.pending_interrupt_draft = None
+        if turn_state.busy:
+            turn_state.pending_approval = None
+            turn_state.approval_decision_in_flight = False
+            turn_state.cancelling = False
+            turn_state.status_text = ""
+            turn_state.busy = False
+            _append_notice(
+                app_state.sessions[session_id],
+                role="system",
+                text="Stopped active turn.",
+            )
         return
     if not preserve_pending_prompt:
         turn_state.pending_interrupt_draft = None
+    turn_state.pending_approval = None
+    turn_state.approval_decision_in_flight = False
+    turn_state.cancelling = True
     turn_state.status_text = "stopping"
     handle.runner.cancel()
 
@@ -1603,6 +1766,122 @@ def process_streamlit_chat_turn(  # pragma: no cover
     )
 
 
+def _running_in_wsl() -> bool:
+    return bool(os.getenv("WSL_DISTRO_NAME") or os.getenv("WSL_INTEROP"))
+
+
+def _pick_root_directory_via_powershell() -> tuple[str | None, str | None]:
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        return None, "Native directory picker is not available in this environment."
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog; "
+        "$dialog.ShowNewFolderButton = $false; "
+        "if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) "
+        "{ [Console]::Out.Write($dialog.SelectedPath) }"
+    )
+    try:
+        result = subprocess.run(
+            [powershell, "-NoProfile", "-STA", "-Command", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception as exc:
+        return None, f"Unable to open native directory picker: {exc}"
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "picker failed"
+        return None, f"Unable to open native directory picker: {message}"
+    selected = result.stdout.strip()
+    if selected == "":
+        return None, None
+    wslpath = shutil.which("wslpath")
+    if wslpath is not None:
+        translated = subprocess.run(
+            [wslpath, "-u", selected],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if translated.returncode == 0 and translated.stdout.strip():
+            selected = translated.stdout.strip()
+    return _resolve_root_text(selected)
+
+
+def _pick_root_directory_via_tk() -> tuple[str | None, str | None]:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception:
+        return None, "Native directory picker is not available in this environment."
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+        except Exception:
+            pass
+        selected = filedialog.askdirectory(mustexist=True)
+    except Exception as exc:
+        return None, f"Unable to open native directory picker: {exc}"
+    finally:
+        if root is not None:
+            root.destroy()
+    if not selected:
+        return None, None
+    return _resolve_root_text(selected)
+
+
+def _pick_root_directory() -> tuple[str | None, str | None]:
+    if _running_in_wsl():
+        selected_root, error_message = _pick_root_directory_via_powershell()
+        if selected_root is not None or error_message is None:
+            return selected_root, error_message
+    return _pick_root_directory_via_tk()
+
+
+def _apply_runtime_root(
+    *,
+    config: TextualChatConfig,
+    preferences: StreamlitPreferences,
+    record: StreamlitPersistedSessionRecord,
+    runtime: StreamlitRuntimeConfig,
+    resolved_root: str | None,
+) -> None:
+    previous_root = runtime.root_path
+    runtime.root_path = resolved_root
+    if resolved_root is None:
+        runtime.enabled_tools = sorted(
+            _filter_enabled_tools_for_root(
+                set(runtime.enabled_tools),
+                root_path=None,
+            )
+        )
+        _append_notice(record, role="system", text="Workspace root cleared.")
+        _touch_record(record)
+        return
+    if previous_root is None and not runtime.enabled_tools:
+        runtime.enabled_tools = sorted(
+            _default_enabled_tool_names(config, root_path=Path(resolved_root))
+        )
+    else:
+        runtime.enabled_tools = sorted(
+            _filter_enabled_tools_for_root(
+                set(runtime.enabled_tools),
+                root_path=resolved_root,
+            )
+        )
+    _remember_runtime_preferences(preferences, runtime)
+    _append_notice(
+        record,
+        role="system",
+        text=f"Workspace root updated to {runtime.root_path}.",
+    )
+    _touch_record(record)
+
+
 def _provider_control_strip(  # pragma: no cover  # noqa: C901
     app_state: StreamlitWorkspaceState,
     *,
@@ -1614,171 +1893,192 @@ def _provider_control_strip(  # pragma: no cover  # noqa: C901
     runtime = record.runtime
     turn_state = _turn_state_for(app_state, session_id)
     busy = turn_state.busy
-    controls_top = st.columns([1.2, 1.8, 2.5])
-    provider_values = [preset.value for preset in ProviderPreset]
-    selected_provider = controls_top[0].selectbox(
-        "Provider",
-        options=provider_values,
-        index=provider_values.index(runtime.provider.value),
-        key=f"provider:{session_id}",
-        disabled=busy,
-    )
-    if selected_provider != runtime.provider.value:
-        runtime.provider = ProviderPreset(selected_provider)
-        runtime.api_base_url = _default_base_url_for_provider(config, runtime.provider)
-        runtime.model_name = _default_model_for_provider(config, runtime.provider)
-        _remember_runtime_preferences(app_state.preferences, runtime)
-        _touch_record(record)
-        _save_workspace_state(app_state)
-        st.rerun()
-
-    model_options, model_notice = _available_model_options(
-        runtime, app_state.preferences, config
-    )
-    if runtime.model_name not in model_options:
-        model_options = _dedupe_preserve([runtime.model_name, *model_options])
-    selected_model = controls_top[1].selectbox(
-        "Model",
-        options=model_options,
-        index=model_options.index(runtime.model_name),
-        key=f"model:{session_id}",
-        disabled=busy,
-    )
-    if selected_model != runtime.model_name:
-        runtime.model_name = selected_model
-        _remember_runtime_preferences(app_state.preferences, runtime)
-        _touch_record(record)
-        _save_workspace_state(app_state)
-        st.rerun()
-
-    root_input_col, root_apply_col, root_clear_col = controls_top[2].columns(
-        [5, 1.2, 1.2]
-    )
-    root_value = root_input_col.text_input(
-        "Root directory",
-        value=runtime.root_path or "",
-        key=f"root-input:{session_id}",
-        disabled=busy,
-        placeholder="No root selected",
-    )
-    if root_apply_col.button("Apply", key=f"root-apply:{session_id}", disabled=busy):
-        resolved_root, error_message = _resolve_root_text(root_value)
-        if error_message is not None:
-            _append_notice(record, role="error", text=error_message)
-        else:
-            previous_root = runtime.root_path
-            runtime.root_path = resolved_root
-            if (
-                previous_root is None
-                and resolved_root is not None
-                and not runtime.enabled_tools
-            ):
-                runtime.enabled_tools = sorted(
-                    _default_enabled_tool_names(config, root_path=Path(resolved_root))
-                )
-            else:
-                runtime.enabled_tools = sorted(
-                    _filter_enabled_tools_for_root(
-                        set(runtime.enabled_tools),
-                        root_path=runtime.root_path,
-                    )
-                )
-            _remember_runtime_preferences(app_state.preferences, runtime)
-            _append_notice(
-                record,
-                role="system",
-                text=f"Workspace root updated to {runtime.root_path or 'none'}.",
-            )
-        _touch_record(record)
-        _save_workspace_state(app_state)
-        st.rerun()
-    if root_clear_col.button("Clear", key=f"root-clear:{session_id}", disabled=busy):
-        runtime.root_path = None
-        runtime.enabled_tools = sorted(
-            _filter_enabled_tools_for_root(set(runtime.enabled_tools), root_path=None)
-        )
-        _append_notice(record, role="system", text="Workspace root cleared.")
-        _touch_record(record)
-        _save_workspace_state(app_state)
-        st.rerun()
-
-    lower_controls = st.columns([1.8, 1.6, 1.6])
-    recent_roots = [_ROOT_SENTINEL, *app_state.preferences.recent_roots]
-    selected_recent_root = lower_controls[0].selectbox(
-        "Recent roots",
-        options=recent_roots,
-        index=0,
-        format_func=lambda value: (
-            "Choose a recent root" if value == _ROOT_SENTINEL else value
-        ),
-        key=f"recent-root:{session_id}",
-        disabled=busy,
-    )
+    provider_key = f"provider:{session_id}"
+    model_key = f"model:{session_id}"
+    root_input_key = f"root-input:{session_id}"
     recent_root_key = f"recent-root:{session_id}"
-    if selected_recent_root != _ROOT_SENTINEL:
-        resolved_root, error_message = _resolve_root_text(selected_recent_root)
-        st.session_state[recent_root_key] = _ROOT_SENTINEL
-        if error_message is not None:
-            _append_notice(record, role="error", text=error_message)
-        elif resolved_root is not None:
-            previous_root = runtime.root_path
-            runtime.root_path = resolved_root
-            runtime.enabled_tools = sorted(
-                _default_enabled_tool_names(config, root_path=Path(resolved_root))
-                if previous_root is None and not runtime.enabled_tools
-                else _filter_enabled_tools_for_root(
-                    set(runtime.enabled_tools),
-                    root_path=resolved_root,
-                )
-            )
-            _remember_runtime_preferences(app_state.preferences, runtime)
-            _append_notice(
-                record,
-                role="system",
-                text=f"Workspace root updated to {runtime.root_path}.",
-            )
-        _touch_record(record)
-        _save_workspace_state(app_state)
-        st.rerun()
+    base_url_key = f"base-url:{session_id}"
 
-    show_base_url = runtime.provider is not ProviderPreset.OPENAI
-    base_url_value = lower_controls[1].text_input(
-        "Base URL",
-        value=runtime.api_base_url or "",
-        key=f"base-url:{session_id}",
-        disabled=busy or not show_base_url,
-        placeholder="Provider default",
-    )
-    if show_base_url and (base_url_value.strip() or None) != runtime.api_base_url:
-        runtime.api_base_url = base_url_value.strip() or None
-        _remember_runtime_preferences(app_state.preferences, runtime)
-        _touch_record(record)
-        _save_workspace_state(app_state)
-
-    llm_config = _llm_config_for_runtime(config, runtime)
-    metadata = llm_config.credential_prompt_metadata()
-    if metadata.expects_api_key:
-        env_var = llm_config.api_key_env_var or "OPENAI_API_KEY"
-        cached_api_key = _current_api_key(llm_config)
-        lower_controls[2].caption(
-            f"API key: {env_var} {'available' if cached_api_key else 'required'}"
+    with st.expander("Session configuration", expanded=True):
+        provider_values = [preset.value for preset in ProviderPreset]
+        _prime_widget_value(provider_key, runtime.provider.value)
+        if st.session_state.get(provider_key) not in provider_values:
+            st.session_state[provider_key] = runtime.provider.value
+        selected_provider = st.selectbox(
+            "Provider",
+            options=provider_values,
+            index=provider_values.index(str(st.session_state[provider_key])),
+            key=provider_key,
+            disabled=busy,
         )
-        if os.getenv(env_var) is None:
-            entered_key = lower_controls[2].text_input(
-                "API key",
-                value="",
-                type="password",
-                key=f"api-key:{env_var}",
-                disabled=busy,
+        if selected_provider != runtime.provider.value:
+            runtime.provider = ProviderPreset(selected_provider)
+            runtime.api_base_url = _default_base_url_for_provider(
+                config, runtime.provider
             )
-            if entered_key.strip():
-                cache = st.session_state.setdefault(_SECRET_CACHE_STATE_SLOT, {})
-                cache[env_var] = entered_key.strip()
-    else:
-        lower_controls[2].caption("API key: not required for this provider")
+            runtime.model_name = _default_model_for_provider(config, runtime.provider)
+            _queue_widget_override(provider_key, runtime.provider.value)
+            _queue_widget_override(model_key, runtime.model_name)
+            _queue_widget_override(base_url_key, runtime.api_base_url or "")
+            _remember_runtime_preferences(app_state.preferences, runtime)
+            _touch_record(record)
+            _save_workspace_state(app_state)
+            st.rerun()
 
-    if model_notice is not None:
-        st.caption(model_notice)
+        model_options, model_notice = _available_model_options(
+            runtime, app_state.preferences, config
+        )
+        if runtime.model_name not in model_options:
+            model_options = _dedupe_preserve([runtime.model_name, *model_options])
+        _prime_widget_value(model_key, runtime.model_name)
+        if st.session_state.get(model_key) not in model_options:
+            st.session_state[model_key] = runtime.model_name
+        selected_model = st.selectbox(
+            "Model",
+            options=model_options,
+            index=model_options.index(str(st.session_state[model_key])),
+            key=model_key,
+            disabled=busy,
+        )
+        if selected_model != runtime.model_name:
+            runtime.model_name = selected_model
+            _queue_widget_override(model_key, runtime.model_name)
+            _remember_runtime_preferences(app_state.preferences, runtime)
+            _touch_record(record)
+            _save_workspace_state(app_state)
+            st.rerun()
+
+        _prime_widget_value(root_input_key, runtime.root_path or "")
+        root_value = st.text_input(
+            "Root directory",
+            value=str(st.session_state[root_input_key]),
+            key=root_input_key,
+            disabled=busy,
+            placeholder="No root selected",
+        )
+        root_action_cols = st.columns([1, 1, 1])
+        if root_action_cols[0].button(
+            "Apply", key=f"root-apply:{session_id}", disabled=busy
+        ):
+            resolved_root, error_message = _resolve_root_text(root_value)
+            if error_message is not None:
+                _append_notice(record, role="error", text=error_message)
+                _touch_record(record)
+            else:
+                _queue_widget_override(root_input_key, resolved_root or "")
+                _apply_runtime_root(
+                    config=config,
+                    preferences=app_state.preferences,
+                    record=record,
+                    runtime=runtime,
+                    resolved_root=resolved_root,
+                )
+            _save_workspace_state(app_state)
+            st.rerun()
+        if root_action_cols[1].button(
+            "Browse", key=f"root-browse:{session_id}", disabled=busy
+        ):
+            selected_root, error_message = _pick_root_directory()
+            if error_message is not None:
+                _append_notice(record, role="error", text=error_message)
+                _touch_record(record)
+            elif selected_root is not None:
+                _queue_widget_override(root_input_key, selected_root)
+                _apply_runtime_root(
+                    config=config,
+                    preferences=app_state.preferences,
+                    record=record,
+                    runtime=runtime,
+                    resolved_root=selected_root,
+                )
+            if error_message is not None or selected_root is not None:
+                _save_workspace_state(app_state)
+                st.rerun()
+        if root_action_cols[2].button(
+            "Clear", key=f"root-clear:{session_id}", disabled=busy
+        ):
+            _queue_widget_override(root_input_key, "")
+            _apply_runtime_root(
+                config=config,
+                preferences=app_state.preferences,
+                record=record,
+                runtime=runtime,
+                resolved_root=None,
+            )
+            _save_workspace_state(app_state)
+            st.rerun()
+
+        recent_roots = [_ROOT_SENTINEL, *app_state.preferences.recent_roots]
+        _prime_widget_value(recent_root_key, _ROOT_SENTINEL)
+        if st.session_state.get(recent_root_key) not in recent_roots:
+            st.session_state[recent_root_key] = _ROOT_SENTINEL
+        selected_recent_root = st.selectbox(
+            "Recent roots",
+            options=recent_roots,
+            index=recent_roots.index(str(st.session_state[recent_root_key])),
+            format_func=lambda value: (
+                "Choose a recent root" if value == _ROOT_SENTINEL else value
+            ),
+            key=recent_root_key,
+            disabled=busy,
+        )
+        if selected_recent_root != _ROOT_SENTINEL:
+            resolved_root, error_message = _resolve_root_text(selected_recent_root)
+            _queue_widget_override(recent_root_key, _ROOT_SENTINEL)
+            if error_message is not None:
+                _append_notice(record, role="error", text=error_message)
+                _touch_record(record)
+            elif resolved_root is not None:
+                _queue_widget_override(root_input_key, resolved_root)
+                _apply_runtime_root(
+                    config=config,
+                    preferences=app_state.preferences,
+                    record=record,
+                    runtime=runtime,
+                    resolved_root=resolved_root,
+                )
+            _save_workspace_state(app_state)
+            st.rerun()
+
+        show_base_url = runtime.provider is not ProviderPreset.OPENAI
+        _prime_widget_value(base_url_key, runtime.api_base_url or "")
+        base_url_value = st.text_input(
+            "Base URL",
+            value=str(st.session_state[base_url_key]),
+            key=base_url_key,
+            disabled=busy or not show_base_url,
+            placeholder="Provider default",
+        )
+        if show_base_url and (base_url_value.strip() or None) != runtime.api_base_url:
+            runtime.api_base_url = base_url_value.strip() or None
+            _remember_runtime_preferences(app_state.preferences, runtime)
+            _touch_record(record)
+            _save_workspace_state(app_state)
+
+        llm_config = _llm_config_for_runtime(config, runtime)
+        metadata = llm_config.credential_prompt_metadata()
+        if metadata.expects_api_key:
+            env_var = llm_config.api_key_env_var or "OPENAI_API_KEY"
+            cached_api_key = _current_api_key(llm_config)
+            st.caption(
+                f"API key: {env_var} {'available' if cached_api_key else 'required'}"
+            )
+            if os.getenv(env_var) is None:
+                entered_key = st.text_input(
+                    "API key",
+                    value="",
+                    type="password",
+                    key=f"api-key:{env_var}",
+                    disabled=busy,
+                )
+                if entered_key.strip():
+                    cache = st.session_state.setdefault(_SECRET_CACHE_STATE_SLOT, {})
+                    cache[env_var] = entered_key.strip()
+        else:
+            st.caption("API key: not required for this provider")
+
+        if model_notice is not None:
+            st.caption(model_notice)
 
 
 def _resolve_root_text(raw_value: str) -> tuple[str | None, str | None]:
@@ -1807,26 +2107,14 @@ def _render_summary_chips(
         chips.append(
             f"<span class='llm-tools-chip'>tokens: {token_usage.session_tokens or '-'}</span>"
         )
-        chips.append(
-            f"<span class='llm-tools-chip'>context: {token_usage.active_context_tokens or '-'}</span>"
-        )
     if record.confidence is not None:
         chips.append(
             f"<span class='llm-tools-chip'>confidence: {record.confidence:.2f}</span>"
         )
     st.markdown(
-        f"<div class='llm-tools-chip-row'>{''.join(chips)}</div>",
+        f"<div class='llm-tools-summary-bar'>{''.join(chips)}</div>",
         unsafe_allow_html=True,
     )
-
-
-def _tools_popover_context(  # pragma: no cover
-    st: Any, label: str
-) -> AbstractContextManager[Any]:
-    popover = getattr(st, "popover", None)
-    if callable(popover):
-        return cast(AbstractContextManager[Any], popover(label))
-    return cast(AbstractContextManager[Any], st.expander(label))
 
 
 def _render_tools_popover(  # pragma: no cover
@@ -1841,7 +2129,7 @@ def _render_tools_popover(  # pragma: no cover
     busy = _turn_state_for(app_state, session_id).busy
     tool_specs = _all_tool_specs()
     workspace_tool_names = _workspace_tool_names()
-    with _tools_popover_context(st, "Tools"):
+    with st.expander("Tools and approvals", expanded=False):
         st.caption("Enable built-in tools and the capabilities they require.")
         preset_cols = st.columns(3)
         if preset_cols[0].button(
@@ -1955,7 +2243,8 @@ def _render_tools_popover(  # pragma: no cover
             for tool_name, spec in entries:
                 enabled = tool_name in runtime.enabled_tools
                 needs_workspace = tool_name in workspace_tool_names
-                disabled = busy or (needs_workspace and runtime.root_path is None)
+                workspace_missing = needs_workspace and runtime.root_path is None
+                disabled = busy or workspace_missing
                 label = f"{tool_name} ({spec.side_effects.value})"
                 checked = st.checkbox(
                     label,
@@ -1977,7 +2266,7 @@ def _render_tools_popover(  # pragma: no cover
                         )
                     _touch_record(record)
                     _save_workspace_state(app_state)
-                if disabled and needs_workspace:
+                if workspace_missing:
                     st.caption("Select a root directory to enable this tool.")
 
 
@@ -2044,13 +2333,13 @@ def _render_status_and_composer(  # pragma: no cover
 ) -> None:
     st = _streamlit_module()
     turn_state = _turn_state_for(app_state, session_id)
-    status_cols = st.columns([4, 1, 1, 1])
+    status_cols = st.columns([6, 1, 1, 1])
     status_text = turn_state.status_text or "idle"
     status_cols[0].markdown(
         (
-            "<div class='llm-tools-status'>"
-            "<div class='llm-tools-status-label'>Current status</div>"
-            f"<div class='llm-tools-status-text'>{status_text}</div>"
+            "<div class='llm-tools-status-line'>"
+            "<span class='llm-tools-status-label'>Status:</span>"
+            f"<span class='llm-tools-status-text'>{status_text}</span>"
             "</div>"
         ),
         unsafe_allow_html=True,
@@ -2081,31 +2370,38 @@ def _render_status_and_composer(  # pragma: no cover
             _cancel_active_turn(app_state, session_id=session_id)
             _save_workspace_state(app_state)
             st.rerun()
-    composer_cols = st.columns([1.15, 6, 1.15])
-    with composer_cols[0]:
-        _render_tools_popover(app_state, session_id=session_id, config=config)
     draft_key = f"composer:{session_id}"
-    composer_cols[1].text_area(
-        "Message",
-        key=draft_key,
-        value=app_state.drafts.get(session_id, ""),
-        height=110,
-        placeholder="Ask a grounded question or use slash commands like /help.",
-        label_visibility="collapsed",
-    )
+    if session_id in app_state.clear_draft_for:
+        st.session_state[draft_key] = ""
+        app_state.clear_draft_for.discard(session_id)
+    with st.form(
+        key=f"composer-form:{session_id}",
+        clear_on_submit=False,
+        enter_to_submit=True,
+        border=False,
+    ):
+        composer_cols = st.columns([6, 1.2])
+        composer_cols[0].text_area(
+            "Message",
+            key=draft_key,
+            value=app_state.drafts.get(session_id, ""),
+            height=90,
+            placeholder="Ask a grounded question or use slash commands like /help. Press Ctrl+Enter or Cmd+Enter to send.",
+            label_visibility="collapsed",
+        )
+        send_clicked = composer_cols[1].form_submit_button(
+            "Send",
+            key=f"send:{session_id}",
+            use_container_width=True,
+        )
     app_state.drafts[session_id] = str(st.session_state.get(draft_key, ""))
-    send_clicked = composer_cols[2].button(
-        "Send",
-        key=f"send:{session_id}",
-        use_container_width=True,
-    )
     if not send_clicked:
         return
     prompt = app_state.drafts.get(session_id, "").strip()
     if not prompt:
         return
     app_state.drafts[session_id] = ""
-    st.session_state[draft_key] = ""
+    app_state.clear_draft_for.add(session_id)
     if _is_command_prompt(prompt):
         app_state.drafts[session_id] = prompt
         outcome = _run_streamlit_command(
@@ -2127,6 +2423,64 @@ def _render_status_and_composer(  # pragma: no cover
         prompt=prompt,
     )
     st.rerun()
+
+
+def _render_settings_panel(  # pragma: no cover
+    app_state: StreamlitWorkspaceState,
+    *,
+    session_id: str,
+    config: TextualChatConfig,
+) -> None:
+    st = _streamlit_module()
+    record = app_state.sessions[session_id]
+    st.markdown("<div class='llm-tools-settings-shell'>", unsafe_allow_html=True)
+    if not app_state.preferences.settings_panel_open:
+        st.markdown(
+            "<div class='llm-tools-settings-rail-label'>Settings</div>",
+            unsafe_allow_html=True,
+        )
+        with st.container():
+            st.markdown("<div class='llm-tools-chevron-button'>", unsafe_allow_html=True)
+            if st.button(
+                "«",
+                key="settings-panel-toggle",
+                use_container_width=True,
+            ):
+                app_state.preferences.settings_panel_open = True
+                _save_workspace_state(app_state)
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    header_cols = st.columns([4.2, 1])
+    header_cols[0].markdown(
+        "<div class='llm-tools-settings-title'>Settings</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        (
+            "<div class='llm-tools-settings-meta'>"
+            f"{record.runtime.provider.value} | {record.runtime.model_name}"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+    with header_cols[1]:
+        st.markdown("<div class='llm-tools-chevron-button'>", unsafe_allow_html=True)
+        if st.button(
+            "»",
+            key="settings-panel-toggle",
+            use_container_width=True,
+        ):
+            app_state.preferences.settings_panel_open = False
+            _save_workspace_state(app_state)
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+    _provider_control_strip(app_state, config=config, session_id=session_id)
+    _render_tools_popover(app_state, session_id=session_id, config=config)
+    _render_session_details(app_state, session_id=session_id)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _render_sidebar(  # pragma: no cover
@@ -2151,11 +2505,14 @@ def _render_sidebar(  # pragma: no cover
             st.rerun()
         theme_mode = st.toggle(
             "Dark mode",
-            value=app_state.preferences.theme_mode == "dark",
-            key="theme-mode",
+            key=_THEME_TOGGLE_KEY,
         )
-        app_state.preferences.theme_mode = "dark" if theme_mode else "light"
-        _save_workspace_state(app_state)
+        resolved_theme = "dark" if theme_mode else "light"
+        if resolved_theme != app_state.preferences.theme_mode:
+            app_state.preferences.theme_mode = cast(
+                Literal["dark", "light"], resolved_theme
+            )
+            _save_workspace_state(app_state)
         search_value = st.text_input("Search sessions", value="", key="session-search")
         filtered_ids = [
             session_id
@@ -2222,22 +2579,22 @@ def run_streamlit_chat_app(  # pragma: no cover
         )
     st.session_state.setdefault(_ACTIVE_TURN_STATE_SLOT, None)
     st.session_state.setdefault(_SECRET_CACHE_STATE_SLOT, {})
+    st.session_state.setdefault(_WIDGET_OVERRIDES_STATE_SLOT, {})
     app_state: StreamlitWorkspaceState = st.session_state[_APP_STATE_SLOT]
+
+    theme_mode = _theme_mode_for_session(app_state)
+    if theme_mode != app_state.preferences.theme_mode:
+        app_state.preferences.theme_mode = theme_mode
+        _save_workspace_state(app_state)
 
     pending_prompt = _drain_active_turn_events(app_state)
     _render_theme(app_state.preferences)
     _render_sidebar(app_state, config=config, root_path=root_path)
-    _render_brand_header()
     active_record = _active_session(app_state)
     for notice in app_state.startup_notices:
         st.warning(notice)
     app_state.startup_notices.clear()
 
-    _provider_control_strip(
-        app_state,
-        config=config,
-        session_id=app_state.active_session_id,
-    )
     _render_summary_chips(active_record)
 
     if pending_prompt is not None and pending_prompt.strip():
@@ -2248,18 +2605,29 @@ def run_streamlit_chat_app(  # pragma: no cover
             prompt=pending_prompt,
         )
 
-    if not active_record.transcript:
-        _render_empty_state(active_record)
+    if app_state.preferences.settings_panel_open:
+        main_col, settings_col = st.columns([4.45, 1.75])
     else:
-        for entry in active_record.transcript:
-            _render_transcript_entry(entry)
+        main_col, settings_col = st.columns([5.85, 0.35])
 
-    _render_session_details(app_state, session_id=app_state.active_session_id)
-    _render_status_and_composer(
-        app_state,
-        session_id=app_state.active_session_id,
-        config=config,
-    )
+    with main_col:
+        if not active_record.transcript:
+            _render_empty_state(active_record)
+        else:
+            for entry in active_record.transcript:
+                _render_transcript_entry(entry)
+        _render_status_and_composer(
+            app_state,
+            session_id=app_state.active_session_id,
+            config=config,
+        )
+
+    with settings_col:
+        _render_settings_panel(
+            app_state,
+            session_id=app_state.active_session_id,
+            config=config,
+        )
 
     if _turn_state_for(app_state, app_state.active_session_id).busy:
         time.sleep(_POLL_INTERVAL_SECONDS)
@@ -2295,10 +2663,13 @@ def _run_streamlit_script(
     argv: Sequence[str] | None = None,
 ) -> None:  # pragma: no cover
     args = build_parser().parse_args(list(argv) if argv is not None else sys.argv[1:])
-    run_streamlit_chat_app(
-        root_path=_resolve_root_argument(args),
-        config=_resolve_chat_config(args),
-    )
+    try:
+        run_streamlit_chat_app(
+            root_path=_resolve_root_argument(args),
+            config=_resolve_chat_config(args),
+        )
+    except Exception as exc:
+        _render_fatal_error(exc)
 
 
 if __name__ == "__main__":

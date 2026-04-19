@@ -129,6 +129,7 @@ class StreamlitPreferences(BaseModel):
     """Persisted app-wide UI preferences and recents."""
 
     theme_mode: Literal["dark", "light"] = "dark"
+    settings_panel_open: bool = True
     recent_roots: list[str] = Field(default_factory=list)
     recent_models: dict[str, list[str]] = Field(default_factory=dict)
     recent_base_urls: dict[str, list[str]] = Field(default_factory=dict)
