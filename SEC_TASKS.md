@@ -171,8 +171,9 @@ verification as a security-critical control plane.
 
 - [ ] Review session, task, and turn lifecycle models for state confusion,
   replay inconsistency, and approval durability issues.
-- [ ] Audit persisted storage, resume, replay, and summaries for secret
+- [x] Audit persisted storage, resume, replay, and summaries for secret
   retention, tamper exposure, and unsafe trust in stored artifacts.
+  Review artifact: `docs/implementation/harness-persistence-security-review.md`.
 - [ ] Review planning, context construction, verification, and protection
   scrubbing for privilege escalation or leakage across turns.
 - [ ] Assess stop conditions, no-progress handling, retries, and recovery
