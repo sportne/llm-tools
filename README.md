@@ -22,8 +22,7 @@ The core v0.1 foundation is implemented:
 - a current `workflow_api` bridge for one parsed model turn plus an interactive
   repository-chat session runner
 - dual sync/async execution paths across runtime, provider, and workflow layers
-- optional Streamlit app layers for the long-term assistant client plus the
-  deprecated repository-chat reference client
+- an optional Streamlit assistant app layer for interactive use
 - `harness_api` durable session orchestration with persisted traces, replay,
   summaries, a public Python session API, and a minimal persisted-session CLI
 
@@ -125,31 +124,6 @@ injectable session control, replay inspection, or a minimal built-in runner for
 scripted and approval-aware harness tests. The CLI defaults to storing state in
 `~/.llm-tools/harness`; pass `--store-dir` to isolate or relocate persisted
 session data.
-
-## Streamlit Chat App
-
-`llm_tools.apps.streamlit_chat` is deprecated. It remains in the repository
-only as temporary setup and reference guidance while the assistant transition
-is documented elsewhere.
-
-Launch the optional Streamlit repository chat app with either:
-
-```bash
-python -m llm_tools.apps.streamlit_chat <directory> --config <path>
-```
-
-or:
-
-```bash
-llm-tools-streamlit-chat <directory> --config <path>
-```
-
-The wrapper accepts only the chat app's own arguments. To pass regular
-Streamlit server flags, run Streamlit directly:
-
-```bash
-streamlit run src/llm_tools/apps/streamlit_chat/app.py -- <directory> --config <path>
-```
 
 ## Streamlit Assistant App
 

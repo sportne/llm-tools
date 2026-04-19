@@ -1,4 +1,4 @@
-"""Persisted models for the Streamlit chat app."""
+"""Shared persisted models for Streamlit-based app surfaces."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from llm_tools.workflow_api import (
 
 
 class StreamlitTranscriptEntry(BaseModel):
-    """One rendered transcript entry persisted with a chat session."""
+    """One rendered transcript entry persisted with a Streamlit session."""
 
     role: Literal["user", "assistant", "system", "error"]
     text: str
@@ -34,7 +34,7 @@ class StreamlitInspectorEntry(BaseModel):
 
 
 class StreamlitInspectorState(BaseModel):
-    """Persisted inspector/debug state for one chat session."""
+    """Persisted inspector/debug state for one Streamlit session."""
 
     provider_messages: list[StreamlitInspectorEntry] = Field(default_factory=list)
     parsed_responses: list[StreamlitInspectorEntry] = Field(default_factory=list)
@@ -42,7 +42,7 @@ class StreamlitInspectorState(BaseModel):
 
 
 class StreamlitRuntimeConfig(BaseModel):
-    """Mutable runtime controls owned by one Streamlit chat session."""
+    """Mutable runtime controls owned by one Streamlit session."""
 
     provider: ProviderPreset = ProviderPreset.OLLAMA
     provider_mode_strategy: ProviderModeStrategy = ProviderModeStrategy.AUTO
@@ -121,7 +121,7 @@ class StreamlitPersistedSessionRecord(BaseModel):
 
 
 class StreamlitSessionIndex(BaseModel):
-    """Top-level persisted session index for the Streamlit app."""
+    """Top-level persisted session index for a Streamlit app."""
 
     active_session_id: str | None = None
     session_order: list[str] = Field(default_factory=list)
@@ -156,3 +156,15 @@ class StreamlitPreferences(BaseModel):
             if cleaned_entries:
                 normalized[cleaned_key] = cleaned_entries
         return normalized
+
+
+__all__ = [
+    "StreamlitInspectorEntry",
+    "StreamlitInspectorState",
+    "StreamlitPersistedSessionRecord",
+    "StreamlitPreferences",
+    "StreamlitRuntimeConfig",
+    "StreamlitSessionIndex",
+    "StreamlitSessionSummary",
+    "StreamlitTranscriptEntry",
+]

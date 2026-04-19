@@ -47,7 +47,7 @@ selected.
 
 ## Config Shape
 
-The assistant uses a separate config model from the repository chat apps:
+The assistant uses its own config model:
 
 - `llm`
 - `session`

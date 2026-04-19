@@ -37,7 +37,7 @@ from llm_tools.apps.protection_runtime import (
     build_protection_controller,
     build_protection_environment,
 )
-from llm_tools.apps.streamlit_chat.models import (
+from llm_tools.apps.streamlit_models import (
     StreamlitInspectorEntry,
     StreamlitPersistedSessionRecord,
     StreamlitPreferences,

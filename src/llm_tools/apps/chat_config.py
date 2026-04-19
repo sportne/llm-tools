@@ -1,24 +1,17 @@
-"""Shared config models and loading helpers for repository chat app layers."""
+"""Shared provider and policy config models for app surfaces."""
 
 from __future__ import annotations
 
 from enum import Enum
-from pathlib import Path
-from typing import Any
 
-import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field, field_validator
-from pydantic import ValidationError as PydanticValidationError
 
 from llm_tools.tool_api import SideEffectClass
 from llm_tools.tool_api.redaction import RedactionConfig
-from llm_tools.tools.filesystem import SourceFilters, ToolLimits
-from llm_tools.workflow_api import ChatSessionConfig
-from llm_tools.workflow_api.protection import ProtectionConfig
 
 
 class ProviderPreset(str, Enum):  # noqa: UP042
-    """OpenAI-compatible provider presets available in repository chat apps."""
+    """OpenAI-compatible provider presets available in app surfaces."""
 
     OPENAI = "openai"
     OLLAMA = "ollama"
@@ -96,7 +89,7 @@ class ChatLLMConfig(BaseModel):
 
 
 class ChatUIConfig(BaseModel):
-    """Minimal UI toggles for the interactive chat apps."""
+    """Minimal UI toggles for the interactive app surfaces."""
 
     show_token_usage: bool = True
     show_footer_help: bool = True
@@ -104,7 +97,7 @@ class ChatUIConfig(BaseModel):
 
 
 class ChatPolicyConfig(BaseModel):
-    """Startup policy defaults for the session-scoped chat controls."""
+    """Startup policy defaults for session-scoped app controls."""
 
     enabled_tools: list[str] | None = None
     require_approval_for: set[SideEffectClass] = Field(default_factory=set)
@@ -121,50 +114,10 @@ class ChatPolicyConfig(BaseModel):
         return cleaned
 
 
-class TextualChatConfig(BaseModel):
-    """Shared repository-chat configuration used by app frontends."""
-
-    llm: ChatLLMConfig = Field(default_factory=ChatLLMConfig)
-    source_filters: SourceFilters = Field(default_factory=SourceFilters)
-    session: ChatSessionConfig = Field(default_factory=ChatSessionConfig)
-    tool_limits: ToolLimits = Field(default_factory=ToolLimits)
-    policy: ChatPolicyConfig = Field(default_factory=ChatPolicyConfig)
-    protection: ProtectionConfig = Field(default_factory=ProtectionConfig)
-    ui: ChatUIConfig = Field(default_factory=ChatUIConfig)
-
-
-def _load_yaml(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        raise ValueError(f"Configuration file not found: {path}")
-    if not path.is_file():
-        raise ValueError(f"Configuration path is not a file: {path}")
-    try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
-        raise ValueError(f"Invalid YAML at {path}: {exc}") from exc
-    if raw is None:
-        return {}
-    if not isinstance(raw, dict):
-        raise ValueError(f"Expected mapping at root of YAML file: {path}")
-    return raw
-
-
-def load_textual_chat_config(path: Path) -> TextualChatConfig:
-    """Load and validate the shared repository chat configuration file."""
-    raw = _load_yaml(path)
-    for section_name in (
-        "llm",
-        "source_filters",
-        "session",
-        "tool_limits",
-        "policy",
-        "protection",
-        "ui",
-    ):
-        section_value = raw.get(section_name)
-        if section_value is not None and not isinstance(section_value, dict):
-            raise ValueError(f"chat config '{section_name}' must be a mapping")
-    try:
-        return TextualChatConfig.model_validate(raw)
-    except PydanticValidationError as exc:
-        raise ValueError(f"Invalid chat config at {path}: {exc}") from exc
+__all__ = [
+    "ChatCredentialPromptMetadata",
+    "ChatLLMConfig",
+    "ChatPolicyConfig",
+    "ChatUIConfig",
+    "ProviderPreset",
+]

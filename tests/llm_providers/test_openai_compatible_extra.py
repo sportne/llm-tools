@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from enum import Enum
 from types import SimpleNamespace
@@ -41,6 +42,40 @@ class _WrappedInstructor:
     def from_openai(client: Any, *, mode: _FakeMode) -> Any:
         del mode
         return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace()))
+
+
+class InstructorSchemaValidationError(RuntimeError):
+    pass
+
+
+InstructorSchemaValidationError.__module__ = "instructor.testing"
+
+
+def _wrapped_schema_failure(message: str) -> RuntimeError:
+    wrapped = RuntimeError(message)
+    wrapped.__cause__ = InstructorSchemaValidationError(message)
+    return wrapped
+
+
+class InstructorMessageCarrierError(RuntimeError):
+    pass
+
+
+InstructorMessageCarrierError.__module__ = "instructor.testing"
+
+
+class OpenAITransportError(RuntimeError):
+    pass
+
+
+OpenAITransportError.__module__ = "openai.testing"
+
+
+class PydanticTransportError(RuntimeError):
+    pass
+
+
+PydanticTransportError.__module__ = "pydantic.testing"
 
 
 def test_provider_helper_methods_cover_listing_and_parameter_merging() -> None:
@@ -113,6 +148,57 @@ def test_provider_helper_methods_cover_listing_and_parameter_merging() -> None:
             )
         )
     )
+    assert OpenAICompatibleProvider._mode_attempts_are_distinct(None, object())
+    previous_client = object()
+    assert not OpenAICompatibleProvider._mode_attempts_are_distinct(
+        previous_client, previous_client
+    )
+    assert OpenAICompatibleProvider._should_retry_mode_failure(
+        InstructorSchemaValidationError("schema validation failed")
+    )
+    assert OpenAICompatibleProvider._should_retry_mode_failure(
+        _wrapped_schema_failure("schema validation failed")
+    )
+    wrapped_runtime = RuntimeError("boom")
+    assert not OpenAICompatibleProvider._should_retry_mode_failure(wrapped_runtime)
+    chain = OpenAICompatibleProvider._iter_exception_chain(
+        _wrapped_schema_failure("schema validation failed")
+    )
+    assert [type(exc).__name__ for exc in chain] == [
+        "RuntimeError",
+        "InstructorSchemaValidationError",
+    ]
+
+
+def test_provider_helper_methods_cover_retry_classification_edges() -> None:
+    assert OpenAICompatibleProvider._should_retry_mode_failure(
+        json.JSONDecodeError("bad json", "{}", 0)
+    )
+    assert OpenAICompatibleProvider._should_retry_mode_failure(
+        PydanticTransportError("pydantic validation failed")
+    )
+    assert not OpenAICompatibleProvider._should_retry_mode_failure(
+        OpenAITransportError("schema validation failed")
+    )
+
+    assert OpenAICompatibleProvider._should_retry_mode_failure(
+        InstructorMessageCarrierError("schema validation failed")
+    )
+    assert not OpenAICompatibleProvider._should_retry_mode_failure(
+        InstructorMessageCarrierError("plain failure")
+    )
+
+
+def test_provider_helper_methods_cover_exception_chain_context_and_cycles() -> None:
+    root = InstructorSchemaValidationError("schema validation failed")
+    wrapped = RuntimeError("outer")
+    wrapped.__context__ = root
+    assert OpenAICompatibleProvider._should_retry_mode_failure(wrapped)
+
+    cycle = RuntimeError("cycle")
+    cycle.__cause__ = cycle
+    chain = OpenAICompatibleProvider._iter_exception_chain(cycle)
+    assert [type(exc).__name__ for exc in chain] == ["RuntimeError"]
 
 
 def test_provider_client_factory_and_instructor_wrapping_helpers(

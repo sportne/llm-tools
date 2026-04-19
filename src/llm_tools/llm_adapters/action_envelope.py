@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from typing import Annotated, Any, Literal, cast
 
 from pydantic import (
@@ -154,31 +155,41 @@ class ActionEnvelopeAdapter:
         actions_payload = getattr(envelope, "actions", [])
         invocations: list[ToolInvocationRequest] = []
         for action in actions_payload:
-            action_obj = self._normalize_payload(action)
-            if not isinstance(action_obj, dict):
-                raise ValueError("Action payload must decode to an object.")
-
-            tool_name = action_obj.get("tool_name")
-            if not isinstance(tool_name, str) or tool_name.strip() == "":
-                raise ValueError("Action payload is missing tool_name.")
-
-            arguments = action_obj.get("arguments", {})
-            if isinstance(arguments, BaseModel):
-                arguments = arguments.model_dump(mode="json")
-            if not isinstance(arguments, dict):
-                raise ValueError("Action arguments must decode to an object.")
-
+            tool_name, arguments = self._extract_action_fields(action)
             invocations.append(
                 ToolInvocationRequest(tool_name=tool_name, arguments=arguments)
             )
 
-        final_response = self._normalize_payload(
-            getattr(envelope, "final_response", None)
-        )
         return ParsedModelResponse(
             invocations=invocations,
-            final_response=final_response,
+            final_response=getattr(envelope, "final_response", None),
         )
+
+    @staticmethod
+    def _extract_action_fields(action: object) -> tuple[str, dict[str, Any]]:
+        if isinstance(action, BaseModel):
+            tool_name = getattr(action, "tool_name", None)
+            arguments = getattr(action, "arguments", {})
+        elif isinstance(action, Mapping):
+            tool_name = action.get("tool_name")
+            arguments = action.get("arguments", {})
+        else:
+            raise ValueError("Action payload must decode to an object.")
+
+        if not isinstance(tool_name, str) or tool_name.strip() == "":
+            raise ValueError("Action payload is missing tool_name.")
+
+        return tool_name, ActionEnvelopeAdapter._normalize_arguments(arguments)
+
+    @staticmethod
+    def _normalize_arguments(arguments: object) -> dict[str, Any]:
+        if isinstance(arguments, BaseModel):
+            return arguments.model_dump(mode="json")
+
+        if isinstance(arguments, Mapping):
+            return dict(arguments)
+
+        raise ValueError("Action arguments must decode to an object.")
 
     @staticmethod
     def _build_action_model(
