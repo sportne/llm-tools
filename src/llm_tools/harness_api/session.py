@@ -613,8 +613,14 @@ def _required_artifact_summary(snapshot: StoredHarnessState) -> HarnessSessionSu
 
 
 def _normalized_snapshot(snapshot: StoredHarnessState) -> StoredHarnessState:
-    trusted_artifacts = build_canonical_artifacts(snapshot.state)
-    return snapshot.model_copy(update={"artifacts": trusted_artifacts}, deep=True)
+    normalized_state = HarnessState.model_validate(
+        snapshot.state.model_dump(mode="python")
+    )
+    trusted_artifacts = build_canonical_artifacts(normalized_state)
+    return snapshot.model_copy(
+        update={"state": normalized_state, "artifacts": trusted_artifacts},
+        deep=True,
+    )
 
 
 def _timestamp(value: datetime) -> str:

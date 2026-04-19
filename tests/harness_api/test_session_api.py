@@ -33,10 +33,12 @@ from llm_tools.tool_api import (
     SideEffectClass,
     ToolContext,
     ToolError,
+    ToolInvocationRequest,
     ToolPolicy,
     ToolResult,
 )
 from llm_tools.workflow_api import (
+    ApprovalRequest,
     WorkflowInvocationOutcome,
     WorkflowInvocationStatus,
     WorkflowTurnResult,
@@ -586,6 +588,77 @@ def test_session_service_inspect_omits_historical_verification_when_snapshot_mis
         inspection.snapshot.artifacts.trace.turns[0].verification_status_by_task_id
         == {}
     )
+
+
+def test_session_service_inspect_normalizes_legacy_turn_approval_payload(
+    tmp_path: Path,
+) -> None:
+    service = _service(
+        [
+            ParsedModelResponse(
+                invocations=[
+                    {"tool_name": "list_directory", "arguments": {"path": "."}}
+                ]
+            )
+        ],
+        workspace=tmp_path,
+        require_approval_for_read=True,
+    )
+    created = service.create_session(
+        HarnessSessionCreateRequest(
+            title="Legacy approval payload",
+            intent="Normalize raw turn payloads.",
+            budget_policy=BudgetPolicy(max_turns=3),
+            session_id="session-legacy-approval-payload",
+        )
+    )
+    waiting = service.run_session(
+        HarnessSessionRunRequest(session_id=created.session_id)
+    )
+
+    legacy_snapshot = waiting.snapshot.model_copy(
+        update={
+            "state": waiting.snapshot.state.model_copy(
+                update={
+                    "turns": [
+                        waiting.snapshot.state.turns[0].model_copy(
+                            update={
+                                "pending_approval_request": ApprovalRequest(
+                                    approval_id="approval-legacy",
+                                    invocation_index=1,
+                                    request=ToolInvocationRequest(
+                                        tool_name="list_directory",
+                                        arguments={"path": ".", "secret": "token"},
+                                    ),
+                                    tool_name="list_directory",
+                                    tool_version="0.1.0",
+                                    policy_reason="approval required",
+                                    policy_metadata={"scope": "legacy"},
+                                    requested_at="2026-01-01T00:00:00Z",
+                                    expires_at="2026-01-01T00:05:00Z",
+                                )
+                            }
+                        )
+                    ]
+                },
+                deep=True,
+            )
+        },
+        deep=True,
+    )
+    service._store._snapshots[waiting.snapshot.session_id] = legacy_snapshot
+
+    inspection = service.inspect_session(
+        HarnessSessionInspectRequest(session_id=waiting.snapshot.session_id)
+    )
+
+    payload = inspection.snapshot.state.turns[0].pending_approval_request
+    assert payload is not None
+    assert payload.approval_id == "approval-legacy"
+    assert payload.tool_name == "list_directory"
+    assert "request" not in payload.model_dump(mode="json")
+    assert "requested_at" not in payload.model_dump(mode="json")
+    assert "expires_at" not in payload.model_dump(mode="json")
 
 
 def test_session_service_list_rebuilds_summary_from_canonical_state(
