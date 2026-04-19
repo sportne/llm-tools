@@ -59,7 +59,7 @@ true:
 
 ## Phased backlog
 
-### [~] Phase 1: Assistant product contract and config
+### [x] Phase 1: Assistant product contract and config
 
 Outcome: define the assistant lane as a separate product surface rather than a
 mutation of the repository chat app.
@@ -76,13 +76,13 @@ existing low-level LLM, session, UI, policy, and tool-limit shapes where they
 still fit, while dropping repository-chat assumptions such as `source_filters`
 as the top-level identity of the app.
 
-#### [ ] 1.3 Stabilize assistant-facing configuration examples
+#### [x] 1.3 Stabilize assistant-facing configuration examples
 
 Description: add and curate configuration examples for common assistant usage
 modes such as local-only chat, enterprise-data chat, and harness-backed
 research.
 
-### [~] Phase 2: Shared assistant runtime and safe full-registry policy model
+### [x] Phase 2: Shared assistant runtime and safe full-registry policy model
 
 Outcome: expose the full built-in registry behind safe defaults and explicit
 session-scoped controls.
@@ -104,12 +104,12 @@ Description: keep `write_file` present but disabled by default, require approval
 for local and external writes, and leave network and subprocess access under
 explicit session control.
 
-#### [ ] 2.4 Add richer capability summaries where useful
+#### [x] 2.4 Add richer capability summaries where useful
 
 Description: extend capability reporting and helper APIs where needed so future
 frontends can consume the same availability model cleanly.
 
-### [~] Phase 3: Streamlit assistant UI and persisted chat sessions
+### [x] Phase 3: Streamlit assistant UI and persisted chat sessions
 
 Outcome: ship a usable assistant chat client that is distinct in purpose from
 repository chat.
@@ -130,13 +130,13 @@ Description: keep `workflow_api` chat-turn execution as the primary v1 chat
 engine so the assistant can ship without turning `harness_api` into the main
 transcript surface.
 
-#### [ ] 3.4 Refine assistant UX copy and session ergonomics
+#### [x] 3.4 Refine assistant UX copy and session ergonomics
 
 Description: continue tightening labels, empty-state guidance, source hints,
 and session affordances so the assistant feels purpose-built rather than like a
 renamed repository chat app.
 
-### [~] Phase 4: Harness-backed research sessions, replay, approvals, and summaries
+### [x] Phase 4: Harness-backed research sessions, replay, approvals, and summaries
 
 Outcome: let the assistant launch durable research work without making the
 harness the primary chat engine.
@@ -156,12 +156,12 @@ messages for real research-session execution.
 Description: let the assistant insert durable research summaries back into the
 interactive transcript.
 
-#### [ ] 4.4 Improve research-session UI depth
+#### [x] 4.4 Improve research-session UI depth
 
 Description: expose richer replay, trace, approval-resolution, and inspection
 views beyond the current minimal assistant session panel.
 
-### [~] Phase 5: Documentation, examples, and architecture/test coverage
+### [x] Phase 5: Documentation, examples, and architecture/test coverage
 
 Outcome: make the new assistant direction clear and maintainable.
 
@@ -180,14 +180,14 @@ than repeating already-completed harness-foundation phases.
 Description: cover assistant packaging, config loading, full-registry runtime
 helpers, direct chat turns, and harness-backed research-session control flows.
 
-#### [ ] 5.4 Expand regression coverage around the assistant and repository-chat split
+#### [x] 5.4 Expand regression coverage around the assistant and repository-chat split
 
 Description: add broader integration and UI tests where needed to keep the two
 Streamlit lanes clearly separated over time.
 
 ## Milestones
 
-### [~] Milestone A: Assistant UI exists
+### [x] Milestone A: Assistant UI exists
 
 Goal: the repository ships a separate Streamlit assistant that handles ordinary
 chat plus tool-enabled chat.
@@ -203,7 +203,7 @@ Exit criteria:
 - ordinary assistant answers work without tool use
 - full built-in registry is available behind safe session controls
 
-### [ ] Milestone B: Assistant safely accesses local and network knowledge sources
+### [x] Milestone B: Assistant safely accesses local and network knowledge sources
 
 Goal: the assistant is a practical entry point for large local and proprietary
 information sets.
@@ -217,7 +217,7 @@ Exit criteria:
 - missing workspace, credentials, and permissions are surfaced clearly
 - write and higher-risk capabilities remain approval-aware and opt-in
 
-### [ ] Milestone C: Harness-backed research workflows are usable from the assistant
+### [x] Milestone C: Harness-backed research workflows are usable from the assistant
 
 Goal: the assistant can launch and manage durable research sessions without
 making the harness the primary transcript engine.
