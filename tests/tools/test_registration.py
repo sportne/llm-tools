@@ -41,7 +41,15 @@ from llm_tools.tools import (
         ),
         (
             register_atlassian_tools,
-            {"search_jira", "read_jira_issue"},
+            {
+                "search_jira",
+                "read_jira_issue",
+                "search_bitbucket_code",
+                "read_bitbucket_file",
+                "read_bitbucket_pull_request",
+                "search_confluence",
+                "read_confluence_content",
+            },
         ),
         (
             register_text_tools,

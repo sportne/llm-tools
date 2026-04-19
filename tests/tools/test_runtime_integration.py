@@ -216,6 +216,190 @@ def test_runtime_executes_jira_builtins_with_mocked_client(
     assert result.output["issues"][0]["key"] == "DEMO-1"
 
 
+def test_runtime_executes_bitbucket_builtins_with_mocked_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeBitbucket:
+        def __init__(self, **kwargs: str) -> None:
+            self.kwargs = kwargs
+
+        def search_code(
+            self, team: str, search_query: str, *, limit: int
+        ) -> dict[str, object]:
+            assert team == "PROJ"
+            assert search_query == "needle"
+            assert limit == 2
+            return {
+                "values": [
+                    {
+                        "repository": {"slug": "demo-repo"},
+                        "path": "src/main.py",
+                        "line": 9,
+                        "content": "needle()",
+                    }
+                ]
+            }
+
+    fake_module = ModuleType("atlassian")
+    fake_module.Jira = type("FakeJira", (), {})
+    fake_module.Bitbucket = FakeBitbucket
+    fake_module.Confluence = type("FakeConfluence", (), {})
+    monkeypatch.setitem(sys.modules, "atlassian", fake_module)
+
+    registry = ToolRegistry()
+    register_atlassian_tools(registry)
+    runtime = _runtime(registry)
+    context = ToolContext(
+        invocation_id="inv-8",
+        env={
+            "BITBUCKET_BASE_URL": "https://bitbucket.example.com",
+            "BITBUCKET_USERNAME": "user@example.com",
+            "BITBUCKET_API_TOKEN": "token",
+        },
+    )
+
+    result = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="search_bitbucket_code",
+            arguments={"project_key": "PROJ", "query": "needle", "limit": 2},
+        ),
+        context,
+    )
+
+    assert result.ok is True
+    assert result.output == {
+        "project_key": "PROJ",
+        "query": "needle",
+        "matches": [
+            {
+                "repository_slug": "demo-repo",
+                "path": "src/main.py",
+                "line_number": 9,
+                "snippet": "needle()",
+            }
+        ],
+    }
+
+
+def test_runtime_executes_confluence_builtins_with_mocked_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeConfluence:
+        def __init__(self, **kwargs: str) -> None:
+            self.kwargs = kwargs
+
+        def get_page_by_id(self, page_id: str, *, expand: str) -> dict[str, object]:
+            assert page_id == "123"
+            assert "body.storage" in expand
+            return {
+                "title": "Demo page",
+                "space": {"key": "ENG"},
+                "body": {
+                    "storage": {
+                        "value": "hello confluence",
+                        "representation": "storage",
+                    }
+                },
+                "_links": {"webui": "/spaces/ENG/pages/123"},
+            }
+
+    fake_module = ModuleType("atlassian")
+    fake_module.Jira = type("FakeJira", (), {})
+    fake_module.Bitbucket = type("FakeBitbucket", (), {})
+    fake_module.Confluence = FakeConfluence
+    monkeypatch.setitem(sys.modules, "atlassian", fake_module)
+
+    registry = ToolRegistry()
+    register_atlassian_tools(registry)
+    runtime = ToolRuntime(
+        registry,
+        policy=ToolPolicy(
+            allowed_side_effects={
+                SideEffectClass.NONE,
+                SideEffectClass.LOCAL_READ,
+                SideEffectClass.EXTERNAL_READ,
+            },
+            allow_filesystem=True,
+        ),
+    )
+    context = ToolContext(
+        invocation_id="inv-9",
+        env={
+            "CONFLUENCE_BASE_URL": "https://confluence.example.com",
+            "CONFLUENCE_USERNAME": "user@example.com",
+            "CONFLUENCE_API_TOKEN": "token",
+        },
+    )
+
+    result = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="read_confluence_content",
+            arguments={"page_id": "123"},
+        ),
+        context,
+    )
+
+    assert result.ok is True
+    assert result.output == {
+        "page_id": "123",
+        "mode": "page",
+        "title": "Demo page",
+        "space_key": "ENG",
+        "web_url": "https://confluence.example.com/spaces/ENG/pages/123",
+        "attachment_id": None,
+        "attachment_filename": None,
+        "representation": "storage",
+        "requested_path": "page:123",
+        "resolved_path": "https://confluence.example.com/spaces/ENG/pages/123",
+        "read_kind": "text",
+        "status": "ok",
+        "content": "hello confluence",
+        "truncated": False,
+        "content_char_count": 16,
+        "character_count": 16,
+        "start_char": 0,
+        "end_char": 16,
+        "file_size_bytes": 16,
+        "max_file_size_characters": 262144,
+        "full_read_char_limit": 4000,
+        "estimated_token_count": 2,
+        "error_message": None,
+    }
+
+
+def test_runtime_denies_confluence_attachment_read_when_filesystem_is_disabled() -> (
+    None
+):
+    registry = ToolRegistry()
+    register_atlassian_tools(registry)
+    runtime = ToolRuntime(
+        registry,
+        policy=ToolPolicy(
+            allowed_side_effects={SideEffectClass.NONE, SideEffectClass.EXTERNAL_READ},
+            allow_filesystem=False,
+        ),
+    )
+
+    result = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="read_confluence_content",
+            arguments={"page_id": "123", "attachment_filename": "report.pdf"},
+        ),
+        ToolContext(
+            invocation_id="inv-10",
+            env={
+                "CONFLUENCE_BASE_URL": "https://confluence.example.com",
+                "CONFLUENCE_USERNAME": "user@example.com",
+                "CONFLUENCE_API_TOKEN": "token",
+            },
+        ),
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is ErrorCode.POLICY_DENIED
+
+
 def test_runtime_executes_gitlab_builtins_with_mocked_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -253,7 +437,7 @@ def test_runtime_executes_gitlab_builtins_with_mocked_client(
     register_gitlab_tools(registry)
     runtime = _runtime(registry)
     context = ToolContext(
-        invocation_id="inv-8",
+        invocation_id="inv-11",
         env={
             "GITLAB_BASE_URL": "https://gitlab.example.com",
             "GITLAB_API_TOKEN": "token",
@@ -307,7 +491,7 @@ def test_runtime_denies_gitlab_tool_when_network_is_disabled() -> None:
             arguments={"project": "group/repo", "query": "needle"},
         ),
         ToolContext(
-            invocation_id="inv-9",
+            invocation_id="inv-12",
             env={
                 "GITLAB_BASE_URL": "https://gitlab.example.com",
                 "GITLAB_API_TOKEN": "token",

@@ -49,6 +49,8 @@ machinery into the base runtime.
 Examples:
 
 - Jira tools require `JIRA_BASE_URL`, `JIRA_USERNAME`, and `JIRA_API_TOKEN`
+- Bitbucket tools require `BITBUCKET_BASE_URL`, `BITBUCKET_USERNAME`, and `BITBUCKET_API_TOKEN`
+- Confluence tools require `CONFLUENCE_BASE_URL`, `CONFLUENCE_USERNAME`, and `CONFLUENCE_API_TOKEN`
 - GitLab tools require `GITLAB_BASE_URL` and `GITLAB_API_TOKEN`
 - tools that set `requires_network=True` are denied if `allow_network=False`
 - tools that set `requires_filesystem=True` are denied if
