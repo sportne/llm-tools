@@ -203,12 +203,16 @@ lower-layer security guarantees.
 Outcome: evaluate the repository as an integrated deliverable rather than only
 as isolated modules.
 
+Review artifact:
+- `SECURITY_REVIEWS.md` is the cumulative record for completed security review
+  reports.
+
 - [ ] Review `pyproject.toml`, optional dependencies, console scripts, and
   packaging metadata for unnecessary exposure and dependency risk
   concentration.
 - [ ] Review examples, assistant configs, and usage docs for insecure guidance,
   secret-handling mistakes, and unsafe copy-paste defaults.
-- [ ] Cross-check architecture tests and existing security-relevant tests
+- [x] Cross-check architecture tests and existing security-relevant tests
   against the actual threat model to identify blind spots.
 - [ ] Assess cross-layer invariants: lower layers must not import higher
   layers, tools must stay runtime-mediated, approval semantics must stay
