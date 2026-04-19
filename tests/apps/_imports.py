@@ -135,54 +135,32 @@ def _import_modules(
         )
 
 
-_STREAMLIT_CHAT_MODULES: SimpleNamespace | None = None
 _STREAMLIT_ASSISTANT_MODULES: SimpleNamespace | None = None
-
-
-def import_streamlit_chat_modules() -> SimpleNamespace:
-    """Import Streamlit chat modules while shielding heavy provider imports."""
-    global _STREAMLIT_CHAT_MODULES
-    if _STREAMLIT_CHAT_MODULES is None:
-        package, app, main = _import_modules(
-            (
-                "llm_tools.apps.streamlit_chat",
-                "llm_tools.apps.streamlit_chat.app",
-                "llm_tools.apps.streamlit_chat.__main__",
-            ),
-            reset_modules=(
-                "llm_tools.apps.streamlit_chat",
-                "llm_tools.apps.streamlit_chat.app",
-                "llm_tools.apps.streamlit_chat.__main__",
-            ),
-        )
-        _STREAMLIT_CHAT_MODULES = SimpleNamespace(
-            package=package,
-            app=app,
-            main=main,
-        )
-    return _STREAMLIT_CHAT_MODULES
 
 
 def import_streamlit_assistant_modules() -> SimpleNamespace:
     """Import Streamlit assistant modules while shielding heavy provider imports."""
     global _STREAMLIT_ASSISTANT_MODULES
     if _STREAMLIT_ASSISTANT_MODULES is None:
-        package, app, main = _import_modules(
+        package, app, main, models = _import_modules(
             (
                 "llm_tools.apps.streamlit_assistant",
                 "llm_tools.apps.streamlit_assistant.app",
                 "llm_tools.apps.streamlit_assistant.__main__",
+                "llm_tools.apps.streamlit_models",
             ),
             reset_modules=(
                 "llm_tools.apps.streamlit_assistant",
                 "llm_tools.apps.streamlit_assistant.app",
                 "llm_tools.apps.streamlit_assistant.__main__",
+                "llm_tools.apps.streamlit_models",
             ),
         )
         _STREAMLIT_ASSISTANT_MODULES = SimpleNamespace(
             package=package,
             app=app,
             main=main,
+            models=models,
         )
     return _STREAMLIT_ASSISTANT_MODULES
 

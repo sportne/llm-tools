@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import ModuleType
 
 import pytest
@@ -843,21 +843,33 @@ def test_workflow_executor_executes_git_and_jira_paths(
                 ]
             }
 
-    def fake_run(
+    def fake_run_git_subprocess(
+        root: Path,
         args: list[str],
         *,
-        cwd: str,
-        capture_output: bool,
-        text: bool,
-        check: bool,
-    ) -> subprocess.CompletedProcess[str]:
-        del cwd, capture_output, text, check
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok\n")
+        output_limit_bytes: int,
+    ) -> git_tools._GitProcessResult:
+        del output_limit_bytes
+        if args == ["rev-parse", "--show-toplevel"]:
+            return git_tools._GitProcessResult(
+                stdout=f"{root}\n",
+                stderr="",
+                returncode=0,
+                truncated=False,
+            )
+        if args == ["status", "--short", "--branch"]:
+            return git_tools._GitProcessResult(
+                stdout="ok\n",
+                stderr="",
+                returncode=0,
+                truncated=False,
+            )
+        raise AssertionError(f"Unexpected git args: {args}")
 
     fake_module = ModuleType("atlassian")
     fake_module.Jira = FakeJira
     monkeypatch.setitem(sys.modules, "atlassian", fake_module)
-    monkeypatch.setattr(git_tools.subprocess, "run", fake_run)
+    monkeypatch.setattr(git_tools, "_run_git_subprocess", fake_run_git_subprocess)
 
     registry = ToolRegistry()
     register_git_tools(registry)

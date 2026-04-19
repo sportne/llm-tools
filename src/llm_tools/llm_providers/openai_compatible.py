@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from enum import Enum
 from typing import Any
 
 from openai import AsyncOpenAI, OpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 
@@ -168,8 +169,14 @@ class OpenAICompatibleProvider:
         request_params: dict[str, Any] | None,
     ) -> object:
         failures: list[tuple[ProviderModeStrategy, Exception]] = []
+        previous_client: Any | None = None
         for mode in self._candidate_modes():
             client = self._instructor_sync_client(mode)
+            if failures and not self._mode_attempts_are_distinct(
+                previous_client, client
+            ):
+                break
+
             try:
                 payload = client.chat.completions.create(
                     model=self.model,
@@ -182,7 +189,10 @@ class OpenAICompatibleProvider:
             except Exception as exc:
                 if self.mode_strategy is not ProviderModeStrategy.AUTO:
                     raise
+                if not self._should_retry_mode_failure(exc):
+                    raise
                 failures.append((mode, exc))
+                previous_client = client
 
         raise ValueError(self._fallback_error_message(failures)) from failures[-1][1]
 
@@ -194,8 +204,14 @@ class OpenAICompatibleProvider:
         request_params: dict[str, Any] | None,
     ) -> object:
         failures: list[tuple[ProviderModeStrategy, Exception]] = []
+        previous_client: Any | None = None
         for mode in self._candidate_modes():
             client = self._instructor_async_client(mode)
+            if failures and not self._mode_attempts_are_distinct(
+                previous_client, client
+            ):
+                break
+
             try:
                 payload = await client.chat.completions.create(
                     model=self.model,
@@ -208,7 +224,10 @@ class OpenAICompatibleProvider:
             except Exception as exc:
                 if self.mode_strategy is not ProviderModeStrategy.AUTO:
                     raise
+                if not self._should_retry_mode_failure(exc):
+                    raise
                 failures.append((mode, exc))
+                previous_client = client
 
         raise ValueError(self._fallback_error_message(failures)) from failures[-1][1]
 
@@ -307,6 +326,70 @@ class OpenAICompatibleProvider:
         if completions is None:
             return False
         return callable(getattr(completions, "create", None))
+
+    @staticmethod
+    def _mode_attempts_are_distinct(
+        previous_client: Any | None, current_client: Any
+    ) -> bool:
+        return previous_client is None or previous_client is not current_client
+
+    @staticmethod
+    def _should_retry_mode_failure(exc: Exception) -> bool:
+        retry_markers = (
+            "validation",
+            "parse",
+            "json",
+            "schema",
+            "retry",
+            "incomplete",
+        )
+        for candidate in OpenAICompatibleProvider._iter_exception_chain(exc):
+            if isinstance(candidate, (ValidationError, json.JSONDecodeError)):
+                return True
+
+            candidate_type = type(candidate)
+            module_name = candidate_type.__module__
+            if module_name.startswith("openai"):
+                continue
+
+            if module_name.startswith("pydantic"):
+                return True
+
+            if not module_name.startswith("instructor"):
+                continue
+
+            class_name = candidate_type.__name__.lower()
+            if any(marker in class_name for marker in retry_markers):
+                return True
+
+            message = str(candidate).lower()
+            if any(marker in message for marker in retry_markers):
+                return True
+
+        return False
+
+    @staticmethod
+    def _iter_exception_chain(exc: Exception) -> list[BaseException]:
+        seen: set[int] = set()
+        pending: list[BaseException] = [exc]
+        chain: list[BaseException] = []
+        while pending:
+            current = pending.pop()
+            current_id = id(current)
+            if current_id in seen:
+                continue
+            seen.add(current_id)
+            chain.append(current)
+
+            cause = getattr(current, "__cause__", None)
+            if isinstance(cause, BaseException):
+                pending.append(cause)
+
+            context = getattr(current, "__context__", None)
+            if isinstance(context, BaseException):
+                pending.append(context)
+
+        return chain
 
     def _fallback_error_message(
         self, failures: list[tuple[ProviderModeStrategy, Exception]]

@@ -73,6 +73,16 @@ llm-tools-harness inspect <session-id> --replay --json
 llm-tools-harness list --json
 ```
 
+By default, CLI state is stored under `~/.llm-tools/harness`. Pass `--store-dir`
+when you want an isolated test directory or intentionally repo-local storage.
+
+Pending approval snapshots now persist only a scrubbed base context. Newly
+written records keep `invocation_id`, `workspace`, and `metadata`, but clear
+process env data, logs, artifacts, and source provenance before they are saved.
+Resumed approvals rebuild execution context from the current process environment
+at resume time. Older snapshots written before this hardening change may still
+contain environment data and should be deleted if they may have held secrets.
+
 Script files passed to `--script` contain a JSON list of
 `ParsedModelResponse` payloads. This keeps the CLI deterministic and suitable
 for replay-focused testing and manual harness inspection.

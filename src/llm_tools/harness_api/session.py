@@ -29,6 +29,7 @@ from llm_tools.harness_api.models import (
     TaskLifecycleStatus,
     TurnDecision,
     TurnDecisionAction,
+    sanitize_pending_approval_context,
 )
 from llm_tools.harness_api.planning import DeterministicHarnessPlanner, HarnessPlanner
 from llm_tools.harness_api.replay import (
@@ -530,7 +531,9 @@ class HarnessSessionService:
             )
             context = None
             if snapshot.state.pending_approvals:
-                context = snapshot.state.pending_approvals[0].base_context
+                context = sanitize_pending_approval_context(
+                    snapshot.state.pending_approvals[0].base_context
+                )
             turn_trace = build_turn_trace(
                 turn=tail_turn, context=context, tasks_state=state
             )

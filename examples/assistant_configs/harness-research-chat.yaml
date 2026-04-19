@@ -1,6 +1,8 @@
 # Harness-backed research assistant for local investigation work.
-# Keeps normal assistant chat available while enabling durable research
-# sessions; git helpers still require subprocess access in the UI.
+# Preselects the workspace root for local tools, but filesystem and subprocess
+# access still stay off until you enable them in the sidebar.
+# Durable research sessions use the app's user-scoped storage by default; git
+# helpers still require subprocess access in the UI.
 llm:
   provider: ollama
   model_name: gemma4:26b
@@ -49,7 +51,6 @@ workspace:
 
 research:
   enabled: true
-  store_dir: .llm-tools/research
   max_recent_sessions: 8
   default_max_turns: 12
   default_max_tool_invocations: 48

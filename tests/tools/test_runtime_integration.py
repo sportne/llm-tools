@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from types import ModuleType
 
@@ -135,25 +134,23 @@ def test_runtime_normalizes_workspace_root_enforcement_failures(
     assert "exception_message" not in result.error.details
 
 
-def test_runtime_executes_git_builtins_with_mocked_subprocess(
+def test_runtime_executes_git_builtins_without_recording_raw_output(
     tmp_path: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     registry = ToolRegistry()
     register_git_tools(registry)
     runtime = _runtime(registry)
 
-    def fake_run(
-        args: list[str],
-        *,
-        cwd: str,
-        capture_output: bool,
-        text: bool,
-        check: bool,
-    ) -> subprocess.CompletedProcess[str]:
-        del cwd, capture_output, text, check
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok\n")
-
-    monkeypatch.setattr(git_tools.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        git_tools,
+        "_resolve_git_repository_root",
+        lambda context, path: tmp_path.resolve(),
+    )
+    monkeypatch.setattr(
+        git_tools,
+        "_run_git_command",
+        lambda root, args: git_tools.GitCommandResult(text="ok\n", truncated=False),
+    )
 
     result = runtime.execute(
         ToolInvocationRequest(tool_name="run_git_status", arguments={"path": "."}),
@@ -164,7 +161,80 @@ def test_runtime_executes_git_builtins_with_mocked_subprocess(
     assert result.output == {
         "resolved_root": str(tmp_path.resolve()),
         "status_text": "ok\n",
+        "truncated": False,
     }
+    assert result.metadata["execution_record"]["validated_output"] is None
+    assert result.metadata["execution_record"]["redacted_output"] is None
+
+
+def test_runtime_denies_git_builtins_when_subprocess_access_is_disabled(
+    tmp_path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = ToolRegistry()
+    register_git_tools(registry)
+    runtime = ToolRuntime(
+        registry,
+        policy=ToolPolicy(
+            allowed_side_effects={
+                SideEffectClass.NONE,
+                SideEffectClass.LOCAL_READ,
+                SideEffectClass.EXTERNAL_READ,
+            },
+            allow_subprocess=False,
+        ),
+    )
+
+    monkeypatch.setattr(
+        git_tools,
+        "_resolve_git_repository_root",
+        lambda context, path: tmp_path.resolve(),
+    )
+
+    result = runtime.execute(
+        ToolInvocationRequest(tool_name="run_git_status", arguments={"path": "."}),
+        ToolContext(invocation_id="inv-6b", workspace=str(tmp_path)),
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is ErrorCode.POLICY_DENIED
+    assert result.error.details["policy_decision"]["metadata"][
+        "blocked_capability"
+    ] == ("subprocess")
+
+
+def test_runtime_marks_git_builtins_as_approval_gated_when_local_reads_require_approval(
+    tmp_path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = ToolRegistry()
+    register_git_tools(registry)
+    runtime = ToolRuntime(
+        registry,
+        policy=ToolPolicy(
+            allowed_side_effects={
+                SideEffectClass.NONE,
+                SideEffectClass.LOCAL_READ,
+                SideEffectClass.EXTERNAL_READ,
+            },
+            require_approval_for={SideEffectClass.LOCAL_READ},
+        ),
+    )
+
+    monkeypatch.setattr(
+        git_tools,
+        "_resolve_git_repository_root",
+        lambda context, path: tmp_path.resolve(),
+    )
+
+    result = runtime.execute(
+        ToolInvocationRequest(tool_name="run_git_status", arguments={"path": "."}),
+        ToolContext(invocation_id="inv-6c", workspace=str(tmp_path)),
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is ErrorCode.POLICY_DENIED
+    assert result.error.details["policy_decision"]["requires_approval"] is True
 
 
 def test_runtime_executes_jira_builtins_with_mocked_client(

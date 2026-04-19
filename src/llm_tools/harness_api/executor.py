@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from enum import Enum
@@ -16,6 +17,8 @@ from llm_tools.harness_api.models import (
     PendingApprovalRecord,
     TurnDecision,
     TurnDecisionAction,
+    rehydrate_pending_approval_context,
+    sanitize_pending_approval_context,
 )
 from llm_tools.harness_api.protection import scrub_state_for_protection
 from llm_tools.harness_api.replay import (
@@ -381,7 +384,7 @@ class HarnessExecutor:
                 pending_record = PendingApprovalRecord(
                     approval_request=approval_request,
                     parsed_response=workflow_result.parsed_response,
-                    base_context=context,
+                    base_context=sanitize_pending_approval_context(context),
                     pending_index=approval_request.invocation_index,
                 )
                 waiting_turn = HarnessTurn(
@@ -561,7 +564,7 @@ class HarnessExecutor:
                 pending_record = PendingApprovalRecord(
                     approval_request=approval_request,
                     parsed_response=workflow_result.parsed_response,
-                    base_context=context,
+                    base_context=sanitize_pending_approval_context(context),
                     pending_index=approval_request.invocation_index,
                 )
                 waiting_turn = HarnessTurn(
@@ -658,8 +661,14 @@ class HarnessExecutor:
                 "Approval resume requires a pending approval and tail turn."
             )
 
+        execution_context = self._rehydrate_pending_approval_context(
+            pending_approval.base_context
+        )
         workflow_result = self._workflow_executor.resume_persisted_approval(
-            pending_approval,
+            pending_approval.model_copy(
+                update={"base_context": execution_context},
+                deep=True,
+            ),
             resolution.value,
             now=now,
         )
@@ -697,7 +706,7 @@ class HarnessExecutor:
             turn=completed_turn,
             decision=decision,
             now=now,
-            context=pending_approval.base_context,
+            context=sanitize_pending_approval_context(pending_approval.base_context),
         )
         return saved, decision.action is not TurnDecisionAction.STOP
 
@@ -717,8 +726,14 @@ class HarnessExecutor:
                 "Approval resume requires a pending approval and tail turn."
             )
 
+        execution_context = self._rehydrate_pending_approval_context(
+            pending_approval.base_context
+        )
         workflow_result = await self._workflow_executor.resume_persisted_approval_async(
-            pending_approval,
+            pending_approval.model_copy(
+                update={"base_context": execution_context},
+                deep=True,
+            ),
             resolution.value,
             now=now,
         )
@@ -756,7 +771,7 @@ class HarnessExecutor:
             turn=completed_turn,
             decision=decision,
             now=now,
-            context=pending_approval.base_context,
+            context=sanitize_pending_approval_context(pending_approval.base_context),
         )
         return saved, decision.action is not TurnDecisionAction.STOP
 
@@ -889,6 +904,9 @@ class HarnessExecutor:
                 ),
             ),
         )
+
+    def _rehydrate_pending_approval_context(self, context: ToolContext) -> ToolContext:
+        return rehydrate_pending_approval_context(context, env=os.environ)
 
     def _append_incomplete_turn(
         self,
