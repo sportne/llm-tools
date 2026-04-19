@@ -32,6 +32,9 @@ execution and for tracking security hardening follow-up in this repository.
 - This document is the dedicated security backlog, and recent hardening work
   has already landed across `tool_api`, built-in tools, adapters and
   providers, `harness_api`, and assistant-facing app defaults.
+- Initial Batch 1 review work is complete for `tool_api`, the filesystem, text,
+  and git tool families, `llm_adapters`, `llm_providers`, and the packaging,
+  example, config, and usage-doc surfaces.
 
 ## Phased backlog
 
@@ -110,15 +113,15 @@ Phase 0 decisions:
 Outcome: validate that the central execution and policy layer enforces the
 intended safety invariants.
 
-- [ ] Review model validation boundaries in `models.py`, `tool.py`,
+- [x] Review model validation boundaries in `models.py`, `tool.py`,
   `registry.py`, `runtime.py`, and `execution.py`.
-- [ ] Audit policy enforcement for allow, deny, and approval behavior,
+- [x] Audit policy enforcement for allow, deny, and approval behavior,
   capability flags, secret requirements, and error normalization.
-- [ ] Audit redaction behavior for inputs, outputs, logs, artifacts, and
+- [x] Audit redaction behavior for inputs, outputs, logs, artifacts, and
   metadata retention defaults.
-- [ ] Review runtime observability for leakage, inconsistent states, bypass
+- [x] Review runtime observability for leakage, inconsistent states, bypass
   paths, and denial-of-service exposure.
-- [ ] Identify missing negative tests for policy bypass, unsafe defaults,
+- [x] Identify missing negative tests for policy bypass, unsafe defaults,
   oversized payloads, and malformed tool results.
 - [x] Landed hardening: tighten runtime safety, brokered-execution controls,
   policy enforcement coverage, secret-view isolation, and raw output-retention
@@ -132,11 +135,11 @@ intended safety invariants.
 Outcome: assess every built-in tool family against its real side effects and
 trust boundaries.
 
-- [ ] `filesystem`: path traversal, symlink handling, workspace escape,
+- [x] `filesystem`: path traversal, symlink handling, workspace escape,
   overwrite semantics, size and resource limits, and content extraction safety.
-- [ ] `text`: propagation of filesystem constraints, search and read
+- [x] `text`: propagation of filesystem constraints, search and read
   amplification risks, parsing edge cases, and content-based denial of service.
-- [ ] `git`: subprocess construction, cwd and root control, argument injection
+- [x] `git`: subprocess construction, cwd and root control, argument injection
   resistance, output handling, and approval expectations.
 - [ ] `gitlab` and `atlassian`: credential handling, request scoping,
   pagination and data exposure, network error handling, and unsafe remote
@@ -153,9 +156,9 @@ trust boundaries.
 Outcome: confirm model output cannot bypass the typed execution boundary or
 silently widen privileges.
 
-- [ ] Review adapter parsing and normalization for malformed or adversarial
+- [x] Review adapter parsing and normalization for malformed or adversarial
   model payloads.
-- [ ] Review provider request and response handling for secret leakage, unsafe
+- [x] Review provider request and response handling for secret leakage, unsafe
   retries, schema mismatch behavior, and endpoint trust assumptions.
 - [ ] Review `workflow_api` execution sequencing, protection hooks, and
   one-turn control flow for approval, replay, and partial-failure safety.
@@ -198,15 +201,15 @@ lower-layer security guarantees.
 - [x] Landed hardening: assistant defaults, config examples, and related app
   entrypoint protections are merged.
 
-### [ ] Phase 6: System-of-systems and supply chain review
+### [~] Phase 6: System-of-systems and supply chain review
 
 Outcome: evaluate the repository as an integrated deliverable rather than only
 as isolated modules.
 
-- [ ] Review `pyproject.toml`, optional dependencies, console scripts, and
+- [x] Review `pyproject.toml`, optional dependencies, console scripts, and
   packaging metadata for unnecessary exposure and dependency risk
   concentration.
-- [ ] Review examples, assistant configs, and usage docs for insecure guidance,
+- [x] Review examples, assistant configs, and usage docs for insecure guidance,
   secret-handling mistakes, and unsafe copy-paste defaults.
 - [ ] Cross-check architecture tests and existing security-relevant tests
   against the actual threat model to identify blind spots.
