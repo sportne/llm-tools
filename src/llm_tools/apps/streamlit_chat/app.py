@@ -943,6 +943,86 @@ def _render_theme(preferences: StreamlitPreferences) -> None:  # pragma: no cove
     )
 
 
+def _streamlit_connection_error_override_html() -> str:
+    return """
+<script>
+const questionNeedle = ["Is", "Streamlit", "still", "running?"].join(" ");
+const questionReplacement = "Is the llm-tools chat client still running?";
+const detailNeedle = [
+  "If you accidentally stopped",
+  "Streamlit, just restart it in your terminal:"
+].join(" ");
+const detailReplacement = (
+  "If you accidentally stopped the chat client, restart it from your terminal."
+);
+const commandNeedle = ["streamlit", "run", "yourscript.py"].join(" ");
+
+function replaceMatchingText(doc, fromText, toText) {
+  if (!doc.body) {
+    return;
+  }
+  const walker = doc.createTreeWalker(
+    doc.body,
+    doc.defaultView.NodeFilter.SHOW_TEXT,
+  );
+  let node = walker.nextNode();
+  while (node) {
+    if (node.nodeValue && node.nodeValue.includes(fromText)) {
+      node.nodeValue = node.nodeValue.replaceAll(fromText, toText);
+    }
+    node = walker.nextNode();
+  }
+}
+
+function removeCommandElement(doc, commandText) {
+  if (!doc.body) {
+    return;
+  }
+  for (const element of doc.querySelectorAll("code, pre")) {
+    if (element.textContent && element.textContent.includes(commandText)) {
+      element.remove();
+    }
+  }
+}
+
+function applyOverride(doc) {
+  replaceMatchingText(doc, questionNeedle, questionReplacement);
+  replaceMatchingText(doc, detailNeedle, detailReplacement);
+  removeCommandElement(doc, commandNeedle);
+}
+
+const parentDoc = window.parent && window.parent.document;
+if (parentDoc) {
+  applyOverride(parentDoc);
+  const observer = new MutationObserver(() => applyOverride(parentDoc));
+  if (parentDoc.body) {
+    observer.observe(parentDoc.body, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+  }
+  window.addEventListener("beforeunload", () => observer.disconnect(), {
+    once: true,
+  });
+}
+</script>
+"""
+
+
+def _render_connection_error_override() -> None:  # pragma: no cover
+    st = _streamlit_module()
+    components_v1 = getattr(getattr(st, "components", None), "v1", None)
+    render_html = getattr(components_v1, "html", None)
+    if render_html is None:
+        return
+    render_html(
+        _streamlit_connection_error_override_html(),
+        height=0,
+        width=0,
+    )
+
+
 def _render_brand_header() -> None:  # pragma: no cover
     st = _streamlit_module()
     st.markdown(
@@ -2940,6 +3020,7 @@ def run_streamlit_chat_app(  # pragma: no cover
 
     pending_prompt = _drain_active_turn_events(app_state)
     _render_theme(app_state.preferences)
+    _render_connection_error_override()
     _render_sidebar(app_state, config=config, root_path=root_path)
     active_record = _active_session(app_state)
     for notice in app_state.startup_notices:
