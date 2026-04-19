@@ -160,12 +160,18 @@ silently widen privileges.
   model payloads.
 - [x] Review provider request and response handling for secret leakage, unsafe
   retries, schema mismatch behavior, and endpoint trust assumptions.
-- [ ] Review `workflow_api` execution sequencing, protection hooks, and
-  one-turn control flow for approval, replay, and partial-failure safety.
+- [x] Review `workflow_api` execution sequencing, protection hooks, and
+  one-turn control flow for approval, replay, and partial-failure safety,
+  including persisted approval/resume and replay touchpoints in
+  `harness_api`.
 - [ ] Identify attack paths where model-controlled content could trigger
   unexpected tool execution, unbounded work, or sensitive data disclosure.
 - [x] Landed hardening: adapter parsing and OpenAI-compatible provider fallback
   coverage updates are merged.
+- [x] Completed 2026-04-19: `workflow_api` security posture review executed
+  against the workflow, runtime, adapter, and harness approval/replay paths;
+  findings and residual risk captured in
+  `docs/implementation/workflow-api-security-review-2026-04-19.md`.
 
 ### [~] Phase 4: Durable orchestration (`harness_api`)
 
