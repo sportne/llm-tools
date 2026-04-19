@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from llm_tools.tool_api import Tool, ToolContext, ToolInvocationRequest, ToolRegistry, ToolRuntime, ToolSpec
+from llm_tools.tool_api import Tool, ToolContext, ToolExecutionContext, ToolInvocationRequest, ToolRegistry, ToolRuntime, ToolSpec
 
 
 class EchoInput(BaseModel):
@@ -24,8 +24,10 @@ class EchoTool(Tool[EchoInput, EchoOutput]):
     input_model = EchoInput
     output_model = EchoOutput
 
-    def invoke(self, context: ToolContext, args: EchoInput) -> EchoOutput:
-        context.logs.append("Echo tool invoked.")
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: EchoInput
+    ) -> EchoOutput:
+        context.log("Echo tool invoked.")
         return EchoOutput(echoed=f"{context.invocation_id}:{args.value}")
 
 

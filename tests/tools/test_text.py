@@ -2,8 +2,19 @@
 
 from __future__ import annotations
 
-from llm_tools.tool_api import ToolContext
+from llm_tools.tool_api import (
+    ToolContext,
+    ToolInvocationRequest,
+    ToolRegistry,
+    ToolRuntime,
+)
 from llm_tools.tools.text import SearchTextTool
+
+
+def _runtime() -> ToolRuntime:
+    registry = ToolRegistry()
+    registry.register(SearchTextTool())
+    return ToolRuntime(registry)
 
 
 def test_search_text_tool_finds_matches_in_a_single_file(tmp_path: str) -> None:
@@ -11,13 +22,18 @@ def test_search_text_tool_finds_matches_in_a_single_file(tmp_path: str) -> None:
     file_path = workspace / "notes.txt"
     file_path.write_text("Hello\nworld\nHello again\n", encoding="utf-8")
 
-    result = SearchTextTool().invoke(
+    result = _runtime().execute(
+        ToolInvocationRequest(
+            tool_name="search_text",
+            arguments={"path": "notes.txt", "query": "Hello"},
+        ),
         ToolContext(invocation_id="inv-1", workspace=str(workspace)),
-        SearchTextTool.input_model(path="notes.txt", query="Hello"),
     )
 
-    assert [match.line_number for match in result.matches] == [1, 3]
-    assert result.matches[0].line_text == "Hello"
+    assert result.ok is True
+    matches = result.output["matches"]
+    assert [match["line_number"] for match in matches] == [1, 3]
+    assert matches[0]["line_text"] == "Hello"
 
 
 def test_search_text_tool_searches_directory_contents(tmp_path: str) -> None:
@@ -28,14 +44,19 @@ def test_search_text_tool_searches_directory_contents(tmp_path: str) -> None:
     nested.mkdir()
     (nested / "match.py").write_text("value = 99\n", encoding="utf-8")
 
-    result = SearchTextTool().invoke(
+    result = _runtime().execute(
+        ToolInvocationRequest(
+            tool_name="search_text",
+            arguments={"path": ".", "query": "value = "},
+        ),
         ToolContext(
             invocation_id="inv-2",
             workspace=str(workspace),
             metadata={"source_filters": {"include": ["*.py", "**/*.py"]}},
         ),
-        SearchTextTool.input_model(path=".", query="value = "),
     )
 
-    assert [item.path for item in result.matches] == ["keep.py", "pkg/match.py"]
-    assert result.matches[0].line_number == 1
+    assert result.ok is True
+    matches = result.output["matches"]
+    assert [item["path"] for item in matches] == ["keep.py", "pkg/match.py"]
+    assert matches[0]["line_number"] == 1

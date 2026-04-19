@@ -9,7 +9,15 @@ from typing import Any
 
 import pytest
 
-from llm_tools.tool_api import ToolContext
+from llm_tools.tool_api import (
+    ErrorCode,
+    SideEffectClass,
+    ToolContext,
+    ToolInvocationRequest,
+    ToolPolicy,
+    ToolRegistry,
+    ToolRuntime,
+)
 from llm_tools.tools.atlassian import (
     ReadBitbucketFileTool,
     ReadBitbucketPullRequestTool,
@@ -20,6 +28,45 @@ from llm_tools.tools.atlassian import (
     SearchJiraTool,
 )
 from llm_tools.tools.atlassian import tools as atlassian_tools
+
+
+def _atlassian_runtime() -> ToolRuntime:
+    registry = ToolRegistry()
+    registry.register(SearchJiraTool())
+    registry.register(ReadJiraIssueTool())
+    registry.register(SearchBitbucketCodeTool())
+    registry.register(ReadBitbucketFileTool())
+    registry.register(ReadBitbucketPullRequestTool())
+    registry.register(SearchConfluenceTool())
+    registry.register(ReadConfluenceContentTool())
+    return ToolRuntime(
+        registry,
+        policy=ToolPolicy(
+            allowed_side_effects={
+                SideEffectClass.NONE,
+                SideEffectClass.LOCAL_READ,
+                SideEffectClass.EXTERNAL_READ,
+            },
+            allow_network=True,
+            allow_filesystem=True,
+        ),
+    )
+
+
+def _invoke_tool(tool_name: str, context: ToolContext, arguments: dict[str, object]):
+    result = _atlassian_runtime().execute(
+        ToolInvocationRequest(tool_name=tool_name, arguments=arguments),
+        context,
+    )
+    assert result.ok is True, result.error
+    return result
+
+
+def _execute_tool(tool_name: str, context: ToolContext, arguments: dict[str, object]):
+    return _atlassian_runtime().execute(
+        ToolInvocationRequest(tool_name=tool_name, arguments=arguments),
+        context,
+    )
 
 
 def _install_fake_atlassian_module(
@@ -98,9 +145,10 @@ def test_search_jira_tool_maps_search_results(
 
     _install_fake_atlassian_module(monkeypatch, jira_cls=FakeJira)
 
-    result = SearchJiraTool().invoke(
-        _jira_context(),
-        SearchJiraTool.input_model(jql="project = DEMO", limit=5),
+    result = SearchJiraTool.output_model.model_validate(
+        _invoke_tool(
+            "search_jira", _jira_context(), {"jql": "project = DEMO", "limit": 5}
+        ).output
     )
 
     assert len(result.issues) == 1
@@ -131,9 +179,8 @@ def test_read_jira_issue_tool_maps_issue_payload(
 
     _install_fake_atlassian_module(monkeypatch, jira_cls=FakeJira)
 
-    result = ReadJiraIssueTool().invoke(
-        _jira_context(),
-        ReadJiraIssueTool.input_model(issue_key="DEMO-2"),
+    result = ReadJiraIssueTool.output_model.model_validate(
+        _invoke_tool("read_jira_issue", _jira_context(), {"issue_key": "DEMO-2"}).output
     )
 
     assert result.key == "DEMO-2"
@@ -145,11 +192,22 @@ def test_read_jira_issue_tool_maps_issue_payload(
 
 
 def test_jira_tools_require_context_env_credentials() -> None:
-    with pytest.raises(ValueError, match="JIRA_BASE_URL"):
-        SearchJiraTool().invoke(
-            ToolContext(invocation_id="jira-missing"),
-            SearchJiraTool.input_model(jql="project = DEMO"),
-        )
+    result = _execute_tool(
+        "search_jira",
+        ToolContext(invocation_id="jira-missing"),
+        {"jql": "project = DEMO"},
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is ErrorCode.POLICY_DENIED
+    assert set(
+        result.error.details["policy_decision"]["metadata"]["missing_secrets"]
+    ) == {
+        "JIRA_BASE_URL",
+        "JIRA_USERNAME",
+        "JIRA_API_TOKEN",
+    }
 
 
 def test_search_jira_tool_falls_back_to_jql_method(
@@ -178,9 +236,10 @@ def test_search_jira_tool_falls_back_to_jql_method(
 
     _install_fake_atlassian_module(monkeypatch, jira_cls=FakeJira)
 
-    result = SearchJiraTool().invoke(
-        _jira_context(),
-        SearchJiraTool.input_model(jql="project = DEMO", limit=3),
+    result = SearchJiraTool.output_model.model_validate(
+        _invoke_tool(
+            "search_jira", _jira_context(), {"jql": "project = DEMO", "limit": 3}
+        ).output
     )
 
     assert result.issues[0].key == "DEMO-3"
@@ -196,11 +255,16 @@ def test_search_jira_tool_rejects_unsupported_client(
 
     _install_fake_atlassian_module(monkeypatch, jira_cls=FakeJira)
 
-    with pytest.raises(RuntimeError, match="does not support JQL search"):
-        SearchJiraTool().invoke(
-            _jira_context(),
-            SearchJiraTool.input_model(jql="project = DEMO"),
-        )
+    result = _execute_tool(
+        "search_jira",
+        _jira_context(),
+        {"jql": "project = DEMO"},
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is ErrorCode.EXECUTION_FAILED
+    assert "does not support JQL search" in result.error.details["exception_message"]
 
 
 def test_read_jira_issue_tool_falls_back_to_get_issue(
@@ -225,9 +289,8 @@ def test_read_jira_issue_tool_falls_back_to_get_issue(
 
     _install_fake_atlassian_module(monkeypatch, jira_cls=FakeJira)
 
-    result = ReadJiraIssueTool().invoke(
-        _jira_context(),
-        ReadJiraIssueTool.input_model(issue_key="DEMO-4"),
+    result = ReadJiraIssueTool.output_model.model_validate(
+        _invoke_tool("read_jira_issue", _jira_context(), {"issue_key": "DEMO-4"}).output
     )
 
     assert result.key == "DEMO-4"
@@ -244,11 +307,16 @@ def test_read_jira_issue_tool_rejects_unsupported_client(
 
     _install_fake_atlassian_module(monkeypatch, jira_cls=FakeJira)
 
-    with pytest.raises(RuntimeError, match="does not support issue reads"):
-        ReadJiraIssueTool().invoke(
-            _jira_context(),
-            ReadJiraIssueTool.input_model(issue_key="DEMO-5"),
-        )
+    result = _execute_tool(
+        "read_jira_issue",
+        _jira_context(),
+        {"issue_key": "DEMO-5"},
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is ErrorCode.EXECUTION_FAILED
+    assert "does not support issue reads" in result.error.details["exception_message"]
 
 
 def test_search_bitbucket_code_tool_maps_results(
@@ -277,11 +345,12 @@ def test_search_bitbucket_code_tool_maps_results(
 
     _install_fake_atlassian_module(monkeypatch, bitbucket_cls=FakeBitbucket)
 
-    result = SearchBitbucketCodeTool().invoke(
-        _bitbucket_context(),
-        SearchBitbucketCodeTool.input_model(
-            project_key="PROJ", query="needle", limit=5
-        ),
+    result = SearchBitbucketCodeTool.output_model.model_validate(
+        _invoke_tool(
+            "search_bitbucket_code",
+            _bitbucket_context(),
+            {"project_key": "PROJ", "query": "needle", "limit": 5},
+        ).output
     )
 
     assert result.project_key == "PROJ"
@@ -314,16 +383,19 @@ def test_read_bitbucket_file_tool_reads_text_and_applies_ranges(
 
     _install_fake_atlassian_module(monkeypatch, bitbucket_cls=FakeBitbucket)
 
-    result = ReadBitbucketFileTool().invoke(
-        _bitbucket_context(),
-        ReadBitbucketFileTool.input_model(
-            project_key="PROJ",
-            repository_slug="demo-repo",
-            path="README.md",
-            ref="main",
-            start_char=6,
-            end_char=10,
-        ),
+    result = ReadBitbucketFileTool.output_model.model_validate(
+        _invoke_tool(
+            "read_bitbucket_file",
+            _bitbucket_context(),
+            {
+                "project_key": "PROJ",
+                "repository_slug": "demo-repo",
+                "path": "README.md",
+                "ref": "main",
+                "start_char": 6,
+                "end_char": 10,
+            },
+        ).output
     )
 
     assert result.project_key == "PROJ"
@@ -354,13 +426,16 @@ def test_read_bitbucket_file_tool_returns_structured_unsupported_for_binary(
 
     _install_fake_atlassian_module(monkeypatch, bitbucket_cls=FakeBitbucket)
 
-    result = ReadBitbucketFileTool().invoke(
-        _bitbucket_context(),
-        ReadBitbucketFileTool.input_model(
-            project_key="PROJ",
-            repository_slug="demo-repo",
-            path="binary.bin",
-        ),
+    result = ReadBitbucketFileTool.output_model.model_validate(
+        _invoke_tool(
+            "read_bitbucket_file",
+            _bitbucket_context(),
+            {
+                "project_key": "PROJ",
+                "repository_slug": "demo-repo",
+                "path": "binary.bin",
+            },
+        ).output
     )
 
     assert result.status == "unsupported"
@@ -425,13 +500,16 @@ def test_read_bitbucket_pull_request_tool_maps_payloads(
 
     _install_fake_atlassian_module(monkeypatch, bitbucket_cls=FakeBitbucket)
 
-    result = ReadBitbucketPullRequestTool().invoke(
-        _bitbucket_context(),
-        ReadBitbucketPullRequestTool.input_model(
-            project_key="PROJ",
-            repository_slug="demo-repo",
-            pull_request_id=7,
-        ),
+    result = ReadBitbucketPullRequestTool.output_model.model_validate(
+        _invoke_tool(
+            "read_bitbucket_pull_request",
+            _bitbucket_context(),
+            {
+                "project_key": "PROJ",
+                "repository_slug": "demo-repo",
+                "pull_request_id": 7,
+            },
+        ).output
     )
 
     assert result.title == "Add feature"
@@ -470,9 +548,12 @@ def test_search_confluence_tool_maps_results(
 
     _install_fake_atlassian_module(monkeypatch, confluence_cls=FakeConfluence)
 
-    result = SearchConfluenceTool().invoke(
-        _confluence_context(),
-        SearchConfluenceTool.input_model(cql="type = page", limit=4),
+    result = SearchConfluenceTool.output_model.model_validate(
+        _invoke_tool(
+            "search_confluence",
+            _confluence_context(),
+            {"cql": "type = page", "limit": 4},
+        ).output
     )
 
     assert result.cql == "type = page"
@@ -509,9 +590,12 @@ def test_read_confluence_content_tool_reads_page_with_ranges(
 
     _install_fake_atlassian_module(monkeypatch, confluence_cls=FakeConfluence)
 
-    result = ReadConfluenceContentTool().invoke(
-        _confluence_context(),
-        ReadConfluenceContentTool.input_model(page_id="123", start_char=6, end_char=10),
+    result = ReadConfluenceContentTool.output_model.model_validate(
+        _invoke_tool(
+            "read_confluence_content",
+            _confluence_context(),
+            {"page_id": "123", "start_char": 6, "end_char": 10},
+        ).output
     )
 
     assert result.mode == "page"
@@ -586,17 +670,19 @@ def test_read_confluence_content_tool_reads_attachment_and_reuses_cache(
         lambda: tmp_path / "attachment-cache",
     )
 
-    first = ReadConfluenceContentTool().invoke(
-        _confluence_context(),
-        ReadConfluenceContentTool.input_model(
-            page_id="123", attachment_filename="report.pdf"
-        ),
+    first = ReadConfluenceContentTool.output_model.model_validate(
+        _invoke_tool(
+            "read_confluence_content",
+            _confluence_context(),
+            {"page_id": "123", "attachment_filename": "report.pdf"},
+        ).output
     )
-    second = ReadConfluenceContentTool().invoke(
-        _confluence_context(),
-        ReadConfluenceContentTool.input_model(
-            page_id="123", attachment_filename="report.pdf"
-        ),
+    second = ReadConfluenceContentTool.output_model.model_validate(
+        _invoke_tool(
+            "read_confluence_content",
+            _confluence_context(),
+            {"page_id": "123", "attachment_filename": "report.pdf"},
+        ).output
     )
 
     assert first.mode == "attachment"
@@ -657,9 +743,12 @@ def test_read_confluence_content_tool_selects_attachment_by_id(
         lambda: tmp_path / "attachment-cache",
     )
 
-    result = ReadConfluenceContentTool().invoke(
-        _confluence_context(),
-        ReadConfluenceContentTool.input_model(page_id="123", attachment_id="att-9"),
+    result = ReadConfluenceContentTool.output_model.model_validate(
+        _invoke_tool(
+            "read_confluence_content",
+            _confluence_context(),
+            {"page_id": "123", "attachment_id": "att-9"},
+        ).output
     )
 
     assert result.mode == "attachment"

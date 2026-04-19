@@ -8,7 +8,6 @@ from types import ModuleType
 
 import pytest
 
-import llm_tools.tools.git.tools as git_tools
 from llm_tools.tool_api import (
     ErrorCode,
     SideEffectClass,
@@ -25,7 +24,12 @@ from llm_tools.tools.gitlab import register_gitlab_tools
 from llm_tools.tools.text import register_text_tools
 
 
-def _runtime(registry: ToolRegistry, *, allow_write: bool = False) -> ToolRuntime:
+def _runtime(
+    registry: ToolRegistry,
+    *,
+    allow_write: bool = False,
+    allow_subprocess: bool = False,
+) -> ToolRuntime:
     allowed_side_effects = {
         SideEffectClass.NONE,
         SideEffectClass.LOCAL_READ,
@@ -35,7 +39,10 @@ def _runtime(registry: ToolRegistry, *, allow_write: bool = False) -> ToolRuntim
         allowed_side_effects.add(SideEffectClass.LOCAL_WRITE)
     return ToolRuntime(
         registry,
-        policy=ToolPolicy(allowed_side_effects=allowed_side_effects),
+        policy=ToolPolicy(
+            allowed_side_effects=allowed_side_effects,
+            allow_subprocess=allow_subprocess,
+        ),
     )
 
 
@@ -111,7 +118,7 @@ def test_runtime_normalizes_workspace_root_enforcement_failures(
 
     registry = ToolRegistry()
     register_filesystem_tools(registry)
-    runtime = _runtime(registry)
+    runtime = _runtime(registry, allow_subprocess=True)
     result = runtime.execute(
         ToolInvocationRequest(
             tool_name="read_file", arguments={"path": "../outside.txt"}
@@ -129,20 +136,21 @@ def test_runtime_executes_git_builtins_with_mocked_subprocess(
 ) -> None:
     registry = ToolRegistry()
     register_git_tools(registry)
-    runtime = _runtime(registry)
+    runtime = _runtime(registry, allow_subprocess=True)
 
     def fake_run(
         args: list[str],
         *,
-        cwd: str,
+        cwd: object,
         capture_output: bool,
         text: bool,
         check: bool,
+        timeout: object = None,
     ) -> subprocess.CompletedProcess[str]:
-        del cwd, capture_output, text, check
+        del cwd, capture_output, text, check, timeout
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok\n")
 
-    monkeypatch.setattr(git_tools.subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "run", fake_run)
 
     result = runtime.execute(
         ToolInvocationRequest(tool_name="run_git_status", arguments={"path": "."}),

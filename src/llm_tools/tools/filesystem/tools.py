@@ -11,22 +11,15 @@ from llm_tools.tool_api import (
     SideEffectClass,
     SourceProvenanceRef,
     Tool,
-    ToolContext,
+    ToolExecutionContext,
     ToolRegistry,
     ToolSpec,
 )
-from llm_tools.tools._path_utils import get_workspace_root, resolve_workspace_path
 from llm_tools.tools.filesystem._content import (
     _get_cached_conversion_paths,
     _get_read_file_cache_root,
     _read_cached_conversion,
     _write_cached_conversion,
-)
-from llm_tools.tools.filesystem._ops import (
-    find_files_impl,
-    get_file_info_impl,
-    list_directory_impl,
-    read_file_impl,
 )
 from llm_tools.tools.filesystem.models import (
     DirectoryListingResult,
@@ -40,10 +33,10 @@ from llm_tools.tools.filesystem.models import (
 
 
 def _append_local_source_provenance(
-    context: ToolContext, *, resolved_path: Path
+    context: ToolExecutionContext, *, resolved_path: Path
 ) -> None:
     source_id = str(resolved_path.resolve())
-    context.source_provenance.append(
+    context.add_source_provenance(
         SourceProvenanceRef(
             source_kind="local_file",
             source_id=source_id,
@@ -55,13 +48,12 @@ def _append_local_source_provenance(
 
 
 def _require_repository_metadata(
-    context: ToolContext,
-) -> tuple[Path, SourceFilters, ToolLimits]:
-    workspace = get_workspace_root(context)
+    context: ToolExecutionContext,
+) -> tuple[SourceFilters, ToolLimits]:
     metadata = context.metadata
     source_filters = SourceFilters.model_validate(metadata.get("source_filters", {}))
     tool_limits = ToolLimits.model_validate(metadata.get("tool_limits", {}))
-    return workspace, source_filters, tool_limits
+    return source_filters, tool_limits
 
 
 class ReadFileInput(BaseModel):
@@ -85,18 +77,26 @@ class ReadFileTool(Tool[ReadFileInput, ReadFileOutput]):
     input_model = ReadFileInput
     output_model = ReadFileOutput
 
-    def invoke(self, context: ToolContext, args: ReadFileInput) -> ReadFileOutput:
-        root_path, _, tool_limits = _require_repository_metadata(context)
-        result = read_file_impl(
-            root_path,
+    def _invoke_impl(
+        self,
+        context: ToolExecutionContext,
+        args: ReadFileInput,
+    ) -> ReadFileOutput:
+        _, tool_limits = _require_repository_metadata(context)
+        filesystem = context.services.require_filesystem()
+        result = filesystem.read_file(
             args.path,
             tool_limits=tool_limits,
             start_char=args.start_char,
             end_char=args.end_char,
         )
-        resolved_path = (root_path / args.path).resolve()
-        context.logs.append(f"Read file '{args.path}'.")
-        context.artifacts.append(str(resolved_path))
+        resolved_path = filesystem.resolve_path(
+            args.path,
+            expect_directory=False,
+            must_exist=True,
+        )
+        context.log(f"Read file '{args.path}'.")
+        context.add_artifact(str(resolved_path))
         _append_local_source_provenance(context, resolved_path=resolved_path)
         return ReadFileOutput.model_validate(result.model_dump(mode="json"))
 
@@ -128,28 +128,21 @@ class WriteFileTool(Tool[WriteFileInput, WriteFileOutput]):
     input_model = WriteFileInput
     output_model = WriteFileOutput
 
-    def invoke(self, context: ToolContext, args: WriteFileInput) -> WriteFileOutput:
-        resolved = resolve_workspace_path(
-            context,
+    def _invoke_impl(
+        self,
+        context: ToolExecutionContext,
+        args: WriteFileInput,
+    ) -> WriteFileOutput:
+        filesystem = context.services.require_filesystem()
+        resolved, created, bytes_written = filesystem.write_text(
             args.path,
-            expect_directory=False,
-            must_exist=False,
+            content=args.content,
+            encoding=args.encoding,
+            overwrite=args.overwrite,
+            create_parents=args.create_parents,
         )
-        created = not resolved.exists()
-        if resolved.exists() and not args.overwrite:
-            raise FileExistsError(f"Path '{resolved}' already exists.")
-
-        if not resolved.parent.exists():
-            if not args.create_parents:
-                raise FileNotFoundError(
-                    f"Parent directory '{resolved.parent}' does not exist."
-                )
-            resolved.parent.mkdir(parents=True, exist_ok=True)
-
-        resolved.write_text(args.content, encoding=args.encoding)
-        bytes_written = len(args.content.encode(args.encoding))
-        context.logs.append(f"Wrote file '{resolved}'.")
-        context.artifacts.append(str(resolved))
+        context.log(f"Wrote file '{resolved}'.")
+        context.add_artifact(str(resolved))
         return WriteFileOutput(
             path=args.path,
             resolved_path=str(resolved),
@@ -179,19 +172,20 @@ class ListDirectoryTool(Tool[ListDirectoryInput, ListDirectoryOutput]):
     input_model = ListDirectoryInput
     output_model = ListDirectoryOutput
 
-    def invoke(
-        self, context: ToolContext, args: ListDirectoryInput
+    def _invoke_impl(
+        self,
+        context: ToolExecutionContext,
+        args: ListDirectoryInput,
     ) -> ListDirectoryOutput:
-        root_path, source_filters, tool_limits = _require_repository_metadata(context)
-        result = list_directory_impl(
-            root_path,
+        source_filters, tool_limits = _require_repository_metadata(context)
+        result = context.services.require_filesystem().list_directory(
             args.path,
             source_filters=source_filters,
             tool_limits=tool_limits,
             recursive=args.recursive,
             max_depth=args.max_depth,
         )
-        context.logs.append(f"Listed directory '{args.path}'.")
+        context.log(f"Listed directory '{args.path}'.")
         return ListDirectoryOutput.model_validate(result.model_dump(mode="json"))
 
 
@@ -215,16 +209,19 @@ class FindFilesTool(Tool[FindFilesInput, FindFilesOutput]):
     input_model = FindFilesInput
     output_model = FindFilesOutput
 
-    def invoke(self, context: ToolContext, args: FindFilesInput) -> FindFilesOutput:
-        root_path, source_filters, tool_limits = _require_repository_metadata(context)
-        result = find_files_impl(
-            root_path,
+    def _invoke_impl(
+        self,
+        context: ToolExecutionContext,
+        args: FindFilesInput,
+    ) -> FindFilesOutput:
+        source_filters, tool_limits = _require_repository_metadata(context)
+        result = context.services.require_filesystem().find_files(
             args.pattern,
             args.path,
             source_filters=source_filters,
             tool_limits=tool_limits,
         )
-        context.logs.append(f"Searched for file pattern '{args.pattern}'.")
+        context.log(f"Searched for file pattern '{args.pattern}'.")
         return FindFilesOutput.model_validate(result.model_dump(mode="json"))
 
 
@@ -250,17 +247,20 @@ class GetFileInfoTool(Tool[GetFileInfoInput, GetFileInfoOutput]):
     input_model = GetFileInfoInput
     output_model = GetFileInfoOutput
 
-    def invoke(self, context: ToolContext, args: GetFileInfoInput) -> GetFileInfoOutput:
-        root_path, _, tool_limits = _require_repository_metadata(context)
+    def _invoke_impl(
+        self,
+        context: ToolExecutionContext,
+        args: GetFileInfoInput,
+    ) -> GetFileInfoOutput:
+        _, tool_limits = _require_repository_metadata(context)
         path_argument: str | list[str] = (
             args.path if args.path is not None else args.paths or []
         )
-        result = get_file_info_impl(
-            root_path,
+        result = context.services.require_filesystem().get_file_info(
             path_argument,
             tool_limits=tool_limits,
         )
-        context.logs.append("Collected file metadata.")
+        context.log("Collected file metadata.")
         if isinstance(result, FileInfoResult):
             return GetFileInfoOutput(results=[result])
         return GetFileInfoOutput(results=result.results)

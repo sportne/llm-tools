@@ -23,20 +23,13 @@ class ToolRegistry:
 
         self._tools[tool_name] = tool
 
-    def get(self, name: str) -> Tool[Any, Any]:
-        """Return the registered tool instance for the given name."""
-        try:
-            return self._tools[name]
-        except KeyError as exc:
-            raise ToolNotRegisteredError(f"Tool '{name}' is not registered.") from exc
+    def get_spec(self, name: str) -> ToolSpec:
+        """Return the registered tool spec for the given name."""
+        return self._resolve_tool(name).spec
 
     def list_tools(self) -> list[ToolSpec]:
         """Return registered tool specs in registration order."""
         return [tool.spec for tool in self._tools.values()]
-
-    def list_registered_tools(self) -> list[Tool[Any, Any]]:
-        """Return registered tool instances in registration order."""
-        return list(self._tools.values())
 
     def filter_tools(
         self,
@@ -61,3 +54,12 @@ class ToolRegistry:
             matching_specs.append(spec)
 
         return matching_specs
+
+    def _resolve_tool(self, name: str) -> Tool[Any, Any]:
+        try:
+            return self._tools[name]
+        except KeyError as exc:
+            raise ToolNotRegisteredError(f"Tool '{name}' is not registered.") from exc
+
+    def _iter_registered_tools(self) -> list[Tool[Any, Any]]:
+        return list(self._tools.values())

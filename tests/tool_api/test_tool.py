@@ -8,7 +8,15 @@ from abc import ABC, abstractmethod
 import pytest
 from pydantic import BaseModel
 
-from llm_tools.tool_api import Tool, ToolContext, ToolSpec
+from llm_tools.tool_api import (
+    Tool,
+    ToolContext,
+    ToolExecutionContext,
+    ToolInvocationRequest,
+    ToolRegistry,
+    ToolRuntime,
+    ToolSpec,
+)
 
 
 class ExampleInput(BaseModel):
@@ -25,17 +33,48 @@ def test_valid_tool_subclass_exposes_expected_contract() -> None:
         input_model = ExampleInput
         output_model = ExampleOutput
 
-        def invoke(self, context: ToolContext, args: ExampleInput) -> ExampleOutput:
+        def _invoke_impl(
+            self, context: ToolExecutionContext, args: ExampleInput
+        ) -> ExampleOutput:
             return ExampleOutput(value=f"{context.invocation_id}:{args.value}")
 
     tool = EchoTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    runtime = ToolRuntime(registry)
 
     assert EchoTool.spec.name == "echo"
     assert EchoTool.input_model is ExampleInput
     assert EchoTool.output_model is ExampleOutput
-    result = tool.invoke(ToolContext(invocation_id="inv-1"), ExampleInput(value="hi"))
-    assert isinstance(result, ExampleOutput)
-    assert result.value == "inv-1:hi"
+
+    result = runtime.execute(
+        ToolInvocationRequest(tool_name="echo", arguments={"value": "hi"}),
+        ToolContext(invocation_id="inv-1"),
+    )
+    assert result.ok is True
+    assert result.output == {"value": "inv-1:hi"}
+
+
+def test_public_execution_context_type_is_not_instantiable() -> None:
+    with pytest.raises(TypeError, match="Protocols cannot be instantiated"):
+        ToolExecutionContext()
+
+
+def test_direct_tool_execution_is_rejected_without_runtime_permit() -> None:
+    class EchoTool(Tool[ExampleInput, ExampleOutput]):
+        spec = ToolSpec(name="echo", description="Echo a string.")
+        input_model = ExampleInput
+        output_model = ExampleOutput
+
+        def _invoke_impl(
+            self, context: ToolExecutionContext, args: ExampleInput
+        ) -> ExampleOutput:
+            return ExampleOutput(value=f"{context.invocation_id}:{args.value}")
+
+    tool = EchoTool()
+
+    with pytest.raises(RuntimeError, match="Direct tool execution is disabled"):
+        tool.invoke(ToolContext(invocation_id="inv-1"), ExampleInput(value="hi"))
 
 
 def test_async_only_tool_subclass_is_valid() -> None:
@@ -44,22 +83,30 @@ def test_async_only_tool_subclass_is_valid() -> None:
         input_model = ExampleInput
         output_model = ExampleOutput
 
-        async def ainvoke(
-            self, context: ToolContext, args: ExampleInput
+        async def _ainvoke_impl(
+            self, context: ToolExecutionContext, args: ExampleInput
         ) -> ExampleOutput:
             return ExampleOutput(value=f"{context.invocation_id}:{args.value}")
 
-    tool = AsyncEchoTool()
+    registry = ToolRegistry()
+    registry.register(AsyncEchoTool())
+    runtime = ToolRuntime(registry)
     result = asyncio.run(
-        tool.ainvoke(ToolContext(invocation_id="inv-async"), ExampleInput(value="hi"))
+        runtime.execute_async(
+            ToolInvocationRequest(tool_name="async-echo", arguments={"value": "hi"}),
+            ToolContext(invocation_id="inv-async"),
+        )
     )
-    assert result.value == "inv-async:hi"
+    assert result.ok is True
+    assert result.output == {"value": "inv-async:hi"}
 
 
 def test_abstract_intermediate_subclass_can_defer_required_class_attributes() -> None:
     class AbstractToolBase(Tool[ExampleInput, ExampleOutput], ABC):
         @abstractmethod
-        def invoke(self, context: ToolContext, args: ExampleInput) -> ExampleOutput:
+        def _invoke_impl(
+            self, context: ToolExecutionContext, args: ExampleInput
+        ) -> ExampleOutput:
             raise NotImplementedError
 
     class ConcreteTool(AbstractToolBase):
@@ -67,14 +114,20 @@ def test_abstract_intermediate_subclass_can_defer_required_class_attributes() ->
         input_model = ExampleInput
         output_model = ExampleOutput
 
-        def invoke(self, context: ToolContext, args: ExampleInput) -> ExampleOutput:
+        def _invoke_impl(
+            self, context: ToolExecutionContext, args: ExampleInput
+        ) -> ExampleOutput:
+            del context
             return ExampleOutput(value=args.value)
 
-    tool = ConcreteTool()
-    assert (
-        tool.invoke(ToolContext(invocation_id="inv-2"), ExampleInput(value="ok")).value
-        == "ok"
+    registry = ToolRegistry()
+    registry.register(ConcreteTool())
+    runtime = ToolRuntime(registry)
+    result = runtime.execute(
+        ToolInvocationRequest(tool_name="concrete", arguments={"value": "ok"}),
+        ToolContext(invocation_id="inv-2"),
     )
+    assert result.output == {"value": "ok"}
 
 
 @pytest.mark.parametrize(
@@ -135,19 +188,23 @@ def test_invalid_tool_subclasses_fail_at_definition_time(
     namespace: dict[str, object],
     message: str,
 ) -> None:
-    def invoke(self: object, context: ToolContext, args: ExampleInput) -> ExampleOutput:
+    def _invoke_impl(
+        self: object,
+        context: ToolExecutionContext,
+        args: ExampleInput,
+    ) -> ExampleOutput:
         del self, context, args
         return ExampleOutput(value="unused")
 
-    namespace_with_invoke = {
+    namespace_with_impl = {
         "__module__": __name__,
         "__annotations__": {},
         **namespace,
-        "invoke": invoke,
+        "_invoke_impl": _invoke_impl,
     }
 
     with pytest.raises(TypeError, match=message):
-        type(tool_name, (Tool,), namespace_with_invoke)
+        type(tool_name, (Tool,), namespace_with_impl)
 
 
 def test_tool_subclass_without_invoke_or_ainvoke_is_rejected() -> None:

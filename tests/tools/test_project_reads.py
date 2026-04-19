@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 
 import llm_tools.tools.filesystem._content as filesystem_content
-from llm_tools.tool_api import ToolContext
+from llm_tools.tool_api import (
+    ToolContext,
+    ToolInvocationRequest,
+    ToolRegistry,
+    ToolRuntime,
+)
 from llm_tools.tools.filesystem import ReadFileTool
 from llm_tools.tools.filesystem._content import (
     _extract_project_notes,
@@ -30,6 +35,12 @@ from llm_tools.tools.filesystem._content import (
 from llm_tools.tools.filesystem._ops import get_file_info_impl
 from llm_tools.tools.filesystem.models import SourceFilters, ToolLimits
 from llm_tools.tools.text._ops import search_text_impl
+
+
+def _read_file_runtime() -> ToolRuntime:
+    registry = ToolRegistry()
+    registry.register(ReadFileTool())
+    return ToolRuntime(registry)
 
 
 class FakeJPype:
@@ -417,14 +428,19 @@ def test_read_file_tool_applies_ranges_and_limits_to_project_content(
     _install_fake_mpxj(monkeypatch)
 
     full_content = convert_with_mpxj(file_path)
-    result = ReadFileTool().invoke(
+    tool_result = _read_file_runtime().execute(
+        ToolInvocationRequest(
+            tool_name="read_file",
+            arguments={"path": "plan.mpp", "start_char": 2, "end_char": 80},
+        ),
         ToolContext(
             invocation_id="inv-project",
             workspace=str(tmp_path),
             metadata={"tool_limits": {"max_read_file_chars": 40}},
         ),
-        ReadFileTool.input_model(path="plan.mpp", start_char=2, end_char=80),
     )
+    assert tool_result.ok is True, tool_result.error
+    result = ReadFileTool.output_model.model_validate(tool_result.output)
 
     assert result.read_kind == "project"
     assert result.content == full_content[2:42]

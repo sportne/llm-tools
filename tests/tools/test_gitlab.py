@@ -9,13 +9,55 @@ from typing import Any
 
 import pytest
 
-from llm_tools.tool_api import ToolContext
+from llm_tools.tool_api import (
+    ErrorCode,
+    SideEffectClass,
+    ToolContext,
+    ToolInvocationRequest,
+    ToolPolicy,
+    ToolRegistry,
+    ToolRuntime,
+)
 from llm_tools.tools.gitlab import (
     ReadGitLabFileTool,
     ReadGitLabMergeRequestTool,
     SearchGitLabCodeTool,
 )
 from llm_tools.tools.gitlab import tools as gitlab_tools
+
+
+def _gitlab_runtime() -> ToolRuntime:
+    registry = ToolRegistry()
+    registry.register(SearchGitLabCodeTool())
+    registry.register(ReadGitLabFileTool())
+    registry.register(ReadGitLabMergeRequestTool())
+    return ToolRuntime(
+        registry,
+        policy=ToolPolicy(
+            allowed_side_effects={
+                SideEffectClass.NONE,
+                SideEffectClass.LOCAL_READ,
+                SideEffectClass.EXTERNAL_READ,
+            },
+            allow_network=True,
+        ),
+    )
+
+
+def _invoke_tool(tool_name: str, context: ToolContext, arguments: dict[str, object]):
+    result = _gitlab_runtime().execute(
+        ToolInvocationRequest(tool_name=tool_name, arguments=arguments),
+        context,
+    )
+    assert result.ok is True, result.error
+    return result
+
+
+def _execute_tool(tool_name: str, context: ToolContext, arguments: dict[str, object]):
+    return _gitlab_runtime().execute(
+        ToolInvocationRequest(tool_name=tool_name, arguments=arguments),
+        context,
+    )
 
 
 def _install_fake_gitlab_module(
@@ -70,15 +112,12 @@ def test_search_gitlab_code_tool_maps_project_results(
 
     _install_fake_gitlab_module(monkeypatch, FakeGitlab)
 
-    result = SearchGitLabCodeTool().invoke(
+    tool_result = _invoke_tool(
+        "search_gitlab_code",
         _context(),
-        SearchGitLabCodeTool.input_model(
-            project="group/repo",
-            query="needle",
-            ref="main",
-            limit=2,
-        ),
+        {"project": "group/repo", "query": "needle", "ref": "main", "limit": 2},
     )
+    result = SearchGitLabCodeTool.output_model.model_validate(tool_result.output)
 
     assert result.project == "group/repo"
     assert result.matches[0].path == "src/app.py"
@@ -116,15 +155,17 @@ def test_read_gitlab_file_tool_reads_text_and_applies_ranges(
 
     _install_fake_gitlab_module(monkeypatch, FakeGitlab)
 
-    result = ReadGitLabFileTool().invoke(
+    tool_result = _invoke_tool(
+        "read_gitlab_file",
         _context(),
-        ReadGitLabFileTool.input_model(
-            project="group/repo",
-            file_path="docs/readme.txt",
-            start_char=6,
-            end_char=20,
-        ),
+        {
+            "project": "group/repo",
+            "file_path": "docs/readme.txt",
+            "start_char": 6,
+            "end_char": 20,
+        },
     )
+    result = ReadGitLabFileTool.output_model.model_validate(tool_result.output)
 
     assert result.project == "group/repo"
     assert result.ref == "main"
@@ -164,13 +205,12 @@ def test_read_gitlab_file_tool_returns_structured_unsupported_for_binary_content
 
     _install_fake_gitlab_module(monkeypatch, FakeGitlab)
 
-    result = ReadGitLabFileTool().invoke(
+    tool_result = _invoke_tool(
+        "read_gitlab_file",
         _context(),
-        ReadGitLabFileTool.input_model(
-            project="group/repo",
-            file_path="bin/data.bin",
-        ),
+        {"project": "group/repo", "file_path": "bin/data.bin"},
     )
+    result = ReadGitLabFileTool.output_model.model_validate(tool_result.output)
 
     assert result.status == "unsupported"
     assert result.read_kind == "unsupported"
@@ -233,13 +273,12 @@ def test_read_gitlab_merge_request_tool_maps_metadata_commits_and_changes(
 
     _install_fake_gitlab_module(monkeypatch, FakeGitlab)
 
-    result = ReadGitLabMergeRequestTool().invoke(
+    tool_result = _invoke_tool(
+        "read_gitlab_merge_request",
         _context(),
-        ReadGitLabMergeRequestTool.input_model(
-            project="group/repo",
-            merge_request_iid=12,
-        ),
+        {"project": "group/repo", "merge_request_iid": 12},
     )
+    result = ReadGitLabMergeRequestTool.output_model.model_validate(tool_result.output)
 
     assert result.project == "group/repo"
     assert result.title == "Add feature"
@@ -250,11 +289,21 @@ def test_read_gitlab_merge_request_tool_maps_metadata_commits_and_changes(
 
 
 def test_gitlab_tools_require_context_credentials() -> None:
-    with pytest.raises(ValueError, match="GITLAB_BASE_URL"):
-        SearchGitLabCodeTool().invoke(
-            ToolContext(invocation_id="inv-2"),
-            SearchGitLabCodeTool.input_model(project="group/repo", query="needle"),
-        )
+    result = _execute_tool(
+        "search_gitlab_code",
+        ToolContext(invocation_id="inv-2"),
+        {"project": "group/repo", "query": "needle"},
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is ErrorCode.POLICY_DENIED
+    assert set(
+        result.error.details["policy_decision"]["metadata"]["missing_secrets"]
+    ) == {
+        "GITLAB_BASE_URL",
+        "GITLAB_API_TOKEN",
+    }
 
 
 def test_search_gitlab_code_tool_rejects_unsupported_project_client(
@@ -275,11 +324,16 @@ def test_search_gitlab_code_tool_rejects_unsupported_project_client(
 
     _install_fake_gitlab_module(monkeypatch, FakeGitlab)
 
-    with pytest.raises(RuntimeError, match="does not support code search"):
-        SearchGitLabCodeTool().invoke(
-            _context(),
-            SearchGitLabCodeTool.input_model(project="group/repo", query="needle"),
-        )
+    result = _execute_tool(
+        "search_gitlab_code",
+        _context(),
+        {"project": "group/repo", "query": "needle"},
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is ErrorCode.EXECUTION_FAILED
+    assert "does not support code search" in result.error.details["exception_message"]
 
 
 def test_get_gitlab_project_rejects_unsupported_client_shape() -> None:
@@ -491,10 +545,12 @@ def test_read_gitlab_file_tool_returns_too_large_when_content_exceeds_limit(
         update={"metadata": {"tool_limits": {"max_file_size_characters": 5}}}
     )
 
-    result = ReadGitLabFileTool().invoke(
+    tool_result = _invoke_tool(
+        "read_gitlab_file",
         context,
-        ReadGitLabFileTool.input_model(project="group/repo", file_path="README.md"),
+        {"project": "group/repo", "file_path": "README.md"},
     )
+    result = ReadGitLabFileTool.output_model.model_validate(tool_result.output)
 
     assert result.project == "repo-only"
     assert result.status == "too_large"

@@ -34,10 +34,10 @@ class RedactionConfig(BaseModel):
 
     rules: list[RedactionRule] = Field(default_factory=list)
     tool_rules: dict[str, list[RedactionRule]] = Field(default_factory=dict)
-    redact_logs: bool = False
-    redact_artifacts: bool = False
-    retain_unredacted_inputs: bool = True
-    retain_unredacted_outputs: bool = True
+    redact_logs: bool = True
+    redact_artifacts: bool = True
+    retain_unredacted_inputs: bool = False
+    retain_unredacted_outputs: bool = False
 
 
 DEFAULT_SENSITIVE_FIELD_NAMES: set[str] = {

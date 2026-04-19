@@ -35,6 +35,7 @@ from llm_tools.tool_api import (
     Tool,
     ToolContext,
     ToolError,
+    ToolExecutionContext,
     ToolPolicy,
     ToolRegistry,
     ToolResult,
@@ -67,8 +68,10 @@ class _WorkTool(Tool[_WorkInput, _WorkOutput]):
     input_model = _WorkInput
     output_model = _WorkOutput
 
-    def invoke(self, context: ToolContext, args: _WorkInput) -> _WorkOutput:
-        context.logs.append(f"work:{args.value}")
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: _WorkInput
+    ) -> _WorkOutput:
+        context.log(f"work:{args.value}")
         return _WorkOutput(value=args.value)
 
 

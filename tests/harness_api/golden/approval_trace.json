@@ -1,4 +1,25 @@
 {
+  "replay": {
+    "final_stop_reason": "completed",
+    "limitations": [],
+    "mode": "trace",
+    "session_id": "golden-approval",
+    "steps": [
+      {
+        "decision_action": "stop",
+        "decision_stop_reason": "completed",
+        "decision_summary": "Completed selected tasks.",
+        "selected_task_ids": [
+          "task-1"
+        ],
+        "turn_index": 1,
+        "workflow_outcome_statuses": [
+          "approval_requested",
+          "executed"
+        ]
+      }
+    ]
+  },
   "trace": {
     "final_stop_reason": "completed",
     "session_id": "golden-approval",
@@ -9,8 +30,8 @@
             "budget_exhausted": false,
             "configured": {
               "max_chars_per_text_field": 400,
-              "max_related_tasks": 6,
               "max_recent_turns": 5,
+              "max_related_tasks": 6,
               "max_selected_tasks": 1,
               "max_total_chars": 6000
             },
@@ -140,27 +161,6 @@
         "verification_status_by_task_id": {
           "task-1": "not_run"
         },
-        "workflow_outcome_statuses": [
-          "approval_requested",
-          "executed"
-        ]
-      }
-    ]
-  },
-  "replay": {
-    "final_stop_reason": "completed",
-    "limitations": [],
-    "mode": "trace",
-    "session_id": "golden-approval",
-    "steps": [
-      {
-        "decision_action": "stop",
-        "decision_stop_reason": "completed",
-        "decision_summary": "Completed selected tasks.",
-        "selected_task_ids": [
-          "task-1"
-        ],
-        "turn_index": 1,
         "workflow_outcome_statuses": [
           "approval_requested",
           "executed"

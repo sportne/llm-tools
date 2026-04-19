@@ -60,7 +60,7 @@ def build_chat_system_prompt(
                     ),
                 },
             }
-            for tool in tool_registry.list_registered_tools()
+            for tool in tool_registry._iter_registered_tools()
             if enabled_tool_names is None or tool.spec.name in enabled_tool_names
         ],
         indent=2,

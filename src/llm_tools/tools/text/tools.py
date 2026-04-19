@@ -2,31 +2,27 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from pydantic import BaseModel
 
 from llm_tools.tool_api import (
     SideEffectClass,
     Tool,
-    ToolContext,
+    ToolExecutionContext,
     ToolRegistry,
     ToolSpec,
 )
-from llm_tools.tools._path_utils import get_workspace_root
 from llm_tools.tools.filesystem.models import SourceFilters, ToolLimits
 from llm_tools.tools.text._ops import search_text_impl
 from llm_tools.tools.text.models import TextSearchResult
 
 
 def _require_repository_metadata(
-    context: ToolContext,
-) -> tuple[Path, SourceFilters, ToolLimits]:
-    workspace = get_workspace_root(context)
+    context: ToolExecutionContext,
+) -> tuple[SourceFilters, ToolLimits]:
     metadata = context.metadata
     source_filters = SourceFilters.model_validate(metadata.get("source_filters", {}))
     tool_limits = ToolLimits.model_validate(metadata.get("tool_limits", {}))
-    return workspace, source_filters, tool_limits
+    return source_filters, tool_limits
 
 
 class SearchTextInput(BaseModel):
@@ -49,8 +45,14 @@ class SearchTextTool(Tool[SearchTextInput, SearchTextOutput]):
     input_model = SearchTextInput
     output_model = SearchTextOutput
 
-    def invoke(self, context: ToolContext, args: SearchTextInput) -> SearchTextOutput:
-        root_path, source_filters, tool_limits = _require_repository_metadata(context)
+    def _invoke_impl(
+        self,
+        context: ToolExecutionContext,
+        args: SearchTextInput,
+    ) -> SearchTextOutput:
+        filesystem = context.services.require_filesystem()
+        root_path = filesystem.workspace_root()
+        source_filters, tool_limits = _require_repository_metadata(context)
         result = search_text_impl(
             root_path,
             args.query,
@@ -58,7 +60,7 @@ class SearchTextTool(Tool[SearchTextInput, SearchTextOutput]):
             source_filters=source_filters,
             tool_limits=tool_limits,
         )
-        context.logs.append(f"Searched text for '{args.query}'.")
+        context.log(f"Searched text for '{args.query}'.")
         return SearchTextOutput.model_validate(result.model_dump(mode="json"))
 
 

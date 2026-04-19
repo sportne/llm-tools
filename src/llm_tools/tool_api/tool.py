@@ -8,10 +8,19 @@ from typing import ClassVar, Generic, TypeVar
 
 from pydantic import BaseModel
 
-from llm_tools.tool_api.models import ToolContext, ToolSpec
+from llm_tools.tool_api.execution import (
+    ToolExecutionContext,
+    _context_accepts_permit,
+    _ExecutionPermit,
+)
+from llm_tools.tool_api.models import ToolSpec
 
 InputT = TypeVar("InputT", bound=BaseModel)
 OutputT = TypeVar("OutputT", bound=BaseModel)
+
+_DIRECT_EXECUTION_ERROR = (
+    "Direct tool execution is disabled. Use ToolRuntime to execute tools."
+)
 
 
 class Tool(ABC, Generic[InputT, OutputT]):
@@ -71,14 +80,41 @@ class Tool(ABC, Generic[InputT, OutputT]):
         if not cls._has_sync_implementation() and not cls._has_async_implementation():
             raise TypeError(
                 f"Concrete tool subclass {cls.__name__} must implement at least one "
-                "execution method: 'invoke' or 'ainvoke'."
+                "execution method: '_invoke_impl' or '_ainvoke_impl'."
             )
 
-    def invoke(self, context: ToolContext, args: InputT) -> OutputT:
+    def invoke(
+        self,
+        context: ToolExecutionContext,
+        args: InputT,
+        *,
+        _permit: _ExecutionPermit | None = None,
+    ) -> OutputT:
+        """Execute the tool through a runtime-issued execution context."""
+        self._require_runtime_permit(context, _permit)
+        return self._invoke_impl(context, args)
+
+    async def ainvoke(
+        self,
+        context: ToolExecutionContext,
+        args: InputT,
+        *,
+        _permit: _ExecutionPermit | None = None,
+    ) -> OutputT:
+        """Asynchronously execute the tool through the runtime boundary."""
+        self._require_runtime_permit(context, _permit)
+        return await self._ainvoke_impl(context, args)
+
+    def _invoke_impl(self, context: ToolExecutionContext, args: InputT) -> OutputT:
         """Execute the tool using validated input and return the declared model."""
+        del context, args
         raise NotImplementedError
 
-    async def ainvoke(self, context: ToolContext, args: InputT) -> OutputT:
+    async def _ainvoke_impl(
+        self,
+        context: ToolExecutionContext,
+        args: InputT,
+    ) -> OutputT:
         """Asynchronously execute the tool and return the declared output model."""
         del context, args
         raise NotImplementedError
@@ -86,9 +122,17 @@ class Tool(ABC, Generic[InputT, OutputT]):
     @classmethod
     def _has_sync_implementation(cls) -> bool:
         """Whether the class provides a concrete synchronous implementation."""
-        return cls.invoke is not Tool.invoke
+        return cls._invoke_impl is not Tool._invoke_impl
 
     @classmethod
     def _has_async_implementation(cls) -> bool:
         """Whether the class provides a concrete asynchronous implementation."""
-        return cls.ainvoke is not Tool.ainvoke
+        return cls._ainvoke_impl is not Tool._ainvoke_impl
+
+    @staticmethod
+    def _require_runtime_permit(
+        context: ToolExecutionContext,
+        permit: _ExecutionPermit | None,
+    ) -> None:
+        if not _context_accepts_permit(context, permit):
+            raise RuntimeError(_DIRECT_EXECUTION_ERROR)

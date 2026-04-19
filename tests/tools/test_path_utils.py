@@ -66,3 +66,20 @@ def test_is_hidden_path_detects_hidden_relative_parts(tmp_path: Path) -> None:
         is_hidden_path(tmp_path.resolve(), (tmp_path / "visible.txt").resolve())
         is False
     )
+
+
+def test_get_workspace_root_returns_resolved_directory(tmp_path: Path) -> None:
+    context = ToolContext(invocation_id="inv-ok", workspace=f"  {tmp_path}  ")
+
+    assert get_workspace_root(context) == tmp_path.resolve()
+
+
+def test_resolve_workspace_path_accepts_relative_and_absolute_paths(
+    tmp_path: Path,
+) -> None:
+    note = tmp_path / "note.txt"
+    note.write_text("hello", encoding="utf-8")
+    context = ToolContext(invocation_id="inv-abs", workspace=str(tmp_path))
+
+    assert resolve_workspace_path(context, "note.txt") == note.resolve()
+    assert resolve_workspace_path(context, str(note.resolve())) == note.resolve()

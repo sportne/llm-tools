@@ -13,7 +13,7 @@ from llm_tools.tool_api import (
     SideEffectClass,
     SourceProvenanceRef,
     Tool,
-    ToolContext,
+    ToolExecutionContext,
     ToolRegistry,
     ToolSpec,
 )
@@ -29,12 +29,12 @@ _GITLAB_ENV_KEYS = ("GITLAB_BASE_URL", "GITLAB_API_TOKEN")
 
 
 def _append_remote_source_provenance(
-    context: ToolContext,
+    context: ToolExecutionContext,
     *,
     source_kind: str,
     source_id: str,
 ) -> None:
-    context.source_provenance.append(
+    context.add_source_provenance(
         SourceProvenanceRef(
             source_kind=source_kind,
             source_id=source_id,
@@ -45,23 +45,7 @@ def _append_remote_source_provenance(
     )
 
 
-def _get_required_env(context: ToolContext, key: str) -> str:
-    value = context.env.get(key)
-    if value is None or value == "":
-        raise ValueError(f"Missing required GitLab credential '{key}'.")
-    return value
-
-
-def _build_gitlab_client(context: ToolContext) -> Any:
-    base_url = _get_required_env(context, "GITLAB_BASE_URL")
-    api_token = _get_required_env(context, "GITLAB_API_TOKEN")
-
-    import gitlab
-
-    return gitlab.Gitlab(base_url, private_token=api_token)
-
-
-def _get_tool_limits(context: ToolContext) -> ToolLimits:
+def _get_tool_limits(context: ToolExecutionContext) -> ToolLimits:
     return ToolLimits.model_validate(context.metadata.get("tool_limits", {}))
 
 
@@ -228,10 +212,10 @@ class SearchGitLabCodeTool(Tool[SearchGitLabCodeInput, SearchGitLabCodeOutput]):
     input_model = SearchGitLabCodeInput
     output_model = SearchGitLabCodeOutput
 
-    def invoke(
-        self, context: ToolContext, args: SearchGitLabCodeInput
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: SearchGitLabCodeInput
     ) -> SearchGitLabCodeOutput:
-        client = _build_gitlab_client(context)
+        client = context.services.require_gitlab().client
         project = _get_gitlab_project(client, args.project)
         project_name = _normalize_project_name(project, args.project)
         matches = [
@@ -268,7 +252,7 @@ class SearchGitLabCodeTool(Tool[SearchGitLabCodeInput, SearchGitLabCodeOutput]):
                 limit=args.limit,
             )
         ]
-        context.logs.append(
+        context.log(
             f"Ran GitLab code search for '{args.query}' in project '{args.project}'."
         )
         return SearchGitLabCodeOutput(
@@ -304,10 +288,10 @@ class ReadGitLabFileTool(Tool[ReadGitLabFileInput, ReadGitLabFileOutput]):
     input_model = ReadGitLabFileInput
     output_model = ReadGitLabFileOutput
 
-    def invoke(
-        self, context: ToolContext, args: ReadGitLabFileInput
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: ReadGitLabFileInput
     ) -> ReadGitLabFileOutput:
-        client = _build_gitlab_client(context)
+        client = context.services.require_gitlab().client
         project = _get_gitlab_project(client, args.project)
         project_name = _normalize_project_name(project, args.project)
         tool_limits = _get_tool_limits(context)
@@ -363,10 +347,10 @@ class ReadGitLabFileTool(Tool[ReadGitLabFileInput, ReadGitLabFileOutput]):
         content_slice = content[normalized_start:truncated_end]
         truncated = truncated_end < character_count or truncated_end < normalized_end
 
-        context.logs.append(
+        context.log(
             f"Read GitLab file '{args.file_path}' from project '{args.project}'."
         )
-        context.artifacts.append(resolved_path)
+        context.add_artifact(resolved_path)
         _append_remote_source_provenance(
             context,
             source_kind="gitlab_file",
@@ -441,10 +425,10 @@ class ReadGitLabMergeRequestTool(
     input_model = ReadGitLabMergeRequestInput
     output_model = ReadGitLabMergeRequestOutput
 
-    def invoke(
-        self, context: ToolContext, args: ReadGitLabMergeRequestInput
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: ReadGitLabMergeRequestInput
     ) -> ReadGitLabMergeRequestOutput:
-        client = _build_gitlab_client(context)
+        client = context.services.require_gitlab().client
         project = _get_gitlab_project(client, args.project)
         project_name = _normalize_project_name(project, args.project)
         merge_request = _get_merge_request(project, args.merge_request_iid)
@@ -474,7 +458,7 @@ class ReadGitLabMergeRequestTool(
             for change in _get_merge_request_changes(merge_request)
         ]
 
-        context.logs.append(
+        context.log(
             "Read GitLab merge request "
             f"'{args.merge_request_iid}' from project '{args.project}'."
         )

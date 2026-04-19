@@ -9,7 +9,7 @@ from llm_tools.tool_api import (
     DuplicateToolError,
     SideEffectClass,
     Tool,
-    ToolContext,
+    ToolExecutionContext,
     ToolNotRegisteredError,
     ToolRegistry,
     ToolSpec,
@@ -34,7 +34,9 @@ class ReadTool(Tool[RegistryInput, RegistryOutput]):
     input_model = RegistryInput
     output_model = RegistryOutput
 
-    def invoke(self, context: ToolContext, args: RegistryInput) -> RegistryOutput:
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: RegistryInput
+    ) -> RegistryOutput:
         return RegistryOutput(value=f"{context.invocation_id}:{args.value}")
 
 
@@ -48,7 +50,10 @@ class WriteTool(Tool[RegistryInput, RegistryOutput]):
     input_model = RegistryInput
     output_model = RegistryOutput
 
-    def invoke(self, context: ToolContext, args: RegistryInput) -> RegistryOutput:
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: RegistryInput
+    ) -> RegistryOutput:
+        del context
         return RegistryOutput(value=args.value)
 
 
@@ -62,17 +67,29 @@ class FetchTool(Tool[RegistryInput, RegistryOutput]):
     input_model = RegistryInput
     output_model = RegistryOutput
 
-    def invoke(self, context: ToolContext, args: RegistryInput) -> RegistryOutput:
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: RegistryInput
+    ) -> RegistryOutput:
+        del context
         return RegistryOutput(value=args.value)
 
 
-def test_register_and_get_return_the_same_tool_instance() -> None:
+def test_register_and_get_spec_return_expected_metadata() -> None:
     registry = ToolRegistry()
     tool = ReadTool()
 
     registry.register(tool)
 
-    assert registry.get("read") is tool
+    assert registry.get_spec("read") == tool.spec
+
+
+def test_internal_resolve_tool_returns_the_registered_instance() -> None:
+    registry = ToolRegistry()
+    tool = ReadTool()
+
+    registry.register(tool)
+
+    assert registry._resolve_tool("read") is tool
 
 
 def test_list_tools_returns_specs_in_registration_order() -> None:
@@ -100,11 +117,11 @@ def test_register_rejects_duplicate_tool_names() -> None:
         registry.register(ReadTool())
 
 
-def test_get_raises_custom_error_for_unknown_tool() -> None:
+def test_get_spec_raises_custom_error_for_unknown_tool() -> None:
     registry = ToolRegistry()
 
     with pytest.raises(ToolNotRegisteredError, match="missing-tool"):
-        registry.get("missing-tool")
+        registry.get_spec("missing-tool")
 
 
 def test_filter_tools_by_single_tag() -> None:

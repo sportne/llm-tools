@@ -12,7 +12,6 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 import llm_tools.tool_api.runtime as runtime_module
-import llm_tools.tools.git.tools as git_tools
 from llm_tools.harness_api import PendingApprovalRecord
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import (
@@ -20,6 +19,7 @@ from llm_tools.tool_api import (
     SideEffectClass,
     Tool,
     ToolContext,
+    ToolExecutionContext,
     ToolPolicy,
     ToolRegistry,
     ToolResult,
@@ -62,14 +62,19 @@ class _AsyncEchoTool(Tool[_AsyncEchoInput, _AsyncEchoOutput]):
     input_model = _AsyncEchoInput
     output_model = _AsyncEchoOutput
 
-    async def ainvoke(
-        self, context: ToolContext, args: _AsyncEchoInput
+    async def _ainvoke_impl(
+        self, context: ToolExecutionContext, args: _AsyncEchoInput
     ) -> _AsyncEchoOutput:
-        context.logs.append("async-echo")
+        context.log("async-echo")
         return _AsyncEchoOutput(value=f"{context.invocation_id}:{args.value}")
 
 
-def _executor(registry: ToolRegistry, *, allow_write: bool = False) -> WorkflowExecutor:
+def _executor(
+    registry: ToolRegistry,
+    *,
+    allow_write: bool = False,
+    allow_subprocess: bool = False,
+) -> WorkflowExecutor:
     allowed_side_effects = {
         SideEffectClass.NONE,
         SideEffectClass.LOCAL_READ,
@@ -80,7 +85,10 @@ def _executor(registry: ToolRegistry, *, allow_write: bool = False) -> WorkflowE
 
     return WorkflowExecutor(
         registry,
-        policy=ToolPolicy(allowed_side_effects=allowed_side_effects),
+        policy=ToolPolicy(
+            allowed_side_effects=allowed_side_effects,
+            allow_subprocess=allow_subprocess,
+        ),
     )
 
 
@@ -263,7 +271,7 @@ def test_workflow_executor_prepares_registered_tools_for_model_interaction() -> 
     registry = ToolRegistry()
     register_filesystem_tools(registry)
     register_text_tools(registry)
-    executor = _executor(registry)
+    executor = _executor(registry, allow_subprocess=True)
 
     prepared = executor.prepare_model_interaction(ActionEnvelopeAdapter())
 
@@ -846,23 +854,24 @@ def test_workflow_executor_executes_git_and_jira_paths(
     def fake_run(
         args: list[str],
         *,
-        cwd: str,
+        cwd: object,
         capture_output: bool,
         text: bool,
         check: bool,
+        timeout: object = None,
     ) -> subprocess.CompletedProcess[str]:
-        del cwd, capture_output, text, check
+        del cwd, capture_output, text, check, timeout
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok\n")
 
     fake_module = ModuleType("atlassian")
     fake_module.Jira = FakeJira
     monkeypatch.setitem(sys.modules, "atlassian", fake_module)
-    monkeypatch.setattr(git_tools.subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "run", fake_run)
 
     registry = ToolRegistry()
     register_git_tools(registry)
     register_atlassian_tools(registry)
-    executor = _executor(registry)
+    executor = _executor(registry, allow_subprocess=True)
 
     git_result = executor.execute_model_output(
         ActionEnvelopeAdapter(),
@@ -948,7 +957,7 @@ def test_workflow_executor_async_handles_async_only_tools() -> None:
         executed = _executed_tool_results(result)[0]
         assert executed.ok is True
         assert executed.output["value"] == "async-only:hello"
-        assert executed.logs == ["async-echo"]
+        assert executed.logs == ["[REDACTED]"]
 
     asyncio.run(run())
 

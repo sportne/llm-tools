@@ -190,7 +190,7 @@ def build_assistant_executor(
 def build_assistant_available_tool_specs() -> dict[str, ToolSpec]:
     """Return assistant-visible tool specs keyed by tool name."""
     registry = build_assistant_registry()
-    return {tool.spec.name: tool.spec for tool in registry.list_registered_tools()}
+    return {spec.name: spec for spec in registry.list_tools()}
 
 
 def resolve_assistant_default_enabled_tools(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -16,6 +17,7 @@ from llm_tools.tool_api import (
     Tool,
     ToolContext,
     ToolError,
+    ToolExecutionContext,
     ToolInvocationRequest,
     ToolPolicy,
     ToolRegistry,
@@ -50,9 +52,11 @@ class EchoTool(Tool[RuntimeInput, RuntimeOutput]):
     input_model = RuntimeInput
     output_model = RuntimeOutput
 
-    def invoke(self, context: ToolContext, args: RuntimeInput) -> RuntimeOutput:
-        context.logs.append("echo-start")
-        context.artifacts.append("echo.txt")
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: RuntimeInput
+    ) -> RuntimeOutput:
+        context.log("echo-start")
+        context.add_artifact("echo.txt")
         return RuntimeOutput(value=f"{context.invocation_id}:{args.value}")
 
 
@@ -65,7 +69,9 @@ class DictOutputTool(Tool[RuntimeInput, RuntimeOutput]):
     input_model = RuntimeInput
     output_model = RuntimeOutput
 
-    def invoke(self, context: ToolContext, args: RuntimeInput) -> RuntimeOutput:
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: RuntimeInput
+    ) -> RuntimeOutput:
         del context
         return cast(RuntimeOutput, {"value": args.value.upper()})
 
@@ -79,7 +85,9 @@ class LocalWriteTool(Tool[RuntimeInput, RuntimeOutput]):
     input_model = RuntimeInput
     output_model = RuntimeOutput
 
-    def invoke(self, context: ToolContext, args: RuntimeInput) -> RuntimeOutput:
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: RuntimeInput
+    ) -> RuntimeOutput:
         del context
         return RuntimeOutput(value=args.value)
 
@@ -93,10 +101,12 @@ class FailingTool(Tool[RuntimeInput, RuntimeOutput]):
     input_model = RuntimeInput
     output_model = RuntimeOutput
 
-    def invoke(self, context: ToolContext, args: RuntimeInput) -> RuntimeOutput:
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: RuntimeInput
+    ) -> RuntimeOutput:
         del args
-        context.logs.append("about-to-fail")
-        context.artifacts.append("failure.log")
+        context.log("about-to-fail")
+        context.add_artifact("failure.log")
         raise ValueError("boom")
 
 
@@ -119,9 +129,11 @@ class SecretLoggingTool(Tool[SecretInput, SecretOutput]):
     input_model = SecretInput
     output_model = SecretOutput
 
-    def invoke(self, context: ToolContext, args: SecretInput) -> SecretOutput:
-        context.logs.append("processing-secret-input")
-        context.artifacts.append("secret.json")
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: SecretInput
+    ) -> SecretOutput:
+        context.log("processing-secret-input")
+        context.add_artifact("secret.json")
         return SecretOutput(status=args.username)
 
 
@@ -134,7 +146,9 @@ class InvalidOutputTool(Tool[RuntimeInput, RuntimeOutput]):
     input_model = RuntimeInput
     output_model = RuntimeOutput
 
-    def invoke(self, context: ToolContext, args: RuntimeInput) -> RuntimeOutput:
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: RuntimeInput
+    ) -> RuntimeOutput:
         del context, args
         return cast(RuntimeOutput, "not-a-valid-output")
 
@@ -148,9 +162,11 @@ class AsyncEchoTool(Tool[RuntimeInput, RuntimeOutput]):
     input_model = RuntimeInput
     output_model = RuntimeOutput
 
-    async def ainvoke(self, context: ToolContext, args: RuntimeInput) -> RuntimeOutput:
-        context.logs.append("async-echo-start")
-        context.artifacts.append("async.txt")
+    async def _ainvoke_impl(
+        self, context: ToolExecutionContext, args: RuntimeInput
+    ) -> RuntimeOutput:
+        context.log("async-echo-start")
+        context.add_artifact("async.txt")
         return RuntimeOutput(value=f"{context.invocation_id}:{args.value}")
 
 
@@ -163,21 +179,77 @@ class DualEchoTool(Tool[RuntimeInput, RuntimeOutput]):
     input_model = RuntimeInput
     output_model = RuntimeOutput
 
-    def invoke(self, context: ToolContext, args: RuntimeInput) -> RuntimeOutput:
-        context.logs.append("sync-path")
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: RuntimeInput
+    ) -> RuntimeOutput:
+        context.log("sync-path")
         return RuntimeOutput(value=f"sync:{args.value}")
 
-    async def ainvoke(self, context: ToolContext, args: RuntimeInput) -> RuntimeOutput:
-        context.logs.append("async-path")
+    async def _ainvoke_impl(
+        self, context: ToolExecutionContext, args: RuntimeInput
+    ) -> RuntimeOutput:
+        context.log("async-path")
         return RuntimeOutput(value=f"async:{args.value}")
 
 
+class SlowSyncTool(Tool[RuntimeInput, RuntimeOutput]):
+    spec = ToolSpec(
+        name="slow_sync",
+        description="Slow sync tool.",
+        side_effects=SideEffectClass.NONE,
+        timeout_seconds=1,
+    )
+    input_model = RuntimeInput
+    output_model = RuntimeOutput
+
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: RuntimeInput
+    ) -> RuntimeOutput:
+        del context, args
+        time.sleep(2)
+        return RuntimeOutput(value="late")
+
+
+class SlowAsyncTool(Tool[RuntimeInput, RuntimeOutput]):
+    spec = ToolSpec(
+        name="slow_async",
+        description="Slow async tool.",
+        side_effects=SideEffectClass.NONE,
+        timeout_seconds=1,
+    )
+    input_model = RuntimeInput
+    output_model = RuntimeOutput
+
+    async def _ainvoke_impl(
+        self, context: ToolExecutionContext, args: RuntimeInput
+    ) -> RuntimeOutput:
+        del context, args
+        await asyncio.sleep(2)
+        return RuntimeOutput(value="late")
+
+
+class SecretReaderTool(Tool[RuntimeInput, RuntimeOutput]):
+    spec = ToolSpec(
+        name="secret_reader",
+        description="Read only declared secret.",
+        side_effects=SideEffectClass.NONE,
+        required_secrets=["ALLOWED_SECRET"],
+    )
+    input_model = RuntimeInput
+    output_model = RuntimeOutput
+
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: RuntimeInput
+    ) -> RuntimeOutput:
+        del args
+        allowed = context.secrets.get_required("ALLOWED_SECRET")
+        with pytest.raises(KeyError):
+            _ = context.secrets["BLOCKED_SECRET"]
+        return RuntimeOutput(value=allowed)
+
+
 class BrokenPolicy(ToolPolicy):
-    def evaluate(
-        self,
-        tool: Tool[Any, Any],
-        context: ToolContext,
-    ) -> Any:
+    def evaluate(self, tool: Any, context: ToolContext) -> Any:
         del tool, context
         raise RuntimeError("policy exploded")
 
@@ -193,6 +265,19 @@ def _registry(*tools: Tool[Any, Any]) -> ToolRegistry:
     return registry
 
 
+def test_runtime_inspection_returns_spec_and_policy_decision() -> None:
+    runtime = ToolRuntime(_registry(EchoTool()))
+
+    inspection = runtime.inspect_invocation(
+        ToolInvocationRequest(tool_name="echo", arguments={"value": "hi"}),
+        _context(),
+    )
+
+    assert inspection.tool_name == "echo"
+    assert inspection.tool_version == "0.1.0"
+    assert inspection.policy_decision.allowed is True
+
+
 def test_runtime_executes_successfully_and_attaches_execution_record() -> None:
     runtime = ToolRuntime(_registry(EchoTool()))
 
@@ -204,24 +289,26 @@ def test_runtime_executes_successfully_and_attaches_execution_record() -> None:
     assert result.ok is True
     assert result.output == {"value": "inv-1:hi"}
     assert result.error is None
-    assert result.logs == ["echo-start"]
-    assert result.artifacts == ["echo.txt"]
+    assert result.logs == ["[REDACTED]"]
+    assert result.artifacts == ["[REDACTED]"]
 
     record = result.metadata["execution_record"]
     assert record["invocation_id"] == "inv-1"
     assert record["tool_name"] == "echo"
     assert record["tool_version"] == "0.1.0"
     assert record["request"] == {"tool_name": "echo", "arguments": {"value": "hi"}}
-    assert record["validated_input"] == {"value": "hi"}
+    assert record.get("validated_input") is None
     assert record["redacted_input"] == {"value": "hi"}
+    assert record.get("validated_output") is None
+    assert record["redacted_output"] == {"value": "inv-1:hi"}
     assert record["ok"] is True
     assert record["error_code"] is None
     assert record["duration_ms"] is not None
     assert record["duration_ms"] >= 0
     assert record["started_at"].endswith("Z")
     assert record["ended_at"].endswith("Z")
-    assert record["logs"] == ["echo-start"]
-    assert record["artifacts"] == ["echo.txt"]
+    assert record["logs"] == ["[REDACTED]"]
+    assert record["artifacts"] == ["[REDACTED]"]
 
 
 def test_runtime_accepts_output_that_validates_against_output_model() -> None:
@@ -279,6 +366,29 @@ def test_runtime_normalizes_denied_policy_with_approval_metadata() -> None:
     )
 
 
+def test_runtime_approval_override_executes_approved_invocation() -> None:
+    runtime = ToolRuntime(
+        _registry(LocalWriteTool()),
+        policy=ToolPolicy(
+            allowed_side_effects={
+                SideEffectClass.NONE,
+                SideEffectClass.LOCAL_READ,
+                SideEffectClass.LOCAL_WRITE,
+            },
+            require_approval_for={SideEffectClass.LOCAL_WRITE},
+        ),
+    )
+
+    result = runtime.execute(
+        ToolInvocationRequest(tool_name="write_file", arguments={"value": "data"}),
+        _context(),
+        approval_override=True,
+    )
+
+    assert result.ok is True
+    assert result.output == {"value": "data"}
+
+
 def test_runtime_normalizes_tool_execution_exceptions() -> None:
     runtime = ToolRuntime(_registry(FailingTool()))
 
@@ -292,11 +402,11 @@ def test_runtime_normalizes_tool_execution_exceptions() -> None:
     assert result.error.code is ErrorCode.EXECUTION_FAILED
     assert result.error.details["exception_type"] == "ValueError"
     assert result.error.details["exception_message"] == "boom"
-    assert result.logs == ["about-to-fail"]
-    assert result.artifacts == ["failure.log"]
+    assert result.logs == ["[REDACTED]"]
+    assert result.artifacts == ["[REDACTED]"]
     assert result.metadata["execution_record"]["error_code"] == "execution_failed"
-    assert result.metadata["execution_record"]["logs"] == ["about-to-fail"]
-    assert result.metadata["execution_record"]["artifacts"] == ["failure.log"]
+    assert result.metadata["execution_record"]["logs"] == ["[REDACTED]"]
+    assert result.metadata["execution_record"]["artifacts"] == ["[REDACTED]"]
 
 
 def test_runtime_normalizes_invalid_output() -> None:
@@ -311,8 +421,8 @@ def test_runtime_normalizes_invalid_output() -> None:
     assert result.error is not None
     assert result.error.code is ErrorCode.OUTPUT_VALIDATION_ERROR
     assert result.error.details["tool_name"] == "invalid_output"
-    assert result.metadata["execution_record"]["error_code"] == (
-        "output_validation_error"
+    assert (
+        result.metadata["execution_record"]["error_code"] == "output_validation_error"
     )
 
 
@@ -372,21 +482,11 @@ def test_runtime_records_redacted_input_and_tool_emitted_observability() -> None
     )
 
     assert result.ok is True
-    assert result.logs == ["processing-secret-input"]
-    assert result.artifacts == ["secret.json"]
+    assert result.logs == ["[REDACTED]"]
+    assert result.artifacts == ["[REDACTED]"]
 
     record = result.metadata["execution_record"]
-    assert record["validated_input"] == {
-        "username": "alice",
-        "password": "super-secret",
-        "nested": {
-            "api_key": "abc123",
-            "items": [
-                {"authorization": "Bearer token"},
-                {"note": "keep"},
-            ],
-        },
-    }
+    assert record.get("validated_input") is None
     assert record["redacted_input"] == {
         "username": "alice",
         "password": "[REDACTED]",
@@ -398,8 +498,8 @@ def test_runtime_records_redacted_input_and_tool_emitted_observability() -> None
             ],
         },
     }
-    assert record["logs"] == ["processing-secret-input"]
-    assert record["artifacts"] == ["secret.json"]
+    assert record["logs"] == ["[REDACTED]"]
+    assert record["artifacts"] == ["[REDACTED]"]
 
 
 def test_runtime_redaction_normalizes_field_name_variants() -> None:
@@ -436,6 +536,22 @@ def test_runtime_redaction_normalizes_field_name_variants() -> None:
     }
 
 
+def test_runtime_scopes_visible_secrets_to_declared_subset() -> None:
+    runtime = ToolRuntime(_registry(SecretReaderTool()))
+    context = ToolContext(
+        invocation_id="inv-1",
+        env={"ALLOWED_SECRET": "granted", "BLOCKED_SECRET": "hidden"},
+    )
+
+    result = runtime.execute(
+        ToolInvocationRequest(tool_name="secret_reader", arguments={"value": "x"}),
+        context,
+    )
+
+    assert result.ok is True
+    assert result.output == {"value": "granted"}
+
+
 def test_runtime_execute_async_supports_sync_only_tools() -> None:
     runtime = ToolRuntime(_registry(EchoTool()))
     result = asyncio.run(
@@ -447,7 +563,7 @@ def test_runtime_execute_async_supports_sync_only_tools() -> None:
 
     assert result.ok is True
     assert result.output == {"value": "inv-1:hi"}
-    assert result.logs == ["echo-start"]
+    assert result.logs == ["[REDACTED]"]
 
 
 def test_runtime_execute_async_supports_async_only_tools() -> None:
@@ -461,8 +577,8 @@ def test_runtime_execute_async_supports_async_only_tools() -> None:
 
     assert result.ok is True
     assert result.output == {"value": "inv-1:hi"}
-    assert result.logs == ["async-echo-start"]
-    assert result.artifacts == ["async.txt"]
+    assert result.logs == ["[REDACTED]"]
+    assert result.artifacts == ["[REDACTED]"]
 
 
 def test_runtime_execute_sync_can_bridge_async_only_tools_without_loop() -> None:
@@ -510,10 +626,10 @@ def test_runtime_prefers_sync_for_execute_and_async_for_execute_async() -> None:
 
     assert sync_result.ok is True
     assert sync_result.output == {"value": "sync:hello"}
-    assert sync_result.logs == ["sync-path"]
+    assert sync_result.logs == ["[REDACTED]"]
     assert async_result.ok is True
     assert async_result.output == {"value": "async:hello"}
-    assert async_result.logs == ["async-path"]
+    assert async_result.logs == ["[REDACTED]"]
 
 
 def test_runtime_execute_async_normalizes_missing_tool_lookup() -> None:
@@ -586,6 +702,36 @@ def test_runtime_execute_async_normalizes_invalid_input_execution_and_output() -
     assert invalid_output.ok is False
     assert invalid_output.error is not None
     assert invalid_output.error.code is ErrorCode.OUTPUT_VALIDATION_ERROR
+
+
+def test_runtime_enforces_sync_timeouts() -> None:
+    runtime = ToolRuntime(_registry(SlowSyncTool()))
+
+    result = runtime.execute(
+        ToolInvocationRequest(tool_name="slow_sync", arguments={"value": "hi"}),
+        _context(),
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is ErrorCode.TIMEOUT
+    assert result.metadata["execution_record"]["error_code"] == "timeout"
+
+
+def test_runtime_enforces_async_timeouts() -> None:
+    runtime = ToolRuntime(_registry(SlowAsyncTool()))
+
+    result = asyncio.run(
+        runtime.execute_async(
+            ToolInvocationRequest(tool_name="slow_async", arguments={"value": "hi"}),
+            _context(),
+        )
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is ErrorCode.TIMEOUT
+    assert result.metadata["execution_record"]["error_code"] == "timeout"
 
 
 def test_runtime_normalizes_unexpected_tool_resolution_errors() -> None:
@@ -698,6 +844,7 @@ def test_runtime_invocation_helpers_raise_with_no_execution_methods(
     runtime = ToolRuntime(_registry(EchoTool()))
     tool = EchoTool()
     validated_input = RuntimeInput(value="hello")
+    execution_context = runtime._build_execution_context(tool.spec, _context())
 
     monkeypatch.setattr(
         EchoTool,
@@ -714,12 +861,14 @@ def test_runtime_invocation_helpers_raise_with_no_execution_methods(
         RuntimeError,
         match="no synchronous or asynchronous implementation",
     ):
-        runtime._invoke_tool(tool, _context(), validated_input)
+        runtime._invoke_tool(tool, execution_context, validated_input)
     with pytest.raises(
         RuntimeError,
         match="no synchronous or asynchronous implementation",
     ):
-        asyncio.run(runtime._invoke_tool_async(tool, _context(), validated_input))
+        asyncio.run(
+            runtime._invoke_tool_async(tool, execution_context, validated_input)
+        )
 
 
 def test_runtime_redact_error_details_returns_unchanged_without_details() -> None:

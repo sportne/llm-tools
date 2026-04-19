@@ -95,13 +95,13 @@ def build_chat_executor(
 
 def build_available_tool_names() -> set[str]:
     """Return the fixed read-only tool names exposed by chat apps."""
-    return {tool.spec.name for tool in build_chat_registry().list_registered_tools()}
+    return {spec.name for spec in build_chat_registry().list_tools()}
 
 
 def build_available_tool_specs() -> dict[str, ToolSpec]:
     """Return all chat-visible tool specs keyed by tool name."""
     registry = build_chat_registry()
-    return {tool.spec.name: tool.spec for tool in registry.list_registered_tools()}
+    return {spec.name: spec for spec in registry.list_tools()}
 
 
 def build_chat_context(

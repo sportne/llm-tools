@@ -6,11 +6,11 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
+from llm_tools.tool_api.execution import HostToolContext
 from llm_tools.tool_api.models import (
     PolicyDecision,
     PolicyVerdict,
     SideEffectClass,
-    ToolContext,
     ToolSpec,
 )
 from llm_tools.tool_api.redaction import (
@@ -77,17 +77,21 @@ class ToolPolicy(BaseModel):
             self.redaction.rules.append(legacy_rule)
         return self
 
-    def evaluate(self, tool: Tool[Any, Any], context: ToolContext) -> PolicyDecision:
+    def evaluate(
+        self,
+        tool: Tool[Any, Any] | ToolSpec,
+        context: HostToolContext,
+    ) -> PolicyDecision:
         """Evaluate whether a tool is allowed under the current policy."""
-        spec = tool.spec
+        spec = tool.spec if isinstance(tool, Tool) else tool
         tool_name = spec.name
         tool_tags = set(spec.tags)
 
         for decision in (
             self._evaluate_name_rules(tool_name),
             self._evaluate_tag_rules(tool_name, tool_tags),
-            self._evaluate_side_effect_rules(tool_name, tool.spec),
-            self._evaluate_secret_rules(tool_name, tool.spec, context),
+            self._evaluate_side_effect_rules(tool_name, spec),
+            self._evaluate_secret_rules(tool_name, spec, context),
         ):
             if decision is not None:
                 return decision
@@ -109,7 +113,11 @@ class ToolPolicy(BaseModel):
             metadata={"tool_name": tool_name},
         )
 
-    def verdict(self, tool: Tool[Any, Any], context: ToolContext) -> PolicyVerdict:
+    def verdict(
+        self,
+        tool: Tool[Any, Any] | ToolSpec,
+        context: HostToolContext,
+    ) -> PolicyVerdict:
         """Return a high-level policy verdict for exposure and execution flows."""
         decision = self.evaluate(tool, context)
         if decision.allowed:
@@ -174,7 +182,7 @@ class ToolPolicy(BaseModel):
         self,
         tool_name: str,
         spec: ToolSpec,
-        context: ToolContext,
+        context: HostToolContext,
     ) -> PolicyDecision | None:
         missing_secrets = [
             secret for secret in spec.required_secrets if secret not in context.env

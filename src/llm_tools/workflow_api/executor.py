@@ -12,7 +12,6 @@ from pydantic import BaseModel
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import (
     PolicyVerdict,
-    Tool,
     ToolContext,
     ToolInvocationRequest,
     ToolPolicy,
@@ -85,7 +84,7 @@ class WorkflowExecutor:
         final_response_model: object = str,
     ) -> PreparedModelInteraction:
         """Prepare a typed response model and schema for one model turn."""
-        tools = self._registry.list_registered_tools()
+        tools = list(self._registry._iter_registered_tools())
         if context is not None:
             tools = self._filter_tools_for_exposure(
                 tools,
@@ -478,19 +477,27 @@ class WorkflowExecutor:
         approval_override: bool,
     ) -> tuple[WorkflowInvocationOutcome, _PendingApprovalState | None]:
         try:
-            tool = self._registry.get(request.tool_name)
-            policy_decision = self._policy.evaluate(tool, context)
+            inspection = self._runtime.inspect_invocation(
+                request,
+                context,
+                approval_override=approval_override,
+            )
         except Exception:
-            result = self._runtime.execute(request, context)
+            result = self._runtime.execute(
+                request,
+                context,
+                approval_override=approval_override,
+            )
             return self._build_executed_outcome(
                 index=index, request=request, result=result
             ), None
 
+        policy_decision = inspection.policy_decision
         if policy_decision.requires_approval and not approval_override:
             approval_request, expires_at = self._make_approval_request(
                 request=request,
                 index=index,
-                tool=tool,
+                spec=self._registry.get_spec(request.tool_name),
                 policy_reason=policy_decision.reason,
                 policy_metadata=policy_decision.metadata,
             )
@@ -509,10 +516,11 @@ class WorkflowExecutor:
                 pending_state,
             )
 
-        runtime = self._runtime
-        if approval_override and policy_decision.requires_approval:
-            runtime = self._runtime_with_approval_override(tool)
-        result = runtime.execute(request, context)
+        result = self._runtime.execute(
+            request,
+            context,
+            approval_override=approval_override,
+        )
         return self._build_executed_outcome(
             index=index, request=request, result=result
         ), None
@@ -528,19 +536,27 @@ class WorkflowExecutor:
         approval_override: bool,
     ) -> tuple[WorkflowInvocationOutcome, _PendingApprovalState | None]:
         try:
-            tool = self._registry.get(request.tool_name)
-            policy_decision = self._policy.evaluate(tool, context)
+            inspection = self._runtime.inspect_invocation(
+                request,
+                context,
+                approval_override=approval_override,
+            )
         except Exception:
-            result = await self._runtime.execute_async(request, context)
+            result = await self._runtime.execute_async(
+                request,
+                context,
+                approval_override=approval_override,
+            )
             return self._build_executed_outcome(
                 index=index, request=request, result=result
             ), None
 
+        policy_decision = inspection.policy_decision
         if policy_decision.requires_approval and not approval_override:
             approval_request, expires_at = self._make_approval_request(
                 request=request,
                 index=index,
-                tool=tool,
+                spec=self._registry.get_spec(request.tool_name),
                 policy_reason=policy_decision.reason,
                 policy_metadata=policy_decision.metadata,
             )
@@ -559,26 +575,21 @@ class WorkflowExecutor:
                 pending_state,
             )
 
-        runtime = self._runtime
-        if approval_override and policy_decision.requires_approval:
-            runtime = self._runtime_with_approval_override(tool)
-        result = await runtime.execute_async(request, context)
+        result = await self._runtime.execute_async(
+            request,
+            context,
+            approval_override=approval_override,
+        )
         return self._build_executed_outcome(
             index=index, request=request, result=result
         ), None
-
-    def _runtime_with_approval_override(self, tool: Tool[Any, Any]) -> ToolRuntime:
-        policy = self._policy.model_copy(deep=True)
-        policy.require_approval_for = set(policy.require_approval_for)
-        policy.require_approval_for.discard(tool.spec.side_effects)
-        return ToolRuntime(self._registry, policy=policy)
 
     def _make_approval_request(
         self,
         *,
         request: ToolInvocationRequest,
         index: int,
-        tool: Tool[Any, Any],
+        spec: ToolSpec,
         policy_reason: str,
         policy_metadata: dict[str, Any],
     ) -> tuple[ApprovalRequest, datetime]:
@@ -590,8 +601,8 @@ class WorkflowExecutor:
             approval_id=f"approval-{uuid4().hex}",
             invocation_index=index,
             request=request,
-            tool_name=tool.spec.name,
-            tool_version=tool.spec.version,
+            tool_name=spec.name,
+            tool_version=spec.version,
             policy_reason=policy_reason,
             policy_metadata=dict(policy_metadata),
             requested_at=self._to_timestamp(requested_at),
@@ -648,14 +659,14 @@ class WorkflowExecutor:
 
     def _filter_tools_for_exposure(
         self,
-        tools: list[Tool[Any, Any]],
+        tools: list[Any],
         *,
         context: ToolContext,
         include_requires_approval: bool,
-    ) -> list[Tool[Any, Any]]:
-        filtered: list[Tool[Any, Any]] = []
+    ) -> list[Any]:
+        filtered: list[Any] = []
         for tool in tools:
-            verdict = self._policy.verdict(tool, context)
+            verdict = self._policy.verdict(tool.spec, context)
             if verdict is PolicyVerdict.ALLOW or (
                 verdict is PolicyVerdict.REQUIRE_APPROVAL and include_requires_approval
             ):

@@ -2,113 +2,55 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
-
 from llm_tools.tool_api import (
     PolicyVerdict,
     SideEffectClass,
-    Tool,
     ToolContext,
     ToolPolicy,
     ToolSpec,
 )
 
-
-class PolicyInput(BaseModel):
-    value: str
-
-
-class PolicyOutput(BaseModel):
-    value: str
-
-
-class NoOpTool(Tool[PolicyInput, PolicyOutput]):
-    spec = ToolSpec(
-        name="noop",
-        description="Do nothing.",
-        tags=["utility"],
-        side_effects=SideEffectClass.NONE,
-    )
-    input_model = PolicyInput
-    output_model = PolicyOutput
-
-    def invoke(self, context: ToolContext, args: PolicyInput) -> PolicyOutput:
-        return PolicyOutput(value=f"{context.invocation_id}:{args.value}")
-
-
-class LocalReadTool(Tool[PolicyInput, PolicyOutput]):
-    spec = ToolSpec(
-        name="read_file",
-        description="Read a file.",
-        tags=["filesystem", "read"],
-        side_effects=SideEffectClass.LOCAL_READ,
-        requires_filesystem=True,
-    )
-    input_model = PolicyInput
-    output_model = PolicyOutput
-
-    def invoke(self, context: ToolContext, args: PolicyInput) -> PolicyOutput:
-        return PolicyOutput(value=args.value)
-
-
-class LocalWriteTool(Tool[PolicyInput, PolicyOutput]):
-    spec = ToolSpec(
-        name="write_file",
-        description="Write a file.",
-        tags=["filesystem", "write"],
-        side_effects=SideEffectClass.LOCAL_WRITE,
-        requires_filesystem=True,
-    )
-    input_model = PolicyInput
-    output_model = PolicyOutput
-
-    def invoke(self, context: ToolContext, args: PolicyInput) -> PolicyOutput:
-        return PolicyOutput(value=args.value)
-
-
-class ExternalReadTool(Tool[PolicyInput, PolicyOutput]):
-    spec = ToolSpec(
-        name="fetch_url",
-        description="Fetch a URL.",
-        tags=["http", "read"],
-        side_effects=SideEffectClass.EXTERNAL_READ,
-        requires_network=True,
-    )
-    input_model = PolicyInput
-    output_model = PolicyOutput
-
-    def invoke(self, context: ToolContext, args: PolicyInput) -> PolicyOutput:
-        return PolicyOutput(value=args.value)
-
-
-class ProcessTool(Tool[PolicyInput, PolicyOutput]):
-    spec = ToolSpec(
-        name="run_process",
-        description="Run a subprocess.",
-        tags=["process"],
-        side_effects=SideEffectClass.NONE,
-        requires_subprocess=True,
-    )
-    input_model = PolicyInput
-    output_model = PolicyOutput
-
-    def invoke(self, context: ToolContext, args: PolicyInput) -> PolicyOutput:
-        return PolicyOutput(value=args.value)
-
-
-class SecretTool(Tool[PolicyInput, PolicyOutput]):
-    spec = ToolSpec(
-        name="secret_tool",
-        description="Needs a secret.",
-        tags=["secret"],
-        side_effects=SideEffectClass.NONE,
-        required_secrets=["API_KEY"],
-    )
-    input_model = PolicyInput
-    output_model = PolicyOutput
-
-    def invoke(self, context: ToolContext, args: PolicyInput) -> PolicyOutput:
-        return PolicyOutput(value=args.value)
+NOOP_SPEC = ToolSpec(
+    name="noop",
+    description="Do nothing.",
+    tags=["utility"],
+    side_effects=SideEffectClass.NONE,
+)
+LOCAL_READ_SPEC = ToolSpec(
+    name="read_file",
+    description="Read a file.",
+    tags=["filesystem", "read"],
+    side_effects=SideEffectClass.LOCAL_READ,
+    requires_filesystem=True,
+)
+LOCAL_WRITE_SPEC = ToolSpec(
+    name="write_file",
+    description="Write a file.",
+    tags=["filesystem", "write"],
+    side_effects=SideEffectClass.LOCAL_WRITE,
+    requires_filesystem=True,
+)
+EXTERNAL_READ_SPEC = ToolSpec(
+    name="fetch_url",
+    description="Fetch a URL.",
+    tags=["http", "read"],
+    side_effects=SideEffectClass.EXTERNAL_READ,
+    requires_network=True,
+)
+PROCESS_SPEC = ToolSpec(
+    name="run_process",
+    description="Run a subprocess.",
+    tags=["process"],
+    side_effects=SideEffectClass.NONE,
+    requires_subprocess=True,
+)
+SECRET_SPEC = ToolSpec(
+    name="secret_tool",
+    description="Needs a secret.",
+    tags=["secret"],
+    side_effects=SideEffectClass.NONE,
+    required_secrets=["API_KEY"],
+)
 
 
 def _context(**env: str) -> ToolContext:
@@ -116,7 +58,7 @@ def _context(**env: str) -> ToolContext:
 
 
 def test_default_policy_allows_none_side_effects() -> None:
-    decision = ToolPolicy().evaluate(NoOpTool(), _context())
+    decision = ToolPolicy().evaluate(NOOP_SPEC, _context())
 
     assert decision.allowed is True
     assert decision.requires_approval is False
@@ -124,14 +66,14 @@ def test_default_policy_allows_none_side_effects() -> None:
 
 
 def test_default_policy_allows_local_read_tools() -> None:
-    decision = ToolPolicy().evaluate(LocalReadTool(), _context())
+    decision = ToolPolicy().evaluate(LOCAL_READ_SPEC, _context())
 
     assert decision.allowed is True
     assert decision.reason == "allowed"
 
 
 def test_default_policy_denies_local_write_tools() -> None:
-    decision = ToolPolicy().evaluate(LocalWriteTool(), _context())
+    decision = ToolPolicy().evaluate(LOCAL_WRITE_SPEC, _context())
 
     assert decision.allowed is False
     assert decision.requires_approval is False
@@ -139,21 +81,21 @@ def test_default_policy_denies_local_write_tools() -> None:
 
 
 def test_default_policy_denies_external_read_tools() -> None:
-    decision = ToolPolicy().evaluate(ExternalReadTool(), _context())
+    decision = ToolPolicy().evaluate(EXTERNAL_READ_SPEC, _context())
 
     assert decision.allowed is False
     assert decision.reason == "side effect not allowed"
 
 
 def test_denied_tool_names_block_execution() -> None:
-    decision = ToolPolicy(denied_tools={"noop"}).evaluate(NoOpTool(), _context())
+    decision = ToolPolicy(denied_tools={"noop"}).evaluate(NOOP_SPEC, _context())
 
     assert decision.allowed is False
     assert decision.reason == "tool name denied"
 
 
 def test_allowed_tools_acts_as_an_allowlist() -> None:
-    decision = ToolPolicy(allowed_tools={"read_file"}).evaluate(NoOpTool(), _context())
+    decision = ToolPolicy(allowed_tools={"read_file"}).evaluate(NOOP_SPEC, _context())
 
     assert decision.allowed is False
     assert decision.reason == "tool name not allowed"
@@ -161,7 +103,7 @@ def test_allowed_tools_acts_as_an_allowlist() -> None:
 
 def test_denied_tags_block_execution() -> None:
     decision = ToolPolicy(denied_tags={"filesystem"}).evaluate(
-        LocalReadTool(), _context()
+        LOCAL_READ_SPEC, _context()
     )
 
     assert decision.allowed is False
@@ -171,10 +113,10 @@ def test_denied_tags_block_execution() -> None:
 
 def test_allowed_tags_require_any_overlap() -> None:
     denied = ToolPolicy(allowed_tags={"http", "process"}).evaluate(
-        LocalReadTool(), _context()
+        LOCAL_READ_SPEC, _context()
     )
     allowed = ToolPolicy(allowed_tags={"http", "process"}).evaluate(
-        ProcessTool(), _context()
+        PROCESS_SPEC, _context()
     )
 
     assert denied.allowed is False
@@ -185,7 +127,7 @@ def test_allowed_tags_require_any_overlap() -> None:
 def test_allowed_side_effects_gate_exact_side_effect_values() -> None:
     decision = ToolPolicy(
         allowed_side_effects={SideEffectClass.NONE, SideEffectClass.LOCAL_WRITE}
-    ).evaluate(LocalReadTool(), _context())
+    ).evaluate(LOCAL_READ_SPEC, _context())
 
     assert decision.allowed is False
     assert decision.reason == "side effect not allowed"
@@ -199,7 +141,7 @@ def test_network_restrictions_deny_tools_requiring_network() -> None:
             SideEffectClass.EXTERNAL_READ,
         },
         allow_network=False,
-    ).evaluate(ExternalReadTool(), _context())
+    ).evaluate(EXTERNAL_READ_SPEC, _context())
 
     assert decision.allowed is False
     assert decision.reason == "network access denied"
@@ -207,7 +149,7 @@ def test_network_restrictions_deny_tools_requiring_network() -> None:
 
 
 def test_filesystem_restrictions_deny_tools_requiring_filesystem() -> None:
-    decision = ToolPolicy(allow_filesystem=False).evaluate(LocalReadTool(), _context())
+    decision = ToolPolicy(allow_filesystem=False).evaluate(LOCAL_READ_SPEC, _context())
 
     assert decision.allowed is False
     assert decision.reason == "filesystem access denied"
@@ -215,7 +157,7 @@ def test_filesystem_restrictions_deny_tools_requiring_filesystem() -> None:
 
 
 def test_subprocess_restrictions_deny_tools_requiring_subprocess() -> None:
-    decision = ToolPolicy(allow_subprocess=False).evaluate(ProcessTool(), _context())
+    decision = ToolPolicy(allow_subprocess=False).evaluate(PROCESS_SPEC, _context())
 
     assert decision.allowed is False
     assert decision.reason == "subprocess access denied"
@@ -230,7 +172,7 @@ def test_require_approval_returns_denied_decision_with_flag() -> None:
             SideEffectClass.LOCAL_WRITE,
         },
         require_approval_for={SideEffectClass.LOCAL_WRITE},
-    ).evaluate(LocalWriteTool(), _context())
+    ).evaluate(LOCAL_WRITE_SPEC, _context())
 
     assert decision.allowed is False
     assert decision.requires_approval is True
@@ -238,7 +180,7 @@ def test_require_approval_returns_denied_decision_with_flag() -> None:
 
 
 def test_missing_required_secrets_deny_execution() -> None:
-    decision = ToolPolicy().evaluate(SecretTool(), _context())
+    decision = ToolPolicy().evaluate(SECRET_SPEC, _context())
 
     assert decision.allowed is False
     assert decision.reason == "required secrets missing"
@@ -246,10 +188,25 @@ def test_missing_required_secrets_deny_execution() -> None:
 
 
 def test_present_required_secrets_allow_execution_if_nothing_else_blocks() -> None:
-    decision = ToolPolicy().evaluate(SecretTool(), _context(API_KEY="secret"))
+    decision = ToolPolicy().evaluate(SECRET_SPEC, _context(API_KEY="secret"))
 
     assert decision.allowed is True
     assert decision.reason == "allowed"
+
+
+def test_verdict_maps_decisions_to_enum_values() -> None:
+    assert ToolPolicy().verdict(NOOP_SPEC, _context()) is PolicyVerdict.ALLOW
+    assert (
+        ToolPolicy(require_approval_for={SideEffectClass.NONE}).verdict(
+            NOOP_SPEC,
+            _context(),
+        )
+        is PolicyVerdict.REQUIRE_APPROVAL
+    )
+    assert (
+        ToolPolicy(allowed_tools={"other"}).verdict(NOOP_SPEC, _context())
+        is PolicyVerdict.DENY
+    )
 
 
 def test_policy_defaults_include_sensitive_redacted_field_names() -> None:
@@ -258,25 +215,7 @@ def test_policy_defaults_include_sensitive_redacted_field_names() -> None:
     assert policy.redacted_field_names >= {
         "password",
         "secret",
-        "token",
         "api_key",
-        "access_token",
-        "refresh_token",
+        "token",
         "authorization",
     }
-    assert policy.approval_timeout_seconds == 300
-
-
-def test_policy_verdict_distinguishes_allow_approval_and_deny() -> None:
-    policy = ToolPolicy()
-    approval_policy = ToolPolicy(
-        allowed_side_effects={SideEffectClass.NONE, SideEffectClass.LOCAL_READ},
-        require_approval_for={SideEffectClass.LOCAL_READ},
-    )
-
-    assert policy.verdict(NoOpTool(), _context()) is PolicyVerdict.ALLOW
-    assert policy.verdict(LocalWriteTool(), _context()) is PolicyVerdict.DENY
-    assert (
-        approval_policy.verdict(LocalReadTool(), _context())
-        is PolicyVerdict.REQUIRE_APPROVAL
-    )

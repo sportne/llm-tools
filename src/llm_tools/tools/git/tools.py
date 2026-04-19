@@ -2,33 +2,36 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 from llm_tools.tool_api import (
     SideEffectClass,
+    SubprocessBroker,
     Tool,
-    ToolContext,
+    ToolExecutionContext,
     ToolRegistry,
     ToolSpec,
 )
-from llm_tools.tools._path_utils import resolve_workspace_path
 
 
-def _run_git_command(root: Path, args: list[str]) -> str:
-    completed = subprocess.run(
+def _run_git_command(
+    broker: SubprocessBroker,
+    root: Path,
+    args: list[str],
+    *,
+    timeout_seconds: int | None,
+) -> str:
+    completed = broker.run(
         ["git", *args],
         cwd=root,
-        capture_output=True,
-        text=True,
-        check=False,
+        timeout_seconds=timeout_seconds,
     )
     if completed.returncode != 0:
         message = completed.stderr.strip() or completed.stdout.strip() or "git failed"
         raise RuntimeError(message)
-    return completed.stdout
+    return str(completed.stdout)
 
 
 class GitCommandInput(BaseModel):
@@ -57,15 +60,25 @@ class RunGitStatusTool(Tool[GitCommandInput, RunGitStatusOutput]):
     input_model = GitCommandInput
     output_model = RunGitStatusOutput
 
-    def invoke(self, context: ToolContext, args: GitCommandInput) -> RunGitStatusOutput:
-        root = resolve_workspace_path(
-            context,
+    def _invoke_impl(
+        self,
+        context: ToolExecutionContext,
+        args: GitCommandInput,
+    ) -> RunGitStatusOutput:
+        filesystem = context.services.require_filesystem()
+        subprocess_broker = context.services.require_subprocess()
+        root = filesystem.resolve_path(
             args.path,
             expect_directory=True,
             must_exist=True,
         )
-        status_text = _run_git_command(root, ["status", "--short", "--branch"])
-        context.logs.append(f"Ran git status in '{root}'.")
+        status_text = _run_git_command(
+            subprocess_broker,
+            root,
+            ["status", "--short", "--branch"],
+            timeout_seconds=self.spec.timeout_seconds,
+        )
+        context.log(f"Ran git status in '{root}'.")
         return RunGitStatusOutput(resolved_root=str(root), status_text=status_text)
 
 
@@ -92,9 +105,14 @@ class RunGitDiffTool(Tool[RunGitDiffInput, RunGitDiffOutput]):
     input_model = RunGitDiffInput
     output_model = RunGitDiffOutput
 
-    def invoke(self, context: ToolContext, args: RunGitDiffInput) -> RunGitDiffOutput:
-        root = resolve_workspace_path(
-            context,
+    def _invoke_impl(
+        self,
+        context: ToolExecutionContext,
+        args: RunGitDiffInput,
+    ) -> RunGitDiffOutput:
+        filesystem = context.services.require_filesystem()
+        subprocess_broker = context.services.require_subprocess()
+        root = filesystem.resolve_path(
             args.path,
             expect_directory=True,
             must_exist=True,
@@ -104,8 +122,13 @@ class RunGitDiffTool(Tool[RunGitDiffInput, RunGitDiffOutput]):
             command.append("--staged")
         if args.ref is not None:
             command.append(args.ref)
-        diff_text = _run_git_command(root, command)
-        context.logs.append(f"Ran git diff in '{root}'.")
+        diff_text = _run_git_command(
+            subprocess_broker,
+            root,
+            command,
+            timeout_seconds=self.spec.timeout_seconds,
+        )
+        context.log(f"Ran git diff in '{root}'.")
         return RunGitDiffOutput(resolved_root=str(root), diff_text=diff_text)
 
 
@@ -131,18 +154,25 @@ class RunGitLogTool(Tool[RunGitLogInput, RunGitLogOutput]):
     input_model = RunGitLogInput
     output_model = RunGitLogOutput
 
-    def invoke(self, context: ToolContext, args: RunGitLogInput) -> RunGitLogOutput:
-        root = resolve_workspace_path(
-            context,
+    def _invoke_impl(
+        self,
+        context: ToolExecutionContext,
+        args: RunGitLogInput,
+    ) -> RunGitLogOutput:
+        filesystem = context.services.require_filesystem()
+        subprocess_broker = context.services.require_subprocess()
+        root = filesystem.resolve_path(
             args.path,
             expect_directory=True,
             must_exist=True,
         )
         log_text = _run_git_command(
+            subprocess_broker,
             root,
             ["log", "--max-count", str(args.limit), "--oneline", "--decorate"],
+            timeout_seconds=self.spec.timeout_seconds,
         )
-        context.logs.append(f"Ran git log in '{root}'.")
+        context.log(f"Ran git log in '{root}'.")
         return RunGitLogOutput(resolved_root=str(root), log_text=log_text)
 
 

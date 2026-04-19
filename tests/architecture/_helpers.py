@@ -149,7 +149,7 @@ def build_builtin_registry() -> Any:
 
 def builtin_tools() -> list[Any]:
     """Return all built-in tools registered by the repository helpers."""
-    return build_builtin_registry().list_registered_tools()
+    return list(build_builtin_registry()._iter_registered_tools())
 
 
 def builtin_runtime(

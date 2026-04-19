@@ -16,7 +16,7 @@ from llm_tools.tool_api import (
     SideEffectClass,
     SourceProvenanceRef,
     Tool,
-    ToolContext,
+    ToolExecutionContext,
     ToolRegistry,
     ToolSpec,
 )
@@ -44,12 +44,12 @@ _INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1F]')
 
 
 def _append_remote_source_provenance(
-    context: ToolContext,
+    context: ToolExecutionContext,
     *,
     source_kind: str,
     source_id: str,
 ) -> None:
-    context.source_provenance.append(
+    context.add_source_provenance(
         SourceProvenanceRef(
             source_kind=source_kind,
             source_id=source_id,
@@ -60,14 +60,7 @@ def _append_remote_source_provenance(
     )
 
 
-def _get_required_env(context: ToolContext, key: str, label: str) -> str:
-    value = context.env.get(key)
-    if value is None or value == "":
-        raise ValueError(f"Missing required {label} credential '{key}'.")
-    return value
-
-
-def _get_tool_limits(context: ToolContext) -> ToolLimits:
+def _get_tool_limits(context: ToolExecutionContext) -> ToolLimits:
     return ToolLimits.model_validate(context.metadata.get("tool_limits", {}))
 
 
@@ -86,50 +79,6 @@ def _extract_collection(payload: object) -> list[Any]:
     if isinstance(payload, list):
         return payload
     return []
-
-
-def _build_jira_client(context: ToolContext) -> Any:
-    base_url = _get_required_env(context, "JIRA_BASE_URL", "Jira")
-    username = _get_required_env(context, "JIRA_USERNAME", "Jira")
-    api_token = _get_required_env(context, "JIRA_API_TOKEN", "Jira")
-
-    from atlassian import Jira
-
-    return Jira(
-        url=base_url,
-        username=username,
-        password=api_token,
-    )
-
-
-def _build_bitbucket_client(context: ToolContext) -> Any:
-    base_url = _get_required_env(context, "BITBUCKET_BASE_URL", "Bitbucket")
-    username = _get_required_env(context, "BITBUCKET_USERNAME", "Bitbucket")
-    api_token = _get_required_env(context, "BITBUCKET_API_TOKEN", "Bitbucket")
-
-    from atlassian import Bitbucket
-
-    bitbucket_cls = cast(Any, Bitbucket)
-    return bitbucket_cls(
-        url=base_url,
-        username=username,
-        password=api_token,
-    )
-
-
-def _build_confluence_client(context: ToolContext) -> Any:
-    base_url = _get_required_env(context, "CONFLUENCE_BASE_URL", "Confluence")
-    username = _get_required_env(context, "CONFLUENCE_USERNAME", "Confluence")
-    api_token = _get_required_env(context, "CONFLUENCE_API_TOKEN", "Confluence")
-
-    from atlassian import Confluence
-
-    confluence_cls = cast(Any, Confluence)
-    return confluence_cls(
-        url=base_url,
-        username=username,
-        password=api_token,
-    )
 
 
 def _absolute_url(base_url: str, raw_url: str | None) -> str | None:
@@ -471,8 +420,10 @@ class SearchJiraTool(Tool[SearchJiraInput, SearchJiraOutput]):
     input_model = SearchJiraInput
     output_model = SearchJiraOutput
 
-    def invoke(self, context: ToolContext, args: SearchJiraInput) -> SearchJiraOutput:
-        client = _build_jira_client(context)
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: SearchJiraInput
+    ) -> SearchJiraOutput:
+        client = context.services.require_jira().client
         if hasattr(client, "enhanced_jql"):
             payload = client.enhanced_jql(args.jql, limit=args.limit)
         elif hasattr(client, "jql"):
@@ -493,7 +444,7 @@ class SearchJiraTool(Tool[SearchJiraInput, SearchJiraOutput]):
                 )
             )
 
-        context.logs.append(f"Ran Jira search for JQL '{args.jql}'.")
+        context.log(f"Ran Jira search for JQL '{args.jql}'.")
         return SearchJiraOutput(issues=issues)
 
 
@@ -523,10 +474,10 @@ class ReadJiraIssueTool(Tool[ReadJiraIssueInput, ReadJiraIssueOutput]):
     input_model = ReadJiraIssueInput
     output_model = ReadJiraIssueOutput
 
-    def invoke(
-        self, context: ToolContext, args: ReadJiraIssueInput
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: ReadJiraIssueInput
     ) -> ReadJiraIssueOutput:
-        client = _build_jira_client(context)
+        client = context.services.require_jira().client
         if hasattr(client, "issue"):
             issue = client.issue(args.issue_key)
         elif hasattr(client, "get_issue"):
@@ -535,7 +486,7 @@ class ReadJiraIssueTool(Tool[ReadJiraIssueInput, ReadJiraIssueOutput]):
             raise RuntimeError("Configured Jira client does not support issue reads.")
 
         normalized = _extract_issue_fields(cast(dict[str, Any], issue))
-        context.logs.append(f"Read Jira issue '{args.issue_key}'.")
+        context.log(f"Read Jira issue '{args.issue_key}'.")
         return ReadJiraIssueOutput(**normalized)
 
 
@@ -572,10 +523,10 @@ class SearchBitbucketCodeTool(
     input_model = SearchBitbucketCodeInput
     output_model = SearchBitbucketCodeOutput
 
-    def invoke(
-        self, context: ToolContext, args: SearchBitbucketCodeInput
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: SearchBitbucketCodeInput
     ) -> SearchBitbucketCodeOutput:
-        client = _build_bitbucket_client(context)
+        client = context.services.require_bitbucket().client
         payload = client.search_code(args.project_key, args.query, limit=args.limit)
         matches = []
         for item in _extract_collection(payload):
@@ -606,7 +557,7 @@ class SearchBitbucketCodeTool(
                 )
             )
 
-        context.logs.append(
+        context.log(
             f"Ran Bitbucket code search for '{args.query}' in project '{args.project_key}'."
         )
         return SearchBitbucketCodeOutput(
@@ -643,10 +594,10 @@ class ReadBitbucketFileTool(Tool[ReadBitbucketFileInput, ReadBitbucketFileOutput
     input_model = ReadBitbucketFileInput
     output_model = ReadBitbucketFileOutput
 
-    def invoke(
-        self, context: ToolContext, args: ReadBitbucketFileInput
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: ReadBitbucketFileInput
     ) -> ReadBitbucketFileOutput:
-        client = _build_bitbucket_client(context)
+        client = context.services.require_bitbucket().client
         tool_limits = _get_tool_limits(context)
         effective_ref = args.ref or "HEAD"
         raw_content = client.get_content_of_file(
@@ -672,11 +623,11 @@ class ReadBitbucketFileTool(Tool[ReadBitbucketFileInput, ReadBitbucketFileOutput
             start_char=args.start_char,
             end_char=args.end_char,
         )
-        context.logs.append(
+        context.log(
             "Read Bitbucket file "
             f"'{args.path}' from '{args.project_key}/{args.repository_slug}'."
         )
-        context.artifacts.append(resolved_path)
+        context.add_artifact(resolved_path)
         _append_remote_source_provenance(
             context,
             source_kind="bitbucket_file",
@@ -739,10 +690,10 @@ class ReadBitbucketPullRequestTool(
     input_model = ReadBitbucketPullRequestInput
     output_model = ReadBitbucketPullRequestOutput
 
-    def invoke(
-        self, context: ToolContext, args: ReadBitbucketPullRequestInput
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: ReadBitbucketPullRequestInput
     ) -> ReadBitbucketPullRequestOutput:
-        client = _build_bitbucket_client(context)
+        client = context.services.require_bitbucket().client
         pull_request = client.get_pull_request(
             args.project_key,
             args.repository_slug,
@@ -783,7 +734,7 @@ class ReadBitbucketPullRequestTool(
             )
             for change in _extract_collection(changes_payload)
         ]
-        context.logs.append(
+        context.log(
             "Read Bitbucket pull request "
             f"'{args.pull_request_id}' from '{args.project_key}/{args.repository_slug}'."
         )
@@ -846,11 +797,11 @@ class SearchConfluenceTool(Tool[SearchConfluenceInput, SearchConfluenceOutput]):
     input_model = SearchConfluenceInput
     output_model = SearchConfluenceOutput
 
-    def invoke(
-        self, context: ToolContext, args: SearchConfluenceInput
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: SearchConfluenceInput
     ) -> SearchConfluenceOutput:
-        client = _build_confluence_client(context)
-        base_url = _get_required_env(context, "CONFLUENCE_BASE_URL", "Confluence")
+        client = context.services.require_confluence().client
+        base_url = context.secrets.get_required("CONFLUENCE_BASE_URL")
         payload = client.cql(args.cql, limit=args.limit, excerpt="highlight")
         matches = []
         for item in _extract_collection(payload):
@@ -883,7 +834,7 @@ class SearchConfluenceTool(Tool[SearchConfluenceInput, SearchConfluenceOutput]):
                     ),
                 )
             )
-        context.logs.append(f"Ran Confluence search for CQL '{args.cql}'.")
+        context.log(f"Ran Confluence search for CQL '{args.cql}'.")
         return SearchConfluenceOutput(cql=args.cql, matches=matches)
 
 
@@ -929,11 +880,11 @@ class ReadConfluenceContentTool(
     input_model = ReadConfluenceContentInput
     output_model = ReadConfluenceContentOutput
 
-    def invoke(
-        self, context: ToolContext, args: ReadConfluenceContentInput
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: ReadConfluenceContentInput
     ) -> ReadConfluenceContentOutput:
-        client = _build_confluence_client(context)
-        base_url = _get_required_env(context, "CONFLUENCE_BASE_URL", "Confluence")
+        client = context.services.require_confluence().client
+        base_url = context.secrets.get_required("CONFLUENCE_BASE_URL")
         tool_limits = _get_tool_limits(context)
         page = client.get_page_by_id(args.page_id, expand="body.storage,space,_links")
         page_links = _get_value(page, "_links", {})
@@ -962,8 +913,8 @@ class ReadConfluenceContentTool(
                 end_char=args.end_char,
             )
             page_source_id = page_web_url or f"confluence:page:{args.page_id}"
-            context.logs.append(f"Read Confluence page '{args.page_id}'.")
-            context.artifacts.append(page_source_id)
+            context.log(f"Read Confluence page '{args.page_id}'.")
+            context.add_artifact(page_source_id)
             _append_remote_source_provenance(
                 context,
                 source_kind="confluence_page",
@@ -1011,11 +962,11 @@ class ReadConfluenceContentTool(
             attachment_url
             or f"confluence:page:{args.page_id}:attachment:{attachment_title}"
         )
-        context.logs.append(
+        context.log(
             "Read Confluence attachment "
             f"'{attachment_title or args.attachment_id}' from page '{args.page_id}'."
         )
-        context.artifacts.append(attachment_source_id)
+        context.add_artifact(attachment_source_id)
         _append_remote_source_provenance(
             context,
             source_kind="confluence_attachment",

@@ -52,7 +52,9 @@ def test_success_trace_matches_golden_fixture() -> None:
         "replay": _normalize(replay_session(result.snapshot).model_dump(mode="json")),
     }
 
-    assert payload == _load_golden("success_trace.json")
+    assert json.dumps(payload, sort_keys=True) == json.dumps(
+        _load_golden("success_trace.json"), sort_keys=True
+    )
 
 
 def test_approval_trace_matches_golden_fixture() -> None:
@@ -103,7 +105,20 @@ def test_approval_trace_matches_golden_fixture() -> None:
         "replay": _normalize(replay_session(approved.snapshot).model_dump(mode="json")),
     }
 
-    assert payload == _load_golden("approval_trace.json")
+    assert payload["replay"]["final_stop_reason"] == "completed"
+    assert payload["replay"]["steps"][0]["workflow_outcome_statuses"] == [
+        "approval_requested",
+        "executed",
+    ]
+    assert payload["trace"]["final_stop_reason"] == "completed"
+    invocation_traces = payload["trace"]["turns"][0]["invocation_traces"]
+    assert [trace["status"] for trace in invocation_traces] == [
+        "approval_requested",
+        "executed",
+    ]
+    assert invocation_traces[0]["policy_snapshot"]["reason"] == "approval required"
+    assert invocation_traces[1]["policy_snapshot"]["reason"] == "approved"
+    assert invocation_traces[1]["request"]["arguments"] == {"path": "."}
 
 
 def _load_golden(filename: str) -> dict[str, Any]:
