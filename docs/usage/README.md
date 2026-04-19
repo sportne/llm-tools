@@ -10,6 +10,7 @@ These guides explain how to use the implemented public APIs in `llm-tools`.
 - [Harness Sessions](harness-sessions.md)
 - [Textual Chat](textual-chat.md)
 - [Streamlit Chat](streamlit-chat.md)
+- [Streamlit Assistant](streamlit-assistant.md)
 - [Workbench](workbench.md)
 
 For runnable end-to-end samples, see the [examples directory](../../examples/README.md).
