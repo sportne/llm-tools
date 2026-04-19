@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from llm_tools.apps.chat_runtime import build_chat_executor
 from llm_tools.harness_api import (
     ApprovalResolution,
@@ -14,12 +16,19 @@ from llm_tools.harness_api import (
     HarnessSessionResumeRequest,
     HarnessSessionRunRequest,
     HarnessSessionService,
+    HarnessSessionTrace,
+    HarnessStopReason,
+    HarnessTurn,
+    HarnessTurnTrace,
     InMemoryHarnessStateStore,
     ScriptedParsedResponseProvider,
+    TurnDecisionAction,
     replay_session,
 )
+from llm_tools.harness_api.replay import build_turn_trace
 from llm_tools.llm_adapters import ParsedModelResponse
-from llm_tools.tool_api import SideEffectClass, ToolPolicy
+from llm_tools.tool_api import SideEffectClass, ToolInvocationRequest, ToolPolicy
+from llm_tools.workflow_api import ApprovalRequest, WorkflowInvocationStatus
 
 _GOLDEN_DIR = Path(__file__).with_name("golden")
 
@@ -118,7 +127,12 @@ def test_approval_trace_matches_golden_fixture() -> None:
     ]
     assert invocation_traces[0]["policy_snapshot"]["reason"] == "approval required"
     assert invocation_traces[1]["policy_snapshot"]["reason"] == "approved"
-    assert invocation_traces[1]["request"]["arguments"] == {"path": "."}
+    assert invocation_traces[0]["redacted_arguments"] == {}
+    assert invocation_traces[1]["redacted_arguments"] == {
+        "path": ".",
+        "recursive": False,
+        "max_depth": None,
+    }
 
 
 def _load_golden(filename: str) -> dict[str, Any]:
@@ -147,3 +161,71 @@ def _normalize(value: Any) -> Any:
     if isinstance(value, list):
         return [_normalize(item) for item in value]
     return value
+
+
+def test_turn_trace_validators_reject_invalid_shapes() -> None:
+    with pytest.raises(ValueError, match="selected_task_ids must be unique"):
+        HarnessTurnTrace(
+            turn_index=1,
+            started_at="2026-01-01T00:00:00Z",
+            selected_task_ids=["task-1", "task-1"],
+        )
+
+    with pytest.raises(ValueError, match="decision_stop_reason is only allowed"):
+        HarnessTurnTrace(
+            turn_index=1,
+            started_at="2026-01-01T00:00:00Z",
+            selected_task_ids=["task-1"],
+            decision_action=TurnDecisionAction.CONTINUE,
+            decision_stop_reason=HarnessStopReason.ERROR,
+        )
+
+
+def test_session_trace_validators_reject_duplicate_turn_indices() -> None:
+    turn = HarnessTurnTrace(
+        turn_index=1,
+        started_at="2026-01-01T00:00:00Z",
+        selected_task_ids=["task-1"],
+    )
+
+    with pytest.raises(ValueError, match="unique ascending indices"):
+        HarnessSessionTrace(session_id="session-1", turns=[turn, turn])
+
+
+def test_build_turn_trace_preserves_pending_approval_without_workflow_result() -> None:
+    turn = HarnessTurn(
+        turn_index=1,
+        started_at="2026-01-01T00:00:00Z",
+        selected_task_ids=["task-1"],
+        pending_approval_request=ApprovalRequest(
+            approval_id="approval-1",
+            invocation_index=1,
+            request=ToolInvocationRequest(
+                tool_name="list_directory",
+                arguments={"path": "."},
+            ),
+            tool_name="list_directory",
+            tool_version="0.1.0",
+            policy_reason="approval required",
+            requested_at="2026-01-01T00:00:00Z",
+            expires_at="2026-01-01T01:00:00Z",
+        ),
+    )
+
+    trace = build_turn_trace(
+        turn=turn,
+        context=None,
+        tasks_state=None,
+    )
+
+    assert turn.pending_approval_request is not None
+    assert "request" not in turn.pending_approval_request.model_dump(mode="json")
+    assert trace.pending_approval_id == "approval-1"
+    assert trace.workflow_outcome_statuses == [
+        WorkflowInvocationStatus.APPROVAL_REQUESTED
+    ]
+    assert len(trace.invocation_traces) == 1
+    assert (
+        trace.invocation_traces[0].status is WorkflowInvocationStatus.APPROVAL_REQUESTED
+    )
+    assert trace.invocation_traces[0].redacted_arguments == {}

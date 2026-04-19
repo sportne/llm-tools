@@ -3,9 +3,10 @@
 ## Purpose
 
 `harness_api` is the repository's durable orchestration layer above the
-one-turn workflow primitive.
+one-turn workflow primitive in `workflow_api`.
 
-It exists to support longer-running research/workflow execution that must be:
+It exists to support longer-running research and workflow execution that must
+be:
 
 - persisted
 - resumable
@@ -19,19 +20,20 @@ workflows and future definable-agent capabilities.
 ## Truth resolution
 
 This document describes the implemented `harness_api` surface. If it diverges
-from code or tests, the docs should be updated to match the actual public API.
+from code or tests, update the docs to match the actual public API and current
+behavior.
 
 ## What `harness_api` owns
 
-`harness_api` owns durable, session-level concerns that should not be pushed
-into the base tool runtime or into the one-turn workflow primitive.
+`harness_api` owns session-level concerns that should not be pushed into the
+base tool runtime or into the one-turn workflow primitive.
 
 That includes:
 
 - persisted `HarnessState`, `HarnessTurn`, and related durable models
 - state stores and schema-version handling
 - resume classification for stored sessions
-- replay traces and session summaries
+- replay traces and operator summaries
 - task lifecycle state transitions
 - deterministic planning and replanning triggers
 - verification contracts and no-progress signals
@@ -46,128 +48,188 @@ The supported public `harness_api` surface is centered on:
 - `HarnessExecutor`
 - `HarnessSessionService`
 - request/result models for session operations
-- default driver/applier/provider protocols used by the built-in service path
+- default driver, applier, and provider protocols used by the built-in service
+  path
 
 The live public session API is service-based, not free functions. The key entry
-point is `HarnessSessionService`, which exposes operations such as:
+point is `HarnessSessionService`, which exposes typed create, run, resume,
+inspect, list, and stop operations.
 
-- `create_session(...)`
-- `run_session(...)`
-- `run_session_async(...)`
-- `resume_session(...)`
-- `resume_session_async(...)`
-- `inspect_session(...)`
-- `list_sessions(...)`
-- `stop_session(...)`
+The package keeps its public package boundaries stable even though the
+implementation is now split into narrower modules:
 
-The harness CLI is a thin product surface over this service.
+- `executor.py` is a thin public facade over execution internals
+- `session.py` is a thin public facade over session-service and default-driver
+  internals
+- lower-level implementation details live in modules such as
+  `executor_loop.py`, `executor_approvals.py`, `session_service.py`, and
+  `defaults.py`
 
-## Module map
+## Canonical models
 
-### `models.py`
+`harness_api.models` defines the canonical persisted contracts for durable
+session execution, including:
 
-Canonical durable state for sessions, turns, tasks, approvals, budgets, and
-verification outcomes.
+- `BudgetPolicy`
+- `HarnessSession`
+- `HarnessState`
+- `HarnessTurn`
+- `PendingApprovalRecord`
+- `TurnApprovalAuditRecord`
+- `TaskRecord`
+- `TurnDecision`
+- task, stop-reason, and verification enums
 
-### `store.py`
+These contracts are intentionally not UI-shaped. They do not store chat
+transcripts, prompt text, provider payloads, or presentation-specific state.
+They are the durable source of truth from which projections, summaries, and
+replay views are derived.
 
-Serialization, schema-version checks, stored snapshot contracts, and concrete
-store implementations such as `FileHarnessStateStore`.
+`HarnessTurn` may embed `workflow_api.WorkflowTurnResult` directly. This keeps
+one-turn execution semantics canonical in `workflow_api` while allowing the
+harness to persist exact per-turn execution results without reshaping them.
 
-### `resume.py`
+## Persistence and versioning
 
-Classification of stored snapshots into resumable, waiting-for-approval,
-terminal, corrupt, or incompatible states.
+Harness persistence treats `HarnessState` as the canonical serialized record for
+durable session storage, replay, and resume.
 
-### `replay.py`
+The persistence contract is:
 
-Replay artifacts, traces, summaries, and session-inspection helpers.
+- persist `HarnessState` as structured data using Pydantic serialization
+- keep store metadata such as revisions outside `HarnessState`
+- require explicit `schema_version` on persisted records
+- gate unsupported versions through the store/resume layer
+- preserve embedded `WorkflowTurnResult` payloads as part of canonical turn
+  history
+- derive prompt context, summaries, and operator views from canonical state
+  instead of storing them as the primary record
 
-### `tasks.py`
+`harness_api.store` provides:
 
-Deterministic task lifecycle transitions.
+- `HarnessStateStore`
+- `StoredHarnessState`
+- `InMemoryHarnessStateStore`
+- `FileHarnessStateStore`
+- schema-version constants and validation helpers
+- typed corruption and optimistic-concurrency errors
 
-### `planning.py`
+Malformed file-backed session records are treated as corruption rather than
+partially trusted state.
 
-Minimal planning/replanning abstractions used by the default harness driver.
+## Resume and approval durability
 
-### `verification.py`
+`harness_api.resume` classifies persisted snapshots before the multi-turn
+executor continues work.
 
-Verification expectations, evidence, outcomes, timing, and no-progress signals.
+`ResumeDisposition` includes:
 
-### `context.py`
+- `runnable`
+- `waiting_for_approval`
+- `approval_expired`
+- `terminal`
+- `incompatible_schema`
+- `corrupt`
 
-Projection of durable harness state into lower-level `ToolContext` metadata.
+Pending approval snapshots persist exactly one incomplete tail turn plus one
+matching `PendingApprovalRecord`.
 
-### `executor.py`
+Newly written pending-approval records preserve only a scrubbed base context:
 
-Durable run loop coordinating the store, the driver, one-turn workflow
-execution, approval persistence/resumption, and stop conditions.
+- preserved: `invocation_id`, `workspace`, and `metadata`
+- cleared before persistence: process env, logs, artifacts, and source
+  provenance
+- rebuilt on resume: execution context derived from the stored base context plus
+  the current process environment
 
-### `session.py`
+Pending approval turns also persist `TurnApprovalAuditRecord`, which keeps only
+minimal approval metadata needed for replay and inspection. This avoids storing
+raw request payloads on the durable turn history surface.
 
-Public session service plus built-in default driver, scripted provider, and
-turn-applier helpers.
+Approval denial, expiration, and operator cancel are fail-closed: the blocked
+invocation is recorded, but later invocations from the same paused model turn do
+not continue running.
 
-## Boundary with `workflow_api`
+## Durable executor contract
 
-The cleanest current seam is the handoff through `WorkflowTurnResult`.
+`HarnessExecutor` owns the durable multi-turn control loop above
+`workflow_api`.
 
-- `workflow_api` owns one parsed model turn and returns `WorkflowTurnResult`
-- `harness_api` persists that result inside `HarnessTurn` / `HarnessState`
-- `harness_api` decides whether the session should continue, stop, wait for
-  approval, or be resumed later
+It is responsible for:
 
-This dependency direction is correct and is enforced by the architecture tests:
-`workflow_api` must not depend on `harness_api`.
+- storing the starting snapshot
+- loading and classifying persisted sessions on resume
+- selecting task ids through the configured driver
+- building turn context through the configured driver
+- running one parsed model response through `WorkflowExecutor`
+- persisting approval waits as durable incomplete turns
+- applying completed turns through the configured applier
+- enforcing retry budgets and stop conditions
+- persisting the next canonical snapshot plus derived artifacts
 
-### What remains in `workflow_api`
+`workflow_api` remains the one-turn bridge. `harness_api` does not push durable
+session state, task lifecycle logic, or resume semantics down into the workflow
+layer.
 
-The repo still keeps some assistant-oriented in-memory session behavior in
-`workflow_api`, including chat-session and protection helpers. That means the
-semantic boundary is blurrier than the import graph alone suggests.
+## Default service path
 
-For current purposes, the rule is:
+The built-in service path composes:
 
-- use `workflow_api` for one-turn execution and assistant chat/protection
-  helpers
-- use `harness_api` for durable orchestration and persisted research/workflow
-  state
+- `HarnessSessionService`
+- `DefaultHarnessTurnDriver`
+- `MinimalHarnessTurnApplier`
+- `ScriptedParsedResponseProvider` for deterministic tests and scripts
 
-## Boundary with `apps`
+These defaults are intentionally narrow. They support root-task sessions,
+basic planning/context projection, durable approval handling, and replayable
+session traces without forcing applications to adopt a larger agent runtime.
 
-Applications may compose `harness_api`, but `harness_api` itself must not depend
-on `apps`.
+## Replay and summaries
 
-Current app consumers are:
+`harness_api.replay` defines the derived observability and replay surface:
 
-- `llm_tools.apps.harness_cli`
-- `llm_tools.apps.streamlit_assistant` research-session features
+- `HarnessInvocationTrace`
+- `HarnessTurnTrace`
+- `HarnessSessionTrace`
+- `HarnessSessionSummary`
+- `HarnessReplayResult`
+- `StoredHarnessArtifacts`
 
-App presentation state, Streamlit widgets, and assistant transcript UX belong in
-`apps`, not in `harness_api`.
+Stored artifacts are cache-only derived views. Canonical `HarnessState` remains
+authoritative for inspect, list, replay, and resume.
 
-## Current strengths
+Public inspect/list flows rebuild trusted artifacts from canonical state through
+`build_canonical_artifacts(...)` rather than trusting stale or tampered stored
+summary or trace payloads.
 
-The strongest aspects of the current harness design are:
+Per-turn trace data may include:
 
-- explicit durable contracts
-- clear persistence and resume modeling
-- replay and summary support
-- no dependency from lower layers back into harness
-- a real public session API used by both tests and product entrypoints
+- workflow outcome statuses
+- redacted policy metadata
+- approval ids and minimal approval metadata
+- decision summaries and stop reasons
+- per-turn verification-status snapshots for selected tasks
 
-## Current cleanup targets
+Persisted trace payloads should stay minimal and must not be treated as the
+canonical store of raw request arguments, environment state, or other
+unredacted execution payloads.
 
-The main issues in the current harness layer are concentration, not direction.
+## Dependency direction
 
-Primary cleanup targets are:
+`harness_api` sits above the lower layers and may depend on:
 
-- `executor.py`, which combines too many run-loop concerns in one file
-- `session.py`, which bundles public service APIs together with default driver
-  and applier implementations
-- clearer documentation of how approval waiting is divided between workflow and
-  harness layers
+- `tool_api`
+- `llm_adapters`
+- `llm_providers`
+- `workflow_api`
 
-These are refactor targets. They are not evidence that the durable harness
-surface should be removed.
+The reverse direction is forbidden. In particular:
+
+- `tool_api` must not depend on `harness_api`
+- `llm_adapters` must not depend on `harness_api`
+- `llm_providers` must not depend on `harness_api`
+- `tools` must not depend on `harness_api`
+- `workflow_api` must not depend on `harness_api`
+
+Applications may compose `harness_api` with other layers, but the harness must
+remain a library layer rather than an application dependency sink.

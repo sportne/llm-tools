@@ -12,9 +12,10 @@ from llm_tools.harness_api.models import (
     HarnessStopReason,
     HarnessTurn,
     TaskLifecycleStatus,
+    TurnApprovalAuditRecord,
     TurnDecisionAction,
 )
-from llm_tools.tool_api import ErrorCode, ToolContext, ToolInvocationRequest
+from llm_tools.tool_api import ErrorCode, ToolContext
 from llm_tools.workflow_api import (
     ApprovalRequest,
     WorkflowInvocationOutcome,
@@ -48,10 +49,10 @@ class HarnessInvocationTrace(BaseModel):
 
     invocation_index: int = Field(ge=1)
     invocation_id: str | None = None
-    request: ToolInvocationRequest
     status: WorkflowInvocationStatus
     tool_name: str = Field(min_length=1)
     tool_version: str | None = None
+    redacted_arguments: dict[str, object] = Field(default_factory=dict)
     policy_snapshot: HarnessPolicySnapshot | None = None
     ok: bool | None = None
     error_code: ErrorCode | None = None
@@ -159,6 +160,32 @@ class StoredHarnessArtifacts(BaseModel):
     summary: HarnessSessionSummary | None = None
 
 
+def build_session_trace(state: HarnessState) -> HarnessSessionTrace | None:
+    """Rebuild a trusted trace view directly from canonical harness state."""
+    if not state.turns:
+        return None
+
+    return HarnessSessionTrace(
+        session_id=state.session.session_id,
+        turns=[
+            build_turn_trace(
+                turn=turn,
+                context=None,
+                tasks_state=None,
+            )
+            for turn in state.turns
+        ],
+        final_stop_reason=state.session.stop_reason,
+    )
+
+
+def build_canonical_artifacts(state: HarnessState) -> StoredHarnessArtifacts:
+    """Rebuild trusted stored artifacts directly from canonical state."""
+    trace = build_session_trace(state)
+    summary = build_session_summary(state, trace=trace)
+    return StoredHarnessArtifacts(trace=trace, summary=summary)
+
+
 def build_session_summary(
     state: HarnessState,
     *,
@@ -261,7 +288,7 @@ def build_turn_trace(
     *,
     turn: HarnessTurn,
     context: ToolContext | None,
-    tasks_state: HarnessState,
+    tasks_state: HarnessState | None,
 ) -> HarnessTurnTrace:
     """Build one structured trace record for a persisted harness turn."""
     context_projection = None
@@ -284,29 +311,11 @@ def build_turn_trace(
                     str(trigger) for trigger in trigger_payload if str(trigger).strip()
                 ]
 
-    workflow_result = turn.workflow_result
-    invocation_traces = (
-        []
-        if workflow_result is None
-        else [_build_invocation_trace(outcome) for outcome in workflow_result.outcomes]
-    )
-    workflow_statuses = (
-        []
-        if workflow_result is None
-        else [outcome.status for outcome in workflow_result.outcomes]
-    )
-    pending_approval_id = None
-    if workflow_result is not None and workflow_result.outcomes:
-        approval_request = workflow_result.outcomes[-1].approval_request
-        if approval_request is not None:
-            pending_approval_id = approval_request.approval_id
+    invocation_traces = _canonical_invocation_traces(turn)
+    workflow_statuses = _canonical_workflow_outcome_statuses(turn)
+    pending_approval_id = _canonical_pending_approval_id(turn)
 
-    selected_task_ids = set(turn.selected_task_ids)
-    verification_status_by_task_id = {
-        task.task_id: task.verification.status.value
-        for task in tasks_state.tasks
-        if task.task_id in selected_task_ids
-    }
+    verification_status_by_task_id = dict(turn.verification_status_by_task_id)
     decision = turn.decision
     return HarnessTurnTrace(
         turn_index=turn.turn_index,
@@ -353,48 +362,103 @@ def build_stored_artifacts(
 
 
 def replay_session(snapshot: StoredHarnessState) -> HarnessReplayResult:
-    """Reconstruct a deterministic replay view from persisted state and traces."""
-    limitations: list[str] = []
-    trace = snapshot.artifacts.trace
-    if trace is None:
-        limitations.append("No stored harness trace was available; replay used turns.")
-        steps = [
-            HarnessReplayStep(
-                turn_index=turn.turn_index,
-                selected_task_ids=list(turn.selected_task_ids),
-                workflow_outcome_statuses=(
-                    []
-                    if turn.workflow_result is None
-                    else [outcome.status for outcome in turn.workflow_result.outcomes]
-                ),
-                decision_action=None if turn.decision is None else turn.decision.action,
-                decision_stop_reason=(
-                    None if turn.decision is None else turn.decision.stop_reason
-                ),
-                decision_summary=None
-                if turn.decision is None
-                else turn.decision.summary,
-            )
-            for turn in snapshot.state.turns
-        ]
-    else:
-        steps = [
-            HarnessReplayStep(
-                turn_index=turn.turn_index,
-                selected_task_ids=list(turn.selected_task_ids),
-                workflow_outcome_statuses=list(turn.workflow_outcome_statuses),
-                decision_action=turn.decision_action,
-                decision_stop_reason=turn.decision_stop_reason,
-                decision_summary=turn.decision_summary,
-            )
-            for turn in trace.turns
-        ]
+    """Reconstruct a deterministic replay view from canonical harness turns."""
+    steps = [
+        HarnessReplayStep(
+            turn_index=turn.turn_index,
+            selected_task_ids=list(turn.selected_task_ids),
+            workflow_outcome_statuses=_canonical_workflow_outcome_statuses(turn),
+            decision_action=None if turn.decision is None else turn.decision.action,
+            decision_stop_reason=(
+                None if turn.decision is None else turn.decision.stop_reason
+            ),
+            decision_summary=None if turn.decision is None else turn.decision.summary,
+        )
+        for turn in snapshot.state.turns
+    ]
     return HarnessReplayResult(
         session_id=snapshot.session_id,
         mode=HarnessReplayMode.TRACE,
         steps=steps,
         final_stop_reason=snapshot.state.session.stop_reason,
-        limitations=limitations,
+        limitations=[],
+    )
+
+
+def _canonical_pending_approval_id(turn: HarnessTurn) -> str | None:
+    if turn.pending_approval_request is not None:
+        return turn.pending_approval_request.approval_id
+    workflow_result = turn.workflow_result
+    if workflow_result is None or not workflow_result.outcomes:
+        return None
+    approval_request = workflow_result.outcomes[-1].approval_request
+    if approval_request is None:
+        return None
+    return approval_request.approval_id
+
+
+def _canonical_workflow_outcome_statuses(
+    turn: HarnessTurn,
+) -> list[WorkflowInvocationStatus]:
+    statuses = []
+    if _should_prepend_pending_approval(turn):
+        statuses.append(WorkflowInvocationStatus.APPROVAL_REQUESTED)
+    workflow_result = turn.workflow_result
+    if workflow_result is None:
+        return statuses
+    return [*statuses, *[outcome.status for outcome in workflow_result.outcomes]]
+
+
+def _canonical_invocation_traces(turn: HarnessTurn) -> list[HarnessInvocationTrace]:
+    traces: list[HarnessInvocationTrace] = []
+    if _should_prepend_pending_approval(turn):
+        approval_request = turn.pending_approval_request
+        if approval_request is not None:
+            traces.append(_build_pending_approval_trace(approval_request))
+    workflow_result = turn.workflow_result
+    if workflow_result is None:
+        return traces
+    return [
+        *traces,
+        *[_build_invocation_trace(outcome) for outcome in workflow_result.outcomes],
+    ]
+
+
+def _should_prepend_pending_approval(turn: HarnessTurn) -> bool:
+    approval_request = turn.pending_approval_request
+    if approval_request is None:
+        return False
+    workflow_result = turn.workflow_result
+    if workflow_result is None:
+        return True
+    return not any(
+        outcome.status is WorkflowInvocationStatus.APPROVAL_REQUESTED
+        and outcome.approval_request is not None
+        and outcome.approval_request.approval_id == approval_request.approval_id
+        for outcome in workflow_result.outcomes
+    )
+
+
+def _build_pending_approval_trace(
+    approval_request: TurnApprovalAuditRecord,
+) -> HarnessInvocationTrace:
+    return HarnessInvocationTrace(
+        invocation_index=approval_request.invocation_index,
+        invocation_id=None,
+        status=WorkflowInvocationStatus.APPROVAL_REQUESTED,
+        tool_name=approval_request.tool_name,
+        tool_version=approval_request.tool_version,
+        redacted_arguments={},
+        policy_snapshot=HarnessPolicySnapshot(
+            tool_name=approval_request.tool_name,
+            tool_version=approval_request.tool_version,
+            allowed=True,
+            requires_approval=True,
+            reason=approval_request.policy_reason,
+            metadata=dict(approval_request.policy_metadata),
+            source="approval_request",
+        ),
+        approval_id=approval_request.approval_id,
     )
 
 
@@ -411,13 +475,13 @@ def _build_invocation_trace(
     return HarnessInvocationTrace(
         invocation_index=outcome.invocation_index,
         invocation_id=_string_or_none(execution_record.get("invocation_id")),
-        request=outcome.request,
         status=outcome.status,
         tool_name=_trace_tool_name(outcome=outcome, approval_request=approval_request),
         tool_version=_trace_tool_version(
             outcome=outcome,
             approval_request=approval_request,
         ),
+        redacted_arguments=_redacted_arguments(execution_record=execution_record),
         policy_snapshot=policy_snapshot,
         ok=_bool_or_none(execution_record.get("ok")),
         error_code=_error_code_or_none(execution_record.get("error_code")),
@@ -466,6 +530,14 @@ def _execution_record_from_outcome(
     if outcome.tool_result is None:
         return {}
     return _record_object(outcome.tool_result.metadata.get("execution_record"))
+
+
+def _redacted_arguments(
+    *,
+    execution_record: dict[str, Any],
+) -> dict[str, object]:
+    redacted_input = execution_record.get("redacted_input")
+    return redacted_input if isinstance(redacted_input, dict) else {}
 
 
 def _trace_tool_name(

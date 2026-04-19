@@ -62,18 +62,43 @@ Cache locations are split by feature:
   `tempfile.gettempdir()/llm_tools/confluence_attachment_cache`
 
 If you intentionally redirect any of these into a repository checkout, keep the
-paths ignored. This repository now ignores `.llm_tools/` in addition to the
-older `.llm-tools/` scratch paths.
+paths ignored. This repository ignores `.llm_tools/` in addition to the older
+`.llm-tools/` scratch paths.
 
 ## Pending Approval Snapshots
 
 Newly persisted harness approval records store only a scrubbed base context:
 
 - preserved: `invocation_id`, `workspace`, and `metadata`
-- cleared before persistence: process env, logs, artifacts, and source
-  provenance
+- cleared before persistence: process environment variables, logs, artifacts,
+  and source provenance
 - rebuilt on resume: execution context derived from the stored base context plus
   the current process environment
 
-Older snapshots written before this hardening pass may still contain raw
-environment data. Delete those persisted files if they may have held secrets.
+Pending approval turns also keep a minimal approval-audit record so replay and
+inspection can show approval status without persisting raw request payloads.
+
+Non-approved approval outcomes are fail-closed: denial or timeout records the
+blocked invocation, but later invocations from that same model response do not
+continue running.
+
+Older snapshots created before this hardening change may still contain raw
+environment data. Delete those persisted session files if they may have held
+sensitive values. The repository does not migrate or scrub old snapshots in
+place.
+
+## Harness Replay And Inspection Artifacts
+
+Persisted harness `summary` and `trace` artifacts should be treated as cache-only
+derived views. Canonical `HarnessState` remains authoritative for resume,
+replay, and inspection, so cached artifacts may be rebuilt or ignored when
+absent, stale, inconsistent, or corrupt.
+
+Persisted trace payloads should stay minimal. Keep redacted policy metadata,
+status summaries, identifiers, and explicit artifact references when needed, but
+do not rely on stored traces to preserve raw request arguments, environment
+state, or other unredacted payloads by default.
+
+Malformed file-backed harness session records should be isolated as corruption
+outcomes so list and load flows can skip or surface them without trusting the
+damaged file's cached artifacts.

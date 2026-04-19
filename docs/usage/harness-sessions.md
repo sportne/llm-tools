@@ -1,15 +1,16 @@
 # Harness Sessions
 
 `llm_tools.harness_api` exposes a durable multi-turn execution surface above the
-one-turn workflow layer.
+one-turn `workflow_api` layer.
 
 Public entry points include:
 
 - `HarnessExecutor` for lower-level durable orchestration
 - `HarnessSessionService` for typed create/run/resume/inspect/list/stop flows
 - `DefaultHarnessTurnDriver` and `MinimalHarnessTurnApplier` as built-in
-  defaults
-- replay and summary helpers through stored artifacts
+  defaults for simple sessions, tests, and minimal CLI usage
+- replay and summary helpers built from canonical state, with stored artifacts
+  treated as derived caches rather than the source of truth
 
 ## Python API
 
@@ -57,8 +58,8 @@ inspection = service.inspect_session(
 
 Async entry points are also public:
 
-- `run_session_async(...)`
-- `resume_session_async(...)`
+- `HarnessSessionService.run_session_async(...)`
+- `HarnessSessionService.resume_session_async(...)`
 - `HarnessExecutor.run_async(...)`
 - `HarnessExecutor.resume_async(...)`
 
@@ -66,9 +67,18 @@ Async entry points are also public:
 
 Stored snapshots carry derived artifacts alongside canonical state:
 
-- `snapshot.artifacts.trace`
-- `snapshot.artifacts.summary`
-- `snapshot.saved_at`
+- `snapshot.artifacts.trace`: aggregated per-turn observability trace cache
+- `snapshot.artifacts.summary`: operator-facing session summary cache
+- `snapshot.saved_at`: store save timestamp for recent-session views
+
+Those persisted `trace` and `summary` artifacts are inspection aids, not the
+source of truth. Canonical `HarnessState` remains authoritative, and inspect/list
+flows rebuild trusted artifacts from canonical state rather than trusting stale
+or tampered stored summaries.
+
+Replay is likewise driven from canonical turns. Stored trace data may be
+rebuilt or ignored when it is missing, stale, inconsistent, or intentionally
+dropped.
 
 ## CLI
 
@@ -94,7 +104,29 @@ By default, CLI state is stored under `~/.llm-tools/harness`.
 
 ## Pending Approval Snapshots
 
-Newly written pending-approval records preserve only `invocation_id`,
-`workspace`, and `metadata`. Process env data, logs, artifacts, and source
-provenance are cleared before persistence. Approval resume rebuilds execution
-context from the current process environment at resume time.
+Newly written pending-approval records preserve only scrubbed base-context
+fields:
+
+- preserved: `invocation_id`, `workspace`, and `metadata`
+- cleared before persistence: process env, logs, artifacts, and source
+  provenance
+- rebuilt on resume: execution context derived from the stored base context plus
+  the current process environment
+
+Pending approval turns also persist a minimal approval-audit record on the turn
+itself so replay and inspection can show the blocked invocation without storing
+raw arguments or full request payloads.
+
+Non-approved approval outcomes are fail-closed: denial, expiration, or operator
+cancel records the blocked invocation, but later invocations from that same
+paused model turn do not continue running.
+
+Older snapshots written before this hardening change may still contain raw
+environment data. Delete those persisted files if they may have held secrets.
+
+## Corruption Handling
+
+Malformed file-backed session records are treated as corruption rather than
+partially trusted state. File-store list and inspect flows skip or surface those
+records cleanly without trusting cached summary or trace data from the damaged
+file.

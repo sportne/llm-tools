@@ -115,26 +115,30 @@
             "invocation_id": "turn-1",
             "invocation_index": 1,
             "logs": [
-              "Listed directory '.'."
+              "[REDACTED]"
             ],
             "ok": true,
             "policy_snapshot": {
               "allowed": true,
               "metadata": {
+                "approval_override": true,
+                "side_effects": "local_read",
                 "tool_name": "list_directory"
               },
-              "reason": "allowed",
+              "reason": "approved",
               "requires_approval": false,
               "source": "execution_record",
               "tool_name": "list_directory",
               "tool_version": "0.1.0"
             },
             "redaction": {
-              "applied_rule_count": 0,
+              "applied_rule_count": 1,
               "matched_paths": [],
-              "matched_targets": [],
-              "retain_unredacted_inputs": true,
-              "retain_unredacted_outputs": true
+              "matched_targets": [
+                "logs"
+              ],
+              "retain_unredacted_inputs": false,
+              "retain_unredacted_outputs": false
             },
             "request": {
               "arguments": {

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 import os
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -26,6 +26,8 @@ _SKIPPED_PARTS = {
     ".venv",
     "venv",
 }
+_TOOL_METHOD_NAMES = frozenset({"invoke", "ainvoke"})
+_UNBOUND = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +41,7 @@ class ImportReference:
 
 @dataclass(frozen=True, slots=True)
 class InvocationReference:
-    """One direct `.invoke(...)` or `.ainvoke(...)` call site."""
+    """One invoke-like call site that bypasses runtime mediation."""
 
     path: Path
     lineno: int
@@ -100,21 +102,10 @@ def iter_import_references(path: Path) -> Iterator[ImportReference]:
 
 
 def iter_direct_invocations(root: Path = ROOT_DIR) -> Iterator[InvocationReference]:
-    """Yield direct `.invoke(...)` and `.ainvoke(...)` call sites."""
+    """Yield invoke-like `.invoke(...)` and `.ainvoke(...)` bypass call sites."""
     for path in iter_python_files(root):
         tree = parse_module(path)
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if not isinstance(node.func, ast.Attribute):
-                continue
-            if node.func.attr not in {"invoke", "ainvoke"}:
-                continue
-            yield InvocationReference(
-                path=path,
-                lineno=node.lineno,
-                method_name=node.func.attr,
-            )
+        yield from _InvocationScanner(path).scan(tree)
 
 
 def is_repo_test_path(path: Path) -> bool:
@@ -227,3 +218,205 @@ def _is_relative_to(path: Path, other: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+class _InvocationScanner(ast.NodeVisitor):
+    """Collect invoke-like calls, including aliased method bypasses."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._references: list[InvocationReference] = []
+        self._scopes: list[dict[str, object]] = [{}]
+
+    def scan(self, tree: ast.AST) -> list[InvocationReference]:
+        self.visit(tree)
+        return self._references
+
+    def visit_Module(self, node: ast.Module) -> None:
+        self._visit_body(node.body)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._bind_name(node.name, _UNBOUND)
+        self._visit_exprs(node.decorator_list)
+        self._visit_exprs(node.bases)
+        self._visit_exprs(keyword.value for keyword in node.keywords)
+        self._push_scope()
+        self._visit_body(node.body)
+        self._pop_scope()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self._push_scope()
+        self._bind_arguments(node.args)
+        self.visit(node.body)
+        self._pop_scope()
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.visit(node.value)
+        method_name = self._extract_method_name(node.value)
+        for target in node.targets:
+            self._bind_target(target, method_name)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self.visit(node.annotation)
+        method_name: str | None = None
+        if node.value is not None:
+            self.visit(node.value)
+            method_name = self._extract_method_name(node.value)
+        self._bind_target(node.target, method_name)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self.visit(node.target)
+        self.visit(node.value)
+        self._bind_target(node.target, None)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.visit(node.value)
+        self._bind_target(node.target, self._extract_method_name(node.value))
+
+    def visit_For(self, node: ast.For) -> None:
+        self.visit(node.iter)
+        self._bind_target(node.target, None)
+        self._visit_body(node.body)
+        self._visit_body(node.orelse)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self.visit_For(node)
+
+    def visit_With(self, node: ast.With) -> None:
+        self._visit_with_items(node.items)
+        self._visit_body(node.body)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        self._visit_with_items(node.items)
+        self._visit_body(node.body)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self._bind_name(alias.asname or alias.name.split(".")[0], _UNBOUND)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            self._bind_name(alias.asname or alias.name, _UNBOUND)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.type is not None:
+            self.visit(node.type)
+        if node.name is not None:
+            self._bind_name(node.name, _UNBOUND)
+        self._visit_body(node.body)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        method_name = self._extract_method_name(node.func)
+        if method_name is not None:
+            self._references.append(
+                InvocationReference(
+                    path=self._path,
+                    lineno=node.lineno,
+                    method_name=method_name,
+                )
+            )
+        self.generic_visit(node)
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self._bind_name(node.name, _UNBOUND)
+        self._visit_exprs(node.decorator_list)
+        self._visit_exprs(default for default in node.args.defaults)
+        self._visit_exprs(default for default in node.args.kw_defaults if default)
+        self._visit_exprs(arg.annotation for arg in self._iter_arguments(node.args))
+        if node.returns is not None:
+            self.visit(node.returns)
+        self._push_scope()
+        self._bind_arguments(node.args)
+        self._visit_body(node.body)
+        self._pop_scope()
+
+    def _visit_with_items(self, items: list[ast.withitem]) -> None:
+        for item in items:
+            self.visit(item.context_expr)
+            if item.optional_vars is not None:
+                self._bind_target(item.optional_vars, None)
+
+    def _visit_body(self, body: list[ast.stmt]) -> None:
+        for statement in body:
+            self.visit(statement)
+
+    def _visit_exprs(self, expressions: Iterable[ast.expr | None]) -> None:
+        for expression in expressions:
+            if expression is not None:
+                self.visit(expression)
+
+    def _push_scope(self) -> None:
+        self._scopes.append({})
+
+    def _pop_scope(self) -> None:
+        self._scopes.pop()
+
+    def _bind_arguments(self, arguments: ast.arguments) -> None:
+        for argument in self._iter_arguments(arguments):
+            self._bind_name(argument.arg, _UNBOUND)
+
+    def _iter_arguments(self, arguments: ast.arguments) -> Iterator[ast.arg]:
+        yield from arguments.posonlyargs
+        yield from arguments.args
+        if arguments.vararg is not None:
+            yield arguments.vararg
+        yield from arguments.kwonlyargs
+        if arguments.kwarg is not None:
+            yield arguments.kwarg
+
+    def _bind_target(self, target: ast.expr, method_name: str | None) -> None:
+        if isinstance(target, ast.Name):
+            self._bind_name(target.id, method_name or _UNBOUND)
+            return
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                self._bind_target(element, method_name)
+            return
+        if isinstance(target, ast.Starred):
+            self._bind_target(target.value, method_name)
+
+    def _bind_name(self, name: str, value: object) -> None:
+        self._scopes[-1][name] = value
+
+    def _lookup_name(self, name: str) -> str | None:
+        for scope in reversed(self._scopes):
+            if name not in scope:
+                continue
+            value = scope[name]
+            if value is _UNBOUND:
+                return None
+            return value if isinstance(value, str) else None
+        return None
+
+    def _extract_method_name(self, node: ast.AST) -> str | None:
+        if isinstance(node, ast.Attribute) and node.attr in _TOOL_METHOD_NAMES:
+            return node.attr
+        if isinstance(node, ast.Call) and _is_getattr_call(node):
+            method_name = _string_literal_value(node.args[1])
+            if method_name in _TOOL_METHOD_NAMES:
+                return method_name
+        if isinstance(node, ast.Name):
+            return self._lookup_name(node.id)
+        return None
+
+
+def _is_getattr_call(node: ast.Call) -> bool:
+    return (
+        isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+    )
+
+
+def _string_literal_value(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None

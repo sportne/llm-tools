@@ -96,6 +96,20 @@ remaining `workflow_api` risks are approval fail-open behavior, approval-resume
 integrity, and observability paths that preserve more raw model or tool data
 than the runtime result surface.
 
+#### Status Update (2026-04-19 follow-up)
+
+- `Addressed`: non-approved approval outcomes now fail closed in
+  `WorkflowExecutor`, including sync and async persisted-resume paths.
+- `Addressed`: workflow-adjacent replay and trace views no longer persist raw
+  request arguments by default; the harness rebuild path uses redacted argument
+  projections and canonical state, and follow-up regressions cover approval
+  history preservation after resume.
+- `Deferred`: approval-record binding remains open because the repository still
+  lacks a trust anchor and stable signed-digest format for persisted approval
+  records.
+- `Deferred`: prompt-protection retention minimization remains open because the
+  correction-state and inspector-payload contract is not yet settled.
+
 ### 2026-04-19: `harness_api` lifecycle and control-flow review
 
 Related backlog: Phase 4 in `SEC_TASKS.md`
@@ -157,6 +171,21 @@ Model validation and resume-time corruption checks are strong, but control-flow
 integrity still depends on follow-up hardening in stop semantics, recovery
 behavior, budget enforcement timing, and approval resume privilege boundaries.
 
+#### Status Update (2026-04-19 follow-up)
+
+- `Open`: `stop_reason=completed` can still be persisted while blocked or other
+  non-terminal tasks remain. This needs planner/applier contract changes rather
+  than a replay or persistence-only patch.
+- `Open`: non-approval turns still have at-least-once semantics across
+  crash-before-save recovery. Addressing this requires durable checkpointing or
+  explicit idempotency controls for side effects.
+- `Open`: `max_tool_invocations` is still enforced after a turn completes, so a
+  single turn can overshoot the configured limit.
+- `Deferred`: approval-resume environment narrowing is still pending because the
+  repository does not yet define a reviewed allowlist or stable approved-env
+  snapshot format.
+- `Open`: executor-level no-progress detection is still not implemented.
+
 ### 2026-04-19: `harness_api` persistence, resume, replay, and summary review
 
 Related backlog: Phase 4 in `SEC_TASKS.md`
@@ -212,6 +241,23 @@ and attacker-modifiable. The largest remaining persistence risks are data
 retention and operator trust in derived artifacts rather than baseline model
 validation.
 
+#### Status Update (2026-04-19 follow-up)
+
+- `Addressed`: stored summaries and traces are now treated as cache-only
+  artifacts and rebuilt from canonical `snapshot.state` during inspect, list,
+  and replay flows.
+- `Addressed`: persisted trace payloads no longer retain raw request arguments
+  by default; they use minimized redacted argument projections instead.
+- `Addressed`: file-backed session storage now uses atomic save behavior and
+  typed corruption handling, and corrupt files are skipped during listing.
+- `Addressed`: negative regressions now cover tampered summaries, tampered
+  traces, corrupt session files, and purge-propagation rendering paths.
+- `Addressed`: a follow-up fix restored approval-request audit history,
+  preserved per-turn verification snapshots in canonical trace rebuilds, and
+  replaced turn-level raw approval payload retention with minimized approval
+  audit metadata so normalized turn history does not rewrite history or retain
+  blocked invocation arguments after resume.
+
 ### 2026-04-19: architecture and security test coverage review
 
 Related backlog: Phase 6 in `SEC_TASKS.md`
@@ -255,6 +301,19 @@ reasonably well. The main remaining risk is confidentiality drift in durable
 inspection, replay, approval, and research-detail surfaces, where current tests
 mostly confirm feature presence rather than end-to-end redaction and purge
 invariants.
+
+#### Status Update (2026-04-19 follow-up)
+
+- `Addressed`: research inspection, replay, approval, and raw inspection payload
+  rendering now have regressions that assert scrubbed secret content does not
+  reappear in user-facing views.
+- `Addressed`: end-to-end purge propagation is now covered across persistence,
+  replay, inspection, and Streamlit research detail rendering.
+- `Addressed`: architecture guards now detect additional runtime-bypass shapes,
+  including indirect `.invoke()` and `.ainvoke()` access patterns.
+- `Open`: higher-layer end-to-end brokered-execution coverage is still
+  incomplete; lower-layer guarantees remain well unit-tested, but the broader
+  provenance-continuity integration checks were not completed in this pass.
 
 #### Execution Notes
 
@@ -323,3 +382,20 @@ Related backlog: Phase 2 in `SEC_TASKS.md`
 - remote HTML, excerpts, issue fields, and similar payloads are mostly treated
   as untrusted pass-through data rather than normalized content, so downstream
   consumers still need to treat these outputs as untrusted remote material
+
+#### Status Update (2026-04-19 follow-up)
+
+- `Open`: this tool-family review was not remediated in the harness/workflow
+  hardening pass.
+- `Open`: the Confluence attachment-cache side-effect declaration mismatch still
+  needs either a spec change or a behavioral split between page reads and
+  attachment reads.
+- `Open`: pagination and output-bound inconsistencies still require per-tool
+  response-shaping changes and matching negative coverage.
+- `Open`: Jira `raw_fields` exposure still needs an allowlisted default view and
+  explicit opt-in for broader field access.
+- `Open`: per-tool network timeout and retry policy decisions still need to be
+  implemented at the remote tool layer.
+- `Why not addressed here`: these fixes change shipped remote tool contracts,
+  default payload shapes, and connector behavior, so they need a dedicated tool
+  remediation pass rather than a review-log-only update.

@@ -23,6 +23,7 @@ from llm_tools.harness_api.executor import (
 )
 from llm_tools.harness_api.models import (
     BudgetPolicy,
+    HarnessState,
     HarnessStopReason,
     TurnDecision,
     TurnDecisionAction,
@@ -32,7 +33,7 @@ from llm_tools.harness_api.planning import HarnessPlanner
 from llm_tools.harness_api.replay import (
     HarnessReplayResult,
     HarnessSessionSummary,
-    build_session_summary,
+    build_canonical_artifacts,
     build_stored_artifacts,
     build_turn_trace,
     replay_session,
@@ -249,15 +250,13 @@ class HarnessSessionService:
     ) -> HarnessSessionListResult:
         items = []
         for snapshot in self._store.list_sessions(limit=request.limit):
-            summary = snapshot.artifacts.summary or build_session_summary(
-                snapshot.state
-            )
-            replay = replay_session(snapshot) if request.include_replay else None
+            normalized = _normalized_snapshot(snapshot)
+            summary = _required_artifact_summary(normalized)
             items.append(
                 HarnessSessionListItem(
-                    snapshot=snapshot,
+                    snapshot=normalized,
                     summary=summary,
-                    replay=replay,
+                    replay=(replay_session(normalized) if request.include_replay else None),
                 )
             )
         return HarnessSessionListResult(sessions=items)
@@ -268,12 +267,12 @@ class HarnessSessionService:
         *,
         include_replay: bool,
     ) -> HarnessSessionInspection:
-        summary = snapshot.artifacts.summary or build_session_summary(snapshot.state)
+        normalized = _normalized_snapshot(snapshot)
         return HarnessSessionInspection(
-            snapshot=snapshot,
-            resumed=resume_session(snapshot),
-            summary=summary,
-            replay=replay_session(snapshot) if include_replay else None,
+            snapshot=normalized,
+            resumed=resume_session(normalized),
+            summary=_required_artifact_summary(normalized),
+            replay=replay_session(normalized) if include_replay else None,
         )
 
     def _required_snapshot(self, session_id: str) -> StoredHarnessState:
@@ -281,6 +280,24 @@ class HarnessSessionService:
         if snapshot is None:
             raise ValueError(f"Unknown session id: {session_id}")
         return snapshot
+
+
+def _required_artifact_summary(snapshot: StoredHarnessState) -> HarnessSessionSummary:
+    summary = snapshot.artifacts.summary
+    if summary is None:
+        raise ValueError("Normalized harness snapshots must include a summary.")
+    return summary
+
+
+def _normalized_snapshot(snapshot: StoredHarnessState) -> StoredHarnessState:
+    normalized_state = HarnessState.model_validate(
+        snapshot.state.model_dump(mode="python")
+    )
+    trusted_artifacts = build_canonical_artifacts(normalized_state)
+    return snapshot.model_copy(
+        update={"state": normalized_state, "artifacts": trusted_artifacts},
+        deep=True,
+    )
 
 
 def _timestamp(value: datetime) -> str:

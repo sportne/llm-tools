@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -13,6 +15,7 @@ from llm_tools.harness_api import (
     HarnessSessionSummary,
     HarnessState,
     HarnessStateConflictError,
+    HarnessStateCorruptionError,
     InMemoryHarnessStateStore,
     StoredHarnessArtifacts,
     StoredHarnessState,
@@ -232,3 +235,52 @@ def test_file_store_conflict_and_delete_existing_file(tmp_path) -> None:
 
     store.delete_session(saved.session_id)
     assert store.load_session(saved.session_id) is None
+
+
+def test_file_store_raises_typed_corruption_for_invalid_session_file(tmp_path) -> None:
+    store = FileHarnessStateStore(tmp_path)
+    path = store._path_for_session("session-1")
+    path.write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(HarnessStateCorruptionError, match="Corrupt persisted"):
+        store.load_session("session-1")
+
+
+def test_file_store_list_sessions_skips_corrupt_files(tmp_path) -> None:
+    store = FileHarnessStateStore(tmp_path)
+    saved = store.save_session(_state())
+    store._path_for_session("broken").write_text("{not json", encoding="utf-8")
+
+    snapshots = store.list_sessions()
+
+    assert [snapshot.session_id for snapshot in snapshots] == [saved.session_id]
+
+
+def test_file_store_atomic_save_preserves_existing_snapshot_on_replace_failure(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = FileHarnessStateStore(tmp_path)
+    initial = store.save_session(_state())
+    original_replace = Path.replace
+
+    def _fail_replace(self: Path, target: Path) -> Path:
+        if self.suffix == ".tmp":
+            raise OSError("replace failed")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", _fail_replace)
+
+    updated_state = initial.state.model_copy(
+        update={
+            "tasks": [
+                initial.state.tasks[0].model_copy(update={"status_summary": "updated"})
+            ]
+        },
+        deep=True,
+    )
+    with pytest.raises(OSError, match="replace failed"):
+        store.save_session(updated_state, expected_revision=initial.revision)
+
+    loaded = store.load_session(initial.session_id)
+    assert loaded == initial
+    assert list(tmp_path.glob("*.tmp")) == []
