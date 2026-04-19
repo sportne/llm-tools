@@ -338,15 +338,9 @@ class WorkflowExecutor:
             status=approval_status,
             approval_request=approval_request,
         )
-        remaining = self._execute_sequence(
-            parsed_response=parsed_response,
-            base_context=base_context,
-            start_index=pending_index + 1,
-            approved_indices=set(),
-        )
         return WorkflowTurnResult(
             parsed_response=parsed_response,
-            outcomes=[approval_outcome, *remaining],
+            outcomes=[approval_outcome],
         )
 
     async def _resume_persisted_approval_async(
@@ -379,15 +373,9 @@ class WorkflowExecutor:
             status=approval_status,
             approval_request=approval_request,
         )
-        remaining = await self._execute_sequence_async(
-            parsed_response=parsed_response,
-            base_context=base_context,
-            start_index=pending_index + 1,
-            approved_indices=set(),
-        )
         return WorkflowTurnResult(
             parsed_response=parsed_response,
-            outcomes=[approval_outcome, *remaining],
+            outcomes=[approval_outcome],
         )
 
     @staticmethod

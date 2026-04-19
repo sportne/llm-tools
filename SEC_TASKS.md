@@ -35,6 +35,10 @@ execution and for tracking security hardening follow-up in this repository.
 - Initial Batch 1 review work is complete for `tool_api`, the filesystem, text,
   and git tool families, `llm_adapters`, `llm_providers`, and the packaging,
   example, config, and usage-doc surfaces.
+- Recent harness persistence hardening makes non-approved approvals fail
+  closed, treats persisted summary and trace artifacts as cache-only derived
+  views, minimizes stored trace payloads, and isolates malformed file-backed
+  session records as corruption outcomes.
 
 ## Phased backlog
 
@@ -192,14 +196,16 @@ verification as a security-critical control plane.
   logic for abuse, infinite work, or unsafe resumptions.
 - [x] Landed hardening: harness approval persistence and session-safety updates
   are merged.
-- [ ] High: harness_api/workflow_api - prevent post-denial execution of
-  trailing invocations after approval rejection.
-- [ ] Medium: harness_api - add integrity binding for persisted approval
+- [x] High: harness_api/workflow_api - make approval denial and timeout
+  fail-closed so later invocations from the same parsed response do not run.
+- [-] Medium: harness_api - add integrity binding for persisted approval
   payloads used during resume.
-- [ ] Medium: harness_api - validate or recompute persisted trace and summary
-  artifacts before trusting them for replay or inspection.
-- [ ] Medium: harness_api - reduce sensitive data retention in persisted
-  approval, trace, and summary artifacts.
+- [x] Medium: harness_api - treat persisted trace and summary artifacts as
+  cache-only derived views and rebuild or ignore them when they are missing,
+  stale, or inconsistent.
+- [x] Medium: harness_api - minimize persisted trace payloads and adjacent
+  derived observability artifacts so raw request arguments are not retained by
+  default.
 - [ ] Medium: harness_api - prevent `completed` terminalization when the planner
   returns no actionable tasks but blocked or otherwise non-terminal tasks still
   exist.
@@ -207,11 +213,11 @@ verification as a security-critical control plane.
   so side-effectful work is not replayed after crash-before-save recovery.
 - [ ] Medium: harness_api - enforce `max_tool_invocations` before or during
   dispatch so a single turn cannot overshoot the configured tool budget.
-- [ ] Medium: harness_api - constrain approval resume environment rehydration to
+- [-] Medium: harness_api - constrain approval resume environment rehydration to
   a reviewed allowlist or stable approved snapshot instead of the full current
   process environment.
-- [ ] Low: harness_api - handle malformed file-backed session artifacts without
-  breaking list/load flows.
+- [x] Low: harness_api - isolate malformed file-backed session artifacts into
+  typed corruption handling so list/load flows skip or surface them cleanly.
 - [ ] Low: harness_api - implement executor-level no-progress detection and add
   negative tests for repeated non-progress loops and blocked-only sessions.
 
@@ -262,8 +268,10 @@ project.
 - [x] Record findings in this file or a clearly linked companion artifact with
   severity, affected components, exploit preconditions, and recommended fixes.
 - Companion artifact in use: `SECURITY_REVIEWS.md`.
-- [ ] Track remediation tasks separately within this backlog under the affected
+- [x] Track remediation tasks separately within this backlog under the affected
   phase or in a dedicated follow-up section.
+- [x] Mark explicitly deferred findings with `[-]` so accepted deferrals are
+  visible instead of looking like active remediation work.
 - [ ] Re-run relevant tests and add targeted regression tests for each
   confirmed issue.
 - [ ] Produce a final project-wide confidence summary: reviewed areas,

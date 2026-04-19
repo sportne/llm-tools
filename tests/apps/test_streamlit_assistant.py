@@ -33,9 +33,13 @@ from llm_tools.apps.assistant_runtime import (
     build_tool_capabilities,
     resolve_assistant_default_enabled_tools,
 )
+from llm_tools.apps.chat_runtime import build_chat_executor
 from llm_tools.harness_api import (
     ApprovalResolution,
     BudgetPolicy,
+    HarnessSessionCreateRequest,
+    HarnessSessionInspectRequest,
+    HarnessSessionRunRequest,
     HarnessSessionService,
     InMemoryHarnessStateStore,
     ScriptedParsedResponseProvider,
@@ -1639,6 +1643,100 @@ def test_streamlit_assistant_render_research_session_details_shows_replay_and_tr
     assert any("**Trace**" in item for item in fake_st.markdown_messages)
     assert any("Limitations:" in item for item in fake_st.caption_messages)
     assert any("approval=approval-1" in item for item in fake_st.caption_messages)
+
+
+def test_streamlit_assistant_research_detail_does_not_render_purged_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sensitive_text = "TOP SECRET TOKEN"
+    safe_message = "Safe replacement"
+    fake_st = _FakeStreamlit()
+    fake_st.session_state[_MODULES.app._SELECTED_RESEARCH_SESSION_SLOT] = (
+        "research-purge"
+    )
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+
+    class _PurgingDriver:
+        def select_task_ids(self, *, state):
+            del state
+            return ["task-1"]
+
+        def build_context(self, *, state, selected_task_ids, turn_index):
+            del state, selected_task_ids
+            return ToolContext(
+                invocation_id=f"turn-{turn_index}",
+                metadata={
+                    "protection_review": {
+                        "purge_requested": True,
+                        "safe_message": safe_message,
+                    }
+                },
+            )
+
+        def run_turn(self, *, state, selected_task_ids, context):
+            del state, selected_task_ids, context
+            return ParsedModelResponse(final_response=sensitive_text)
+
+        async def run_turn_async(self, *, state, selected_task_ids, context):
+            return self.run_turn(
+                state=state,
+                selected_task_ids=selected_task_ids,
+                context=context,
+            )
+
+    store = InMemoryHarnessStateStore()
+    _, workflow_executor = build_chat_executor()
+    service = HarnessSessionService(
+        store=store,
+        workflow_executor=workflow_executor,
+        driver=_PurgingDriver(),
+        workspace=str(tmp_path),
+    )
+    created = service.create_session(
+        HarnessSessionCreateRequest(
+            title="Purged research",
+            intent="Do protected work.",
+            budget_policy=BudgetPolicy(max_turns=3),
+            session_id="research-purge",
+        )
+    )
+    service.run_session(HarnessSessionRunRequest(session_id=created.session_id))
+    inspection = service.inspect_session(
+        HarnessSessionInspectRequest(
+            session_id=created.session_id,
+            include_replay=True,
+        )
+    )
+
+    class _FakeController:
+        def inspect(self, session_id: str) -> object:
+            assert session_id == "research-purge"
+            return inspection
+
+    monkeypatch.setattr(
+        _MODULES.app, "_build_research_controller", lambda **kwargs: _FakeController()
+    )
+    app_state = _make_app_state(root_path=str(tmp_path))
+    active = app_state.sessions[app_state.active_session_id]
+
+    _MODULES.app._render_research_session_details(
+        app_state,
+        config=StreamlitAssistantConfig(),
+        runtime=active.runtime,
+        active=active,
+    )
+
+    rendered = "\n".join(
+        [
+            *fake_st.markdown_messages,
+            *fake_st.caption_messages,
+            *fake_st.warning_messages,
+            *fake_st.error_messages,
+        ]
+    )
+    assert sensitive_text not in rendered
+    assert safe_message in rendered
 
 
 def test_streamlit_assistant_research_detail_resolves_approval_and_appends_summary(

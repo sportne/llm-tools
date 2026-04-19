@@ -136,7 +136,32 @@ def test_workflow_executor_async_pending_paths(tmp_path: str) -> None:
             WorkflowInvocationStatus.EXECUTED,
         ]
 
+        denied_seeded = await executor.execute_model_output_async(
+            ActionEnvelopeAdapter(),
+            {
+                "actions": [
+                    {"tool_name": "list_directory", "arguments": {"path": "."}},
+                    {
+                        "tool_name": "write_file",
+                        "arguments": {"path": "denied.txt", "content": "blocked"},
+                    },
+                ]
+            },
+            ToolContext(invocation_id="async-denied", workspace=str(tmp_path)),
+        )
+        denied_id = denied_seeded.outcomes[0].approval_request.approval_id  # type: ignore[union-attr]
+        denied = await executor.resolve_pending_approval_async(
+            denied_id,
+            approved=False,
+        )
+        assert [outcome.status for outcome in denied.outcomes] == [
+            WorkflowInvocationStatus.APPROVAL_DENIED,
+        ]
+        assert not (tmp_path / "denied.txt").exists()
+
         timeout_executor = _build_executor()
+        timeout_workspace = tmp_path / "async-timeout"
+        timeout_workspace.mkdir()
         await timeout_executor.execute_model_output_async(
             ActionEnvelopeAdapter(),
             {
@@ -148,30 +173,41 @@ def test_workflow_executor_async_pending_paths(tmp_path: str) -> None:
                     },
                 ]
             },
-            ToolContext(invocation_id="async-timeout", workspace=str(tmp_path)),
+            ToolContext(
+                invocation_id="async-timeout",
+                workspace=str(timeout_workspace),
+            ),
         )
         timed_out = await timeout_executor.finalize_expired_approvals_async(
             now=datetime.now(UTC) + timedelta(seconds=5)
         )
         assert len(timed_out) == 1
-        assert (
-            timed_out[0].outcomes[0].status
-            is WorkflowInvocationStatus.APPROVAL_TIMED_OUT
-        )
+        assert [outcome.status for outcome in timed_out[0].outcomes] == [
+            WorkflowInvocationStatus.APPROVAL_TIMED_OUT,
+        ]
+        assert not (timeout_workspace / "after.txt").exists()
 
+        denied_workspace = tmp_path / "persisted-deny"
+        denied_workspace.mkdir()
         denied = await executor.resume_persisted_approval_async(
-            _persisted_record(tmp_path),
+            _persisted_record(str(denied_workspace)),
             "deny",
         )
-        assert denied.outcomes[0].status is WorkflowInvocationStatus.APPROVAL_DENIED
-        assert denied.outcomes[1].status is WorkflowInvocationStatus.EXECUTED
+        assert [outcome.status for outcome in denied.outcomes] == [
+            WorkflowInvocationStatus.APPROVAL_DENIED,
+        ]
+        assert not (denied_workspace / "after.txt").exists()
 
+        expired_workspace = tmp_path / "persisted-expire"
+        expired_workspace.mkdir()
         expired = await executor.resume_persisted_approval_async(
-            _persisted_record(tmp_path),
+            _persisted_record(str(expired_workspace)),
             "expire",
         )
-        assert expired.outcomes[0].status is WorkflowInvocationStatus.APPROVAL_TIMED_OUT
-        assert expired.outcomes[1].status is WorkflowInvocationStatus.EXECUTED
+        assert [outcome.status for outcome in expired.outcomes] == [
+            WorkflowInvocationStatus.APPROVAL_TIMED_OUT,
+        ]
+        assert not (expired_workspace / "after.txt").exists()
 
         unknown_tool = await executor.execute_parsed_response_async(
             ParsedModelResponse(

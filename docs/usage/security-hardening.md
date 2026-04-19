@@ -74,9 +74,27 @@ Newly persisted harness approval records store only a scrubbed base context:
 environment variables, logs, artifacts, and source provenance are cleared
 before the snapshot is written. Approval resume rebuilds execution context
 from the stored base context plus the current process environment at resume
-time.
+time. Non-approved approval outcomes are fail-closed: denial or timeout records
+the blocked invocation, but later invocations from that same model response do
+not continue running.
 
 Older snapshots created before this hardening change may still contain raw
 environment data. Delete those persisted session files if they may have held
 sensitive values. The repository does not migrate or scrub old snapshots in
 place.
+
+## Harness Replay And Inspection Artifacts
+
+Persisted harness `summary` and `trace` artifacts should be treated as
+cache-only derived views. Canonical `HarnessState` remains authoritative for
+resume, replay, and inspection, so cached artifacts may be rebuilt or ignored
+when absent, stale, inconsistent, or corrupt.
+
+Persisted trace payloads should stay minimal. Keep redacted policy metadata,
+status summaries, identifiers, and explicit artifact references when needed,
+but do not rely on stored traces to preserve raw request arguments,
+environment state, or other unredacted payloads by default.
+
+Malformed file-backed harness session records should be isolated as corruption
+outcomes so list and load flows can skip or surface them without trusting the
+damaged file's cached artifacts.

@@ -672,7 +672,7 @@ def test_workflow_executor_approve_resumes_and_continues_execution(
     assert executor.list_pending_approvals() == []
 
 
-def test_workflow_executor_deny_marks_outcome_and_continues(
+def test_workflow_executor_deny_marks_outcome_and_stops(
     tmp_path: str,
 ) -> None:
     registry = ToolRegistry()
@@ -706,11 +706,11 @@ def test_workflow_executor_deny_marks_outcome_and_continues(
 
     denied = executor.resolve_pending_approval(approval_id, approved=False)
 
-    assert denied.outcomes[0].status is WorkflowInvocationStatus.APPROVAL_DENIED
-    executed = _executed_tool_results(denied)
-    assert len(executed) == 1
-    assert executed[0].tool_name == "write_file"
-    assert executed[0].ok is True
+    assert [outcome.status for outcome in denied.outcomes] == [
+        WorkflowInvocationStatus.APPROVAL_DENIED,
+    ]
+    assert _executed_tool_results(denied) == []
+    assert not (Path(tmp_path) / "denied.txt").exists()
 
 
 def test_workflow_executor_finalizes_expired_approvals(
@@ -750,10 +750,11 @@ def test_workflow_executor_finalizes_expired_approvals(
 
     assert len(finalized) == 1
     result = finalized[0]
-    assert result.outcomes[0].status is WorkflowInvocationStatus.APPROVAL_TIMED_OUT
-    executed = _executed_tool_results(result)
-    assert len(executed) == 1
-    assert executed[0].tool_name == "write_file"
+    assert [outcome.status for outcome in result.outcomes] == [
+        WorkflowInvocationStatus.APPROVAL_TIMED_OUT,
+    ]
+    assert _executed_tool_results(result) == []
+    assert not (Path(tmp_path) / "timeout.txt").exists()
     assert executor.list_pending_approvals() == []
 
 
@@ -1061,20 +1062,32 @@ def test_workflow_executor_can_resume_persisted_approval_denials_and_timeouts(
         ),
     )
 
+    denied_workspace = Path(tmp_path) / "persisted-deny"
+    denied_workspace.mkdir()
     denied = executor.resume_persisted_approval(
-        _persisted_approval_record(tmp_path), "deny"
+        _persisted_approval_record(str(denied_workspace)), "deny"
     )
-    assert denied.outcomes[0].status is WorkflowInvocationStatus.APPROVAL_DENIED
-    assert denied.outcomes[1].status is WorkflowInvocationStatus.EXECUTED
+    assert [outcome.status for outcome in denied.outcomes] == [
+        WorkflowInvocationStatus.APPROVAL_DENIED,
+    ]
+    assert not (denied_workspace / "resume.txt").exists()
 
+    expired_workspace = Path(tmp_path) / "persisted-expire"
+    expired_workspace.mkdir()
     expired = executor.resume_persisted_approval(
-        _persisted_approval_record(tmp_path), "expire"
+        _persisted_approval_record(str(expired_workspace)), "expire"
     )
-    assert expired.outcomes[0].status is WorkflowInvocationStatus.APPROVAL_TIMED_OUT
-    assert expired.outcomes[1].status is WorkflowInvocationStatus.EXECUTED
+    assert [outcome.status for outcome in expired.outcomes] == [
+        WorkflowInvocationStatus.APPROVAL_TIMED_OUT,
+    ]
+    assert not (expired_workspace / "resume.txt").exists()
 
+    canceled_workspace = Path(tmp_path) / "persisted-cancel"
+    canceled_workspace.mkdir()
     canceled = executor.resume_persisted_approval(
-        _persisted_approval_record(tmp_path), "cancel"
+        _persisted_approval_record(str(canceled_workspace)), "cancel"
     )
-    assert canceled.outcomes[0].status is WorkflowInvocationStatus.APPROVAL_DENIED
-    assert canceled.outcomes[1].status is WorkflowInvocationStatus.EXECUTED
+    assert [outcome.status for outcome in canceled.outcomes] == [
+        WorkflowInvocationStatus.APPROVAL_DENIED,
+    ]
+    assert not (canceled_workspace / "resume.txt").exists()

@@ -392,6 +392,11 @@ class HarnessExecutor:
                     started_at=started_at,
                     selected_task_ids=list(selected_task_ids),
                     workflow_result=workflow_result,
+                    pending_approval_request=approval_request,
+                    verification_status_by_task_id=self._turn_verification_statuses(
+                        retry_state,
+                        selected_task_ids,
+                    ),
                 )
                 waiting_state = self._append_incomplete_turn(
                     retry_state,
@@ -572,6 +577,11 @@ class HarnessExecutor:
                     started_at=started_at,
                     selected_task_ids=list(selected_task_ids),
                     workflow_result=workflow_result,
+                    pending_approval_request=approval_request,
+                    verification_status_by_task_id=self._turn_verification_statuses(
+                        retry_state,
+                        selected_task_ids,
+                    ),
                 )
                 waiting_state = self._append_incomplete_turn(
                     retry_state,
@@ -789,6 +799,10 @@ class HarnessExecutor:
             update={
                 "decision": self._normalize_decision(decision, turn.selected_task_ids),
                 "ended_at": self._timestamp(now),
+                "verification_status_by_task_id": self._turn_verification_statuses(
+                    state,
+                    turn.selected_task_ids,
+                ),
             }
         )
         new_turns = [*state.turns, finalized_turn]
@@ -854,6 +868,10 @@ class HarnessExecutor:
             update={
                 "decision": self._normalize_decision(decision, turn.selected_task_ids),
                 "ended_at": self._timestamp(now),
+                "verification_status_by_task_id": self._turn_verification_statuses(
+                    state,
+                    turn.selected_task_ids,
+                ),
             }
         )
         turns = [*state.turns[:-1], finalized_turn]
@@ -979,6 +997,18 @@ class HarnessExecutor:
         if snapshot is None:
             raise ValueError(f"Unknown session id: {session_id}")
         return snapshot
+
+    @staticmethod
+    def _turn_verification_statuses(
+        state: HarnessState,
+        selected_task_ids: Sequence[str],
+    ) -> dict[str, str]:
+        selected_task_id_set = set(selected_task_ids)
+        return {
+            task.task_id: task.verification.status.value
+            for task in state.tasks
+            if task.task_id in selected_task_id_set
+        }
 
     def _normalize_decision(
         self,

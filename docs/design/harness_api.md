@@ -394,6 +394,9 @@ Retry and recovery are explicit rather than inferred from UI state:
   retry up to `max_retryable_tool_retries`
 - approval waits, approval denials, approval expirations, validation failures,
   and non-retryable tool errors do not auto-retry
+- approval denial, expiration, and operator cancel are fail-closed: the
+  denied invocation is recorded, but later invocations from that same parsed
+  response do not run
 - every actual retry attempt increments `HarnessSession.retry_count` and the
   selected tasks' `TaskRecord.retry_count`
 - optimistic-concurrency save conflicts reload the latest snapshot and retry
@@ -485,8 +488,12 @@ alongside canonical `HarnessState` in storage rather than inside it:
 These artifacts are persisted through `StoredHarnessState.artifacts` and
 `StoredHarnessState.saved_at`. Canonical state serialization remains unchanged:
 `serialize_harness_state(...)` still owns only the durable harness state model.
-The stored artifacts intentionally persist redacted policy metadata and
-execution-record summaries, not raw environment state or unredacted payloads.
+The stored artifacts are cache-only derived views: canonical `HarnessState`
+remains authoritative for resume, inspection, and replay, and implementations
+may rebuild or ignore stored artifacts when they are missing, stale, or
+inconsistent. Stored trace payloads should stay intentionally minimal and keep
+only redacted policy metadata and execution-record summaries rather than raw
+request arguments, environment state, or unredacted payloads.
 
 ## Public session surface
 

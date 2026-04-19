@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
+from uuid import uuid4
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
@@ -24,6 +25,14 @@ class UnsupportedHarnessStateVersionError(ValueError):
 
 class HarnessStateConflictError(ValueError):
     """Raised when optimistic concurrency checks fail during save."""
+
+
+class HarnessStateCorruptionError(ValueError):
+    """Raised when a persisted harness session file cannot be trusted."""
+
+    def __init__(self, path: Path, message: str) -> None:
+        self.path = path
+        super().__init__(f"{message}: {path}")
 
 
 class StoredHarnessState(BaseModel):
@@ -149,7 +158,7 @@ class FileHarnessStateStore:
         path = self._path_for_session(session_id)
         if not path.exists():
             return None
-        return StoredHarnessState.model_validate_json(path.read_text(encoding="utf-8"))
+        return self._load_snapshot_file(path)
 
     def save_session(
         self,
@@ -176,10 +185,15 @@ class FileHarnessStateStore:
             state=state.model_copy(deep=True),
             artifacts=_resolved_artifacts(current=current, artifacts=artifacts),
         )
-        self._path_for_session(session_id).write_text(
-            snapshot.model_dump_json(indent=2),
-            encoding="utf-8",
-        )
+        path = self._path_for_session(session_id)
+        temp_path = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
+        try:
+            temp_path.write_text(snapshot.model_dump_json(indent=2), encoding="utf-8")
+            temp_path.replace(path)
+        except Exception:
+            if temp_path.exists():
+                temp_path.unlink()
+            raise
         return snapshot.model_copy(deep=True)
 
     def delete_session(self, session_id: str) -> None:
@@ -188,11 +202,13 @@ class FileHarnessStateStore:
             path.unlink()
 
     def list_sessions(self, *, limit: int | None = None) -> list[StoredHarnessState]:
-        snapshots = sorted(
-            (
-                StoredHarnessState.model_validate_json(path.read_text(encoding="utf-8"))
-                for path in self._directory.glob("*.json")
-            ),
+        snapshots: list[StoredHarnessState] = []
+        for path in self._directory.glob("*.json"):
+            try:
+                snapshots.append(self._load_snapshot_file(path))
+            except HarnessStateCorruptionError:
+                continue
+        snapshots.sort(
             key=lambda item: (item.saved_at, item.session_id),
             reverse=True,
         )
@@ -202,6 +218,17 @@ class FileHarnessStateStore:
 
     def _path_for_session(self, session_id: str) -> Path:
         return self._directory / f"{quote(session_id, safe='')}.json"
+
+    @staticmethod
+    def _load_snapshot_file(path: Path) -> StoredHarnessState:
+        try:
+            payload = path.read_text(encoding="utf-8")
+            return StoredHarnessState.model_validate_json(payload)
+        except (OSError, UnicodeDecodeError, ValidationError, ValueError) as exc:
+            raise HarnessStateCorruptionError(
+                path,
+                "Corrupt persisted harness session file",
+            ) from exc
 
 
 def ensure_supported_schema_version(schema_version: str) -> None:

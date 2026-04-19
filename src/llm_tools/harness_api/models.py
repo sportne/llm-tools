@@ -280,6 +280,8 @@ class HarnessTurn(BaseModel):
     started_at: str
     selected_task_ids: list[str] = Field(default_factory=list)
     workflow_result: WorkflowTurnResult | None = None
+    pending_approval_request: ApprovalRequest | None = None
+    verification_status_by_task_id: dict[str, str] = Field(default_factory=dict)
     decision: TurnDecision | None = None
     no_progress_signals: list[NoProgressSignal] = Field(default_factory=list)
     ended_at: str | None = None
