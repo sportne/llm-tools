@@ -87,14 +87,17 @@ class _EnvEchoOutput(BaseModel):
 class _EnvEchoTool(Tool[_EnvEchoInput, _EnvEchoOutput]):
     spec = ToolSpec(
         name="env_echo",
-        description="Return one value from the tool context env.",
+        description="Return one value from the scoped tool secrets.",
         side_effects=SideEffectClass.NONE,
+        required_secrets=["HARNESS_RESUME_SECRET"],
     )
     input_model = _EnvEchoInput
     output_model = _EnvEchoOutput
 
-    def invoke(self, context: ToolContext, args: _EnvEchoInput) -> _EnvEchoOutput:
-        return _EnvEchoOutput(value=context.env.get(args.key, ""))
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: _EnvEchoInput
+    ) -> _EnvEchoOutput:
+        return _EnvEchoOutput(value=context.secrets.get(args.key, ""))
 
 
 class _StaticDriver:

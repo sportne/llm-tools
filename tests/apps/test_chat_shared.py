@@ -217,7 +217,7 @@ def test_chat_runtime_provider_factory_and_executor_defaults(
 
 def test_chat_runtime_registry_contains_expected_read_tools() -> None:
     registry = _CHAT_RUNTIME_MODULE.build_chat_registry()
-    tool_names = {tool.spec.name for tool in registry.list_registered_tools()}
+    tool_names = {spec.name for spec in registry.list_tools()}
     assert {"list_directory", "find_files", "read_file", "search_text"}.issubset(
         tool_names
     )
