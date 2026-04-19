@@ -797,21 +797,71 @@ def _streamlit_theme_css(
   background: color-mix(in srgb, var(--llm-tools-page) 84%, transparent);
   color: var(--llm-tools-text);
   height: auto;
-  min-height: 1.9rem;
+  min-height: 2.3rem;
 }}
 [data-testid="stHeader"] .stAppToolbar {{
-  min-height: 1.9rem;
-  height: 1.9rem;
-  padding-top: 0.05rem;
-  padding-bottom: 0.05rem;
+  min-height: 2.3rem;
+  height: 2.3rem;
+  padding-top: 0.1rem;
+  padding-bottom: 0.1rem;
 }}
 section[data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child {{
   background: linear-gradient(180deg, var(--llm-tools-sidebar) 0%, var(--llm-tools-page) 100%);
   color: var(--llm-tools-text);
 }}
+[data-testid="stExpandSidebarButton"],
+[data-testid="stSidebarCollapseButton"] button {{
+  background: var(--llm-tools-surface) !important;
+  color: var(--llm-tools-text) !important;
+  border: 1px solid var(--llm-tools-border) !important;
+  border-radius: 0.75rem;
+  min-width: 2.1rem;
+  min-height: 2.1rem;
+  padding: 0.2rem;
+  box-shadow: 0 10px 24px var(--llm-tools-shadow);
+  opacity: 1 !important;
+}}
+[data-testid="stExpandSidebarButton"] span,
+[data-testid="stSidebarCollapseButton"] button span,
+[data-testid="stExpandSidebarButton"] svg,
+[data-testid="stSidebarCollapseButton"] button svg,
+[data-testid="stExpandSidebarButton"] svg path,
+[data-testid="stSidebarCollapseButton"] button svg path,
+[data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"],
+[data-testid="stSidebarCollapseButton"] button [data-testid="stIconMaterial"] {{
+  color: var(--llm-tools-text) !important;
+  fill: var(--llm-tools-text) !important;
+  stroke: var(--llm-tools-text) !important;
+  opacity: 1 !important;
+}}
+[data-testid="stExpandSidebarButton"]:hover,
+[data-testid="stSidebarCollapseButton"] button:hover {{
+  border-color: var(--llm-tools-accent) !important;
+  color: var(--llm-tools-accent) !important;
+  background: color-mix(in srgb, var(--llm-tools-surface-alt) 96%, transparent) !important;
+}}
+[data-testid="stExpandSidebarButton"]:hover span,
+[data-testid="stSidebarCollapseButton"] button:hover span,
+[data-testid="stExpandSidebarButton"]:hover svg,
+[data-testid="stSidebarCollapseButton"] button:hover svg,
+[data-testid="stExpandSidebarButton"]:hover svg path,
+[data-testid="stSidebarCollapseButton"] button:hover svg path,
+[data-testid="stExpandSidebarButton"]:hover [data-testid="stIconMaterial"],
+[data-testid="stSidebarCollapseButton"] button:hover [data-testid="stIconMaterial"] {{
+  color: var(--llm-tools-accent) !important;
+  fill: var(--llm-tools-accent) !important;
+  stroke: var(--llm-tools-accent) !important;
+}}
+[data-testid="stExpandSidebarButton"]:focus-visible,
+[data-testid="stSidebarCollapseButton"] button:focus-visible {{
+  border-color: var(--llm-tools-accent) !important;
+  outline: 2px solid var(--llm-tools-accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 0.2rem var(--llm-tools-accent-soft), 0 10px 24px var(--llm-tools-shadow);
+}}
 .stMainBlockContainer,
 .stMain .block-container {{
-  padding-top: 0.85rem !important;
+  padding-top: 3.25rem !important;
 }}
 .stApp p,
 .stApp label,
