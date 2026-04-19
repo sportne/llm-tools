@@ -53,6 +53,43 @@ def _imported_lower_layer_aliases(
     return aliases
 
 
+def _private_symbol_import_violations(layer_name: str) -> list[str]:
+    layer_root = helpers.PACKAGE_DIR / layer_name
+    allowed_prefixes = tuple(
+        f"llm_tools.{lower_layer}" for lower_layer in LOWER_LAYERS_BY_LAYER[layer_name]
+    )
+    violations: list[str] = []
+    for source_file in helpers.iter_python_files(layer_root):
+        tree = helpers.parse_module(source_file)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            resolved = helpers._resolve_from_import(source_file, node)
+            if resolved is None or not any(
+                resolved.startswith(prefix) for prefix in allowed_prefixes
+            ):
+                continue
+            for alias in node.names:
+                if not alias.name.startswith("_") or alias.name.startswith("__"):
+                    continue
+                imported_as = (
+                    f" as {alias.asname}"
+                    if alias.asname and alias.asname != alias.name
+                    else ""
+                )
+                violations.append(
+                    helpers.format_reference(
+                        source_file,
+                        node.lineno,
+                        (
+                            f"{layer_name} must not import private symbol "
+                            f"'{resolved}.{alias.name}{imported_as}'"
+                        ),
+                    )
+                )
+    return violations
+
+
 def _private_module_import_violations(layer_name: str) -> list[str]:
     layer_root = helpers.PACKAGE_DIR / layer_name
     violations: list[str] = []
@@ -91,6 +128,15 @@ def test_layers_do_not_import_private_modules(layer_name: str) -> None:
     violations = _private_module_import_violations(layer_name)
     assert not violations, (
         f"Private module imports found in layer '{layer_name}':\n"
+        + "\n".join(violations)
+    )
+
+
+@pytest.mark.parametrize("layer_name", tuple(LOWER_LAYERS_BY_LAYER))
+def test_layers_do_not_import_lower_layer_private_symbols(layer_name: str) -> None:
+    violations = _private_symbol_import_violations(layer_name)
+    assert not violations, (
+        f"Private lower-layer symbol imports found in layer '{layer_name}':\n"
         + "\n".join(violations)
     )
 
