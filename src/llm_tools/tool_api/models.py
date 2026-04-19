@@ -67,6 +67,7 @@ class ToolSpec(BaseModel):
     required_secrets: list[str] = Field(default_factory=list)
 
     cost_hint: str | None = None
+    retain_output_in_execution_record: bool = True
 
 
 class SourceProvenanceRef(BaseModel):

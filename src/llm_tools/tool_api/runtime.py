@@ -38,6 +38,7 @@ class _ExecutionState:
     redacted_input: dict[str, Any] | None = None
     validated_output: dict[str, Any] | None = None
     redacted_output: dict[str, Any] | None = None
+    retain_output_in_execution_record: bool = True
     policy_decision: PolicyDecision | None = None
     logs: list[str] | None = None
     artifacts: list[str] | None = None
@@ -93,6 +94,9 @@ class ToolRuntime:
 
         state.tool_name = tool.spec.name
         state.tool_version = tool.spec.version
+        state.retain_output_in_execution_record = (
+            tool.spec.retain_output_in_execution_record
+        )
         redactor = self._new_redactor(state.tool_name)
         state.redaction_summary = redactor.summary
 
@@ -235,6 +239,9 @@ class ToolRuntime:
 
         state.tool_name = tool.spec.name
         state.tool_version = tool.spec.version
+        state.retain_output_in_execution_record = (
+            tool.spec.retain_output_in_execution_record
+        )
         redactor = self._new_redactor(state.tool_name)
         state.redaction_summary = redactor.summary
 
@@ -456,8 +463,16 @@ class ToolRuntime:
             request=state.request,
             validated_input=state.validated_input,
             redacted_input=state.redacted_input,
-            validated_output=state.validated_output,
-            redacted_output=state.redacted_output,
+            validated_output=(
+                state.validated_output
+                if state.retain_output_in_execution_record
+                else None
+            ),
+            redacted_output=(
+                state.redacted_output
+                if state.retain_output_in_execution_record
+                else None
+            ),
             ok=state.ok,
             error_code=state.error_code,
             policy_decision=state.policy_decision,
