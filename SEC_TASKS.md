@@ -164,21 +164,33 @@ silently widen privileges.
 - [x] Landed hardening: adapter parsing and OpenAI-compatible provider fallback
   coverage updates are merged.
 
-### [~] Phase 4: Durable orchestration (`harness_api`)
+### [x] Phase 4: Durable orchestration (`harness_api`)
 
 Outcome: assess multi-turn session orchestration, persistence, replay, and
 verification as a security-critical control plane.
 
-- [ ] Review session, task, and turn lifecycle models for state confusion,
+- [x] Review session, task, and turn lifecycle models for state confusion,
   replay inconsistency, and approval durability issues.
-- [ ] Audit persisted storage, resume, replay, and summaries for secret
+- [x] Audit persisted storage, resume, replay, and summaries for secret
   retention, tamper exposure, and unsafe trust in stored artifacts.
-- [ ] Review planning, context construction, verification, and protection
+- [x] Review planning, context construction, verification, and protection
   scrubbing for privilege escalation or leakage across turns.
-- [ ] Assess stop conditions, no-progress handling, retries, and recovery
+- [x] Assess stop conditions, no-progress handling, retries, and recovery
   logic for abuse, infinite work, or unsafe resumptions.
 - [x] Landed hardening: harness approval persistence and session-safety updates
   are merged.
+- [ ] Medium: harness_api - prevent `completed` terminalization when the planner
+  returns no actionable tasks but blocked or otherwise non-terminal tasks still
+  exist.
+- [ ] Medium: harness_api - add durable checkpointing or idempotency safeguards
+  so side-effectful work is not replayed after crash-before-save recovery.
+- [ ] Medium: harness_api - enforce `max_tool_invocations` before or during
+  dispatch so a single turn cannot overshoot the configured tool budget.
+- [ ] Medium: harness_api - constrain approval resume environment rehydration to
+  a reviewed allowlist or stable approved snapshot instead of the full current
+  process environment.
+- [ ] Low: harness_api - implement executor-level no-progress detection and add
+  negative tests for repeated non-progress loops and blocked-only sessions.
 
 ### [~] Phase 5: User-facing surfaces (`apps`)
 
