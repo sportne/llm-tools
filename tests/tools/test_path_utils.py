@@ -66,3 +66,43 @@ def test_is_hidden_path_detects_hidden_relative_parts(tmp_path: Path) -> None:
         is_hidden_path(tmp_path.resolve(), (tmp_path / "visible.txt").resolve())
         is False
     )
+
+
+def test_get_workspace_root_rejects_missing_workspace_configuration() -> None:
+    with pytest.raises(ValueError, match="No workspace configured"):
+        get_workspace_root(ToolContext(invocation_id="inv-0", workspace=None))
+
+
+def test_resolve_workspace_path_rejects_paths_outside_workspace(tmp_path: Path) -> None:
+    context = ToolContext(invocation_id="inv-outside", workspace=str(tmp_path))
+
+    with pytest.raises(ValueError, match="outside the workspace root"):
+        resolve_workspace_path(context, "../escape.txt", must_exist=False)
+
+
+def test_resolve_workspace_path_allows_missing_target_when_permitted(
+    tmp_path: Path,
+) -> None:
+    context = ToolContext(invocation_id="inv-new", workspace=str(tmp_path))
+
+    resolved = resolve_workspace_path(context, "new-file.txt", must_exist=False)
+    assert resolved == (tmp_path / "new-file.txt").resolve()
+
+
+def test_resolve_workspace_path_supports_absolute_path_within_workspace(
+    tmp_path: Path,
+) -> None:
+    file_path = tmp_path / "note.txt"
+    file_path.write_text("hello", encoding="utf-8")
+    context = ToolContext(invocation_id="inv-abs", workspace=str(tmp_path))
+
+    resolved = resolve_workspace_path(context, str(file_path.resolve()))
+    assert resolved == file_path.resolve()
+
+
+def test_relative_display_path_returns_relative_posix_path(tmp_path: Path) -> None:
+    target = (tmp_path / "nested" / "file.txt").resolve()
+    target.parent.mkdir()
+    target.write_text("x", encoding="utf-8")
+
+    assert relative_display_path(tmp_path.resolve(), target) == "nested/file.txt"

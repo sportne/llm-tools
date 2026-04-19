@@ -323,10 +323,6 @@ project/
           __init__.py
           __main__.py
           app.py
-        streamlit_chat/
-          __init__.py
-          __main__.py
-          app.py
       tools/
         __init__.py
         _path_utils.py

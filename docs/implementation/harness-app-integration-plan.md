@@ -4,16 +4,8 @@ This document captures the older Phase 10.3 plan for integrating the persisted
 `harness_api` session surface into the app layer without moving harness
 contracts into app-specific modules.
 
-Textual clients have since been removed. The remaining interactive surfaces are
-the Streamlit apps, and `streamlit_chat` is now a deprecated migration surface.
-
-## Streamlit Chat
-
-- add persisted session selection and inspection controls driven by the same
-  session list and inspect APIs
-- reuse trace and summary artifacts for operator-visible history rather than
-  rebuilding presentation state in Streamlit
-- keep provider and app-specific configuration local to the Streamlit app
+Textual clients have since been removed. The remaining interactive surface is
+the Streamlit assistant app.
 
 ## Shared Seams
 
