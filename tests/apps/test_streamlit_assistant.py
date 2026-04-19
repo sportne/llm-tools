@@ -730,6 +730,135 @@ def test_streamlit_assistant_helper_paths_and_preferences(
     )
 
 
+def test_streamlit_assistant_copy_helpers_cover_status_sources_and_session_meta() -> (
+    None
+):
+    runtime = _make_runtime(root_path=None)
+    runtime.enabled_tools = []
+    assert _MODULES.app._assistant_status_copy("thinking") == (
+        "Assistant is drafting a response."
+    )
+    assert _MODULES.app._source_readiness_tokens(runtime) == ["sources: chat only"]
+
+    runtime = _make_runtime(root_path=None)
+    runtime.enabled_tools = ["read_file", "write_file"]
+    runtime.allow_filesystem = False
+    runtime.require_approval_for = {SideEffectClass.LOCAL_WRITE}
+    tokens = _MODULES.app._source_readiness_tokens(runtime)
+    assert "Local Files: needs workspace" in tokens
+
+    record = _make_record(root_path=None)
+    record.summary.message_count = 3
+    turn_state = _MODULES.app.AssistantTurnState(
+        busy=True, queued_follow_up_prompt="follow up"
+    )
+    meta = _MODULES.app._session_meta_copy(
+        record,
+        turn_state=turn_state,
+        draft="draft text",
+        is_active=True,
+    )
+    assert meta == "current | 3 msgs | working | follow-up queued | draft saved"
+
+
+def test_streamlit_assistant_render_helpers_show_updated_copy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit(
+        button_values={"Queue follow-up": True},
+        text_input_values={"composer:session-1": "next question"},
+    )
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(_MODULES.app, "_save_workspace_state", lambda app_state: None)
+
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+    turn_state = _MODULES.app._turn_state_for(app_state, session_id)
+    turn_state.busy = True
+    turn_state.status_text = "thinking"
+    turn_state.queued_follow_up_prompt = "already queued"
+    app_state.drafts[session_id] = "draft text"
+
+    created: list[str] = []
+    monkeypatch.setattr(
+        _MODULES.app,
+        "_submit_streamlit_prompt",
+        lambda **kwargs: created.append(kwargs["prompt"]) or True,
+    )
+
+    _MODULES.app._render_sidebar_session_controls(
+        app_state,
+        config=StreamlitAssistantConfig(),
+        root_path=tmp_path,
+        runtime=app_state.sessions[session_id].runtime,
+    )
+    _MODULES.app._render_summary_chips(app_state.sessions[session_id])
+    _MODULES.app._render_empty_state(app_state.sessions[session_id])
+    _MODULES.app._render_status_and_composer(
+        app_state,
+        session_id=session_id,
+        config=StreamlitAssistantConfig(),
+    )
+
+    assert "New session from current setup" in fake_st.button_labels
+    assert "Delete" in fake_st.button_labels
+    assert "Queue follow-up" in fake_st.button_labels
+    assert any(
+        "New sessions reuse the current model, permissions, and enabled sources."
+        in item
+        for item in fake_st.caption_messages
+    )
+    assert any(
+        "current | 0 msgs | working | follow-up queued | draft saved | workspace on"
+        in item
+        for item in fake_st.caption_messages
+    )
+    assert any(
+        "Assistant is drafting a response." in item for item in fake_st.caption_messages
+    )
+    assert any(
+        "Queued follow-up: already queued" in item for item in fake_st.caption_messages
+    )
+    assert any(
+        "Start with a normal question" in item for item in fake_st.markdown_messages
+    )
+    assert any(
+        "This assistant can answer directly without tools." in item
+        for item in fake_st.markdown_messages
+    )
+    assert any("Assistant session" in item for item in fake_st.markdown_messages)
+    assert any("Local Files: ready" in item for item in fake_st.markdown_messages)
+    assert created == ["next question"]
+    assert app_state.drafts[session_id] == ""
+
+
+def test_streamlit_assistant_sidebar_session_controls_can_switch_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit(button_values={"session:session-2": True})
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(_MODULES.app, "_save_workspace_state", lambda app_state: None)
+
+    app_state = _make_app_state(root_path=str(tmp_path))
+    other = _make_record(session_id="session-2", root_path=str(tmp_path))
+    other.summary.title = "Second session"
+    app_state.sessions["session-2"] = other
+    app_state.session_order.append("session-2")
+    app_state.turn_states["session-2"] = _MODULES.app.AssistantTurnState()
+
+    switched = _MODULES.app._render_sidebar_session_controls(
+        app_state,
+        config=StreamlitAssistantConfig(),
+        root_path=tmp_path,
+        runtime=app_state.sessions[app_state.active_session_id].runtime,
+    )
+
+    assert switched is False
+    assert app_state.active_session_id == "session-2"
+
+
 def test_streamlit_assistant_persists_multiple_sessions_and_deletes_them(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -883,8 +1012,7 @@ def test_streamlit_assistant_event_reducers_and_drain(
     assert pending_prompt is None
     assert any(entry.text == "warn" for entry in record.transcript)
     assert any(
-        entry.text == "Approved pending approval request."
-        for entry in record.transcript
+        entry.text == "Approved the requested tool run." for entry in record.transcript
     )
     assert any(entry.text == "boom" for entry in record.transcript)
     assert record.inspector_state.provider_messages
@@ -927,6 +1055,49 @@ def test_streamlit_assistant_event_reducers_and_drain(
         )
 
 
+def test_streamlit_assistant_drain_returns_originating_session_for_queued_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(_MODULES.app, "_save_workspace_state", lambda app_state: None)
+
+    app_state = _make_app_state(root_path=str(tmp_path))
+    other = _make_record(session_id="session-2", root_path=str(tmp_path))
+    app_state.sessions["session-2"] = other
+    app_state.session_order.append("session-2")
+    app_state.turn_states["session-2"] = _MODULES.app.AssistantTurnState()
+    app_state.active_session_id = "session-2"
+
+    queue_obj: queue.Queue[object] = queue.Queue()
+    queue_obj.put(
+        _MODULES.app.AssistantQueuedEvent(
+            kind="complete",
+            payload=None,
+            turn_number=1,
+            session_id="session-1",
+        )
+    )
+    handle = _MODULES.app.AssistantActiveTurnHandle(
+        session_id="session-1",
+        runner=_FakeRunnerHandle(),
+        event_queue=queue_obj,
+        thread=_DeadThread(),
+        turn_number=1,
+    )
+    fake_st.session_state[_MODULES.app._ACTIVE_TURN_STATE_SLOT] = handle
+    turn_state = _MODULES.app._turn_state_for(app_state, "session-1")
+    turn_state.busy = True
+    turn_state.cancelling = True
+    turn_state.queued_follow_up_prompt = "resume work"
+
+    pending_prompt = _MODULES.app._drain_active_turn_events(app_state)
+
+    assert pending_prompt == ("session-1", "resume work")
+    assert fake_st.session_state[_MODULES.app._ACTIVE_TURN_STATE_SLOT] is None
+
+
 def test_streamlit_assistant_complete_event_finishes_cancelled_turn(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -940,7 +1111,7 @@ def test_streamlit_assistant_complete_event_finishes_cancelled_turn(
     turn_state.busy = True
     turn_state.cancelling = True
     turn_state.status_text = "stopping"
-    turn_state.pending_interrupt_draft = "next prompt"
+    turn_state.queued_follow_up_prompt = "next prompt"
 
     ignored = _MODULES.app._apply_queued_event(
         app_state,
@@ -966,7 +1137,9 @@ def test_streamlit_assistant_complete_event_finishes_cancelled_turn(
     assert pending_prompt == "next prompt"
     assert turn_state.busy is False
     assert turn_state.cancelling is False
-    assert app_state.sessions[session_id].transcript[-1].text == "Stopped active turn."
+    assert (
+        app_state.sessions[session_id].transcript[-1].text == "Stopped the active turn."
+    )
 
 
 def test_streamlit_assistant_submit_prompt_and_approval_helpers(
@@ -988,37 +1161,48 @@ def test_streamlit_assistant_submit_prompt_and_approval_helpers(
         "_start_streamlit_turn",
         lambda **kwargs: started.append(kwargs["user_message"]),
     )
-    cancelled: list[bool] = []
-    monkeypatch.setattr(
-        _MODULES.app,
-        "_cancel_active_turn",
-        lambda app_state, session_id, preserve_pending_prompt=False: cancelled.append(
-            preserve_pending_prompt
-        ),
-    )
 
     turn_state = _MODULES.app._turn_state_for(app_state, session_id)
-    _MODULES.app._submit_streamlit_prompt(
-        app_state=app_state,
-        session_id=session_id,
-        config=StreamlitAssistantConfig(),
-        prompt="   ",
+    assert (
+        _MODULES.app._submit_streamlit_prompt(
+            app_state=app_state,
+            session_id=session_id,
+            config=StreamlitAssistantConfig(),
+            prompt="   ",
+        )
+        is False
     )
     turn_state.busy = True
-    _MODULES.app._submit_streamlit_prompt(
-        app_state=app_state,
-        session_id=session_id,
-        config=StreamlitAssistantConfig(),
-        prompt="pending",
+    assert (
+        _MODULES.app._submit_streamlit_prompt(
+            app_state=app_state,
+            session_id=session_id,
+            config=StreamlitAssistantConfig(),
+            prompt="pending",
+        )
+        is True
     )
+    assert turn_state.queued_follow_up_prompt == "pending"
+    assert (
+        _MODULES.app._submit_streamlit_prompt(
+            app_state=app_state,
+            session_id=session_id,
+            config=StreamlitAssistantConfig(),
+            prompt="replacement",
+        )
+        is True
+    )
+    assert turn_state.queued_follow_up_prompt == "replacement"
     turn_state.busy = False
-    _MODULES.app._submit_streamlit_prompt(
-        app_state=app_state,
-        session_id=session_id,
-        config=StreamlitAssistantConfig(),
-        prompt="hello",
+    assert (
+        _MODULES.app._submit_streamlit_prompt(
+            app_state=app_state,
+            session_id=session_id,
+            config=StreamlitAssistantConfig(),
+            prompt="hello",
+        )
+        is True
     )
-    assert cancelled == [True]
     assert started == ["hello"]
 
     runner = _FakeRunnerHandle()
@@ -1055,6 +1239,53 @@ def test_streamlit_assistant_submit_prompt_and_approval_helpers(
     )
     assert runner.approvals == [True]
     assert turn_state.approval_decision_in_flight is True
+
+
+def test_streamlit_assistant_render_status_and_composer_shows_approval_copy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(_MODULES.app, "_save_workspace_state", lambda app_state: None)
+
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+    turn_state = _MODULES.app._turn_state_for(app_state, session_id)
+    turn_state.status_text = "approval required"
+    turn_state.pending_approval = ChatWorkflowApprovalState(
+        approval_request=ApprovalRequest(
+            approval_id="approval-3",
+            invocation_index=1,
+            request={"tool_name": "read_file", "arguments": {"path": "a.txt"}},
+            tool_name="read_file",
+            tool_version="0.1.0",
+            policy_reason="approval required",
+            policy_metadata={},
+            requested_at="2026-01-01T00:00:00Z",
+            expires_at="2026-01-01T00:05:00Z",
+        ),
+        tool_name="read_file",
+        redacted_arguments={"path": "a.txt"},
+        policy_reason="approval required",
+        policy_metadata={},
+    )
+
+    _MODULES.app._render_status_and_composer(
+        app_state,
+        session_id=session_id,
+        config=StreamlitAssistantConfig(),
+    )
+
+    assert "Allow tool" in fake_st.button_labels
+    assert "Skip tool" in fake_st.button_labels
+    assert any(
+        "Approval is needed to continue." in item for item in fake_st.caption_messages
+    )
+    assert any(
+        "Approval needed before using read_file. approval required." in item
+        for item in fake_st.markdown_messages
+    )
 
 
 def test_streamlit_assistant_research_controls_resume_with_explicit_approval_resolution(
@@ -1447,6 +1678,34 @@ def test_streamlit_assistant_load_save_delete_edge_paths(
     assert single.active_session_id in single.sessions
 
 
+def test_streamlit_assistant_start_turn_renames_legacy_default_title(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(_MODULES.app, "_save_workspace_state", lambda app_state: None)
+    fake_runner = _FakeIterableRunner([])
+    monkeypatch.setattr(
+        _MODULES.app, "_build_assistant_runner", lambda **kwargs: fake_runner
+    )
+    monkeypatch.setattr(_MODULES.app.threading, "Thread", _FakeThread)
+
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+    app_state.sessions[session_id].summary.title = "New assistant chat"
+
+    _MODULES.app._start_streamlit_turn(
+        app_state=app_state,
+        session_id=session_id,
+        config=StreamlitAssistantConfig(),
+        provider="provider",
+        user_message="legacy title prompt",
+    )
+
+    assert app_state.sessions[session_id].summary.title == "legacy title prompt"
+
+
 def test_streamlit_assistant_start_cancel_and_resolve_guard_branches(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1482,10 +1741,12 @@ def test_streamlit_assistant_start_cancel_and_resolve_guard_branches(
     assert fake_runner.cancelled is True
 
     fake_st.session_state[_MODULES.app._ACTIVE_TURN_STATE_SLOT] = None
-    turn_state.pending_interrupt_draft = "draft"
+    turn_state.queued_follow_up_prompt = "draft"
     _MODULES.app._cancel_active_turn(app_state, session_id=session_id)
     assert turn_state.busy is False
-    assert app_state.sessions[session_id].transcript[-1].text == "Stopped active turn."
+    assert (
+        app_state.sessions[session_id].transcript[-1].text == "Stopped the active turn."
+    )
 
     _MODULES.app._resolve_active_approval(
         app_state, session_id=session_id, approved=True
@@ -1590,8 +1851,8 @@ def test_streamlit_assistant_process_turn_handles_approval_and_continuation() ->
 
     assert runner.approvals == [True]
     assert [entry.text for entry in outcome.transcript_entries] == [
-        "Approval requested for read_file: approval required",
-        "Approved pending approval request.",
+        "Approval needed before using read_file. approval required.",
+        "Approved the requested tool run.",
         "warn",
         "continue",
     ]
@@ -1615,10 +1876,28 @@ def test_streamlit_assistant_apply_turn_result_and_queue_error_branches(
             session_state=ChatSessionState(),
         )
     )
-    _MODULES.app._apply_turn_result(
+    _MODULES.app._turn_state_for(
+        app_state, session_id
+    ).queued_follow_up_prompt = "next prompt"
+    returned = _MODULES.app._apply_turn_result(
         app_state, session_id=session_id, event=continuation_event
     )
+    assert returned == "next prompt"
     assert app_state.sessions[session_id].transcript[-1].text == "continue next"
+
+    _MODULES.app._turn_state_for(
+        app_state, session_id
+    ).queued_follow_up_prompt = "retry prompt"
+    queued_prompt = _MODULES.app._apply_queued_event(
+        app_state,
+        _MODULES.app.AssistantQueuedEvent(
+            kind="error",
+            payload="boom again",
+            turn_number=2,
+            session_id=session_id,
+        ),
+    )
+    assert queued_prompt == "retry prompt"
 
     with pytest.raises(ValueError, match="Unsupported queued event kind"):
         _MODULES.app._apply_queued_event(

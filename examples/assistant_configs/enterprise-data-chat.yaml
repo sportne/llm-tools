@@ -38,6 +38,9 @@ policy:
     - read_gitlab_file
     - read_gitlab_merge_request
 
+protection:
+  enabled: false
+
 ui:
   show_token_usage: true
   show_footer_help: true

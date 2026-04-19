@@ -46,6 +46,10 @@ from llm_tools.apps.chat_runtime import (
     build_chat_executor,
     create_provider,
 )
+from llm_tools.apps.protection_runtime import (
+    build_protection_controller,
+    build_protection_environment,
+)
 from llm_tools.apps.streamlit_chat.models import (
     StreamlitInspectorEntry,
     StreamlitInspectorState,
@@ -1301,6 +1305,19 @@ def _build_chat_runner(
     )
     registry, executor = build_chat_executor(policy=policy)
     root = Path(runtime.root_path) if runtime.root_path is not None else None
+    protection_controller = build_protection_controller(
+        config=config.protection,
+        provider=provider,
+        environment=build_protection_environment(
+            app_name="streamlit_chat",
+            model_name=runtime.model_name,
+            workspace=runtime.root_path,
+            enabled_tools=enabled_tools,
+            allow_network=runtime.allow_network,
+            allow_filesystem=runtime.allow_filesystem and runtime.root_path is not None,
+            allow_subprocess=runtime.allow_subprocess and runtime.root_path is not None,
+        ),
+    )
     return run_interactive_chat_session_turn(
         user_message=user_message,
         session_state=session_state,
@@ -1321,6 +1338,7 @@ def _build_chat_runner(
         tool_limits=config.tool_limits,
         redaction_config=config.policy.redaction,
         temperature=config.llm.temperature,
+        protection_controller=protection_controller,
     )
 
 

@@ -93,13 +93,21 @@ Session controls let you opt into:
 - subprocess access
 - approval requirements for reads and writes
 
-The UI surfaces capability state for each enabled tool, including:
+New assistant sessions clone the current model, permissions, and enabled source
+choices so it is easy to branch a conversation without rebuilding the setup.
 
-- available
-- missing workspace
-- missing credentials
-- permission blocked
-- approval gated
+If you send another prompt while the assistant is still working, the UI keeps one
+queued follow-up prompt for that session and sends it automatically when the
+active turn finishes or is stopped.
+
+The UI surfaces capability state for each enabled tool and source group with
+assistant-facing readiness hints such as:
+
+- ready
+- needs workspace
+- needs credentials
+- blocked by permissions
+- approval on use
 
 ## Citations
 

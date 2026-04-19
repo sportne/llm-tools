@@ -28,10 +28,15 @@ from llm_tools.apps.assistant_runtime import (
     build_assistant_policy,
     build_live_harness_provider,
     build_tool_capabilities,
+    build_tool_group_capability_summaries,
     resolve_assistant_default_enabled_tools,
 )
 from llm_tools.apps.chat_presentation import format_citation, pretty_json
 from llm_tools.apps.chat_runtime import create_provider
+from llm_tools.apps.protection_runtime import (
+    build_protection_controller,
+    build_protection_environment,
+)
 from llm_tools.apps.streamlit_chat.models import (
     StreamlitInspectorEntry,
     StreamlitPersistedSessionRecord,
@@ -94,7 +99,7 @@ class AssistantTurnState:
     pending_approval: ChatWorkflowApprovalState | None = None
     approval_decision_in_flight: bool = False
     active_turn_number: int = 0
-    pending_interrupt_draft: str | None = None
+    queued_follow_up_prompt: str | None = None
     cancelling: bool = False
 
 
@@ -441,7 +446,7 @@ def _new_session_record(
     now = _now_iso()
     summary = StreamlitSessionSummary(
         session_id=session_id,
-        title="New assistant chat",
+        title="New assistant session",
         created_at=now,
         updated_at=now,
         root_path=runtime.root_path,
@@ -638,6 +643,135 @@ def _title_from_prompt(prompt: str) -> str:
     return f"{cleaned[:57].rstrip()}..."
 
 
+def _is_default_assistant_session_title(title: str) -> bool:
+    return title in {"New assistant session", "New assistant chat"}
+
+
+def _assistant_status_copy(status_text: str) -> str:
+    status_map = {
+        "thinking": "Assistant is drafting a response.",
+        "approval required": "Approval is needed to continue.",
+        "approving": "Applying approval and continuing.",
+        "denying": "Skipping the requested tool and continuing.",
+        "resuming turn": "Assistant is continuing with the current turn.",
+        "continuing without approval": "Assistant is continuing without that tool.",
+        "approval timed out": "Approval window expired for this step.",
+        "stopping": "Stopping the current turn.",
+    }
+    cleaned = status_text.strip()
+    if not cleaned:
+        return ""
+    return status_map.get(cleaned, cleaned.replace("_", " ").capitalize() + ".")
+
+
+def _approval_request_copy(approval: ChatWorkflowApprovalState) -> str:
+    reason = approval.policy_reason.strip().rstrip(".")
+    if reason:
+        return f"Approval needed before using {approval.tool_name}. {reason}."
+    return f"Approval needed before using {approval.tool_name}."
+
+
+def _approval_resolution_copy(resolution: str) -> str:
+    return {
+        "approved": "Approved the requested tool run.",
+        "denied": "Skipped the requested tool run.",
+        "timed_out": "The approval request timed out.",
+        "cancelled": "The approval request was cancelled.",
+    }[resolution]
+
+
+def _tool_status_copy(status: str) -> str:
+    return {
+        "available": "ready",
+        "disabled": "off",
+        "missing_workspace": "needs workspace",
+        "missing_credentials": "needs credentials",
+        "permission_blocked": "blocked by permissions",
+    }[status]
+
+
+def _tool_capability_caption(item: Any) -> str:
+    status_bits = [_tool_status_copy(item.status)]
+    if item.approval_required:
+        status_bits.append("approval on use")
+    if item.detail:
+        status_bits.append(item.detail)
+    return " | ".join(status_bits)
+
+
+def _group_readiness_copy(group_name: str, summary: Any) -> str:
+    if summary.enabled_tools == 0:
+        return f"{group_name} is off for this session."
+    parts = [f"{summary.enabled_tools} enabled"]
+    if summary.available_tools:
+        parts.append(f"{summary.available_tools} ready")
+    if summary.missing_workspace_tools:
+        parts.append("needs workspace")
+    if summary.missing_credentials_tools:
+        parts.append("needs credentials")
+    if summary.permission_blocked_tools:
+        parts.append("blocked by permissions")
+    if summary.approval_gated_tools:
+        parts.append("approval on use")
+    return " | ".join(parts)
+
+
+def _source_readiness_tokens(runtime: StreamlitRuntimeConfig) -> list[str]:
+    capability_groups = build_tool_capabilities(
+        tool_specs=_all_tool_specs(),
+        enabled_tools=set(runtime.enabled_tools),
+        root_path=runtime.root_path,
+        env=dict(os.environ),
+        allow_network=runtime.allow_network,
+        allow_filesystem=runtime.allow_filesystem and runtime.root_path is not None,
+        allow_subprocess=runtime.allow_subprocess and runtime.root_path is not None,
+        require_approval_for=set(runtime.require_approval_for),
+    )
+    summaries = build_tool_group_capability_summaries(capability_groups)
+    if not summaries or not any(
+        summary.enabled_tools for summary in summaries.values()
+    ):
+        return ["sources: chat only"]
+
+    tokens: list[str] = []
+    for group_name, summary in summaries.items():
+        if summary.enabled_tools == 0:
+            continue
+        readiness = "ready"
+        if summary.missing_workspace_tools:
+            readiness = "needs workspace"
+        elif summary.missing_credentials_tools:
+            readiness = "needs credentials"
+        elif summary.permission_blocked_tools:
+            readiness = "blocked"
+        elif summary.approval_gated_tools:
+            readiness = "approval on use"
+        tokens.append(f"{group_name}: {readiness}")
+    return tokens or ["sources: chat only"]
+
+
+def _session_meta_copy(
+    record: StreamlitPersistedSessionRecord,
+    *,
+    turn_state: AssistantTurnState,
+    draft: str,
+    is_active: bool,
+) -> str:
+    parts: list[str] = []
+    if is_active:
+        parts.append("current")
+    parts.append(f"{record.summary.message_count} msgs")
+    if turn_state.busy:
+        parts.append("working")
+    if turn_state.queued_follow_up_prompt:
+        parts.append("follow-up queued")
+    if draft.strip():
+        parts.append("draft saved")
+    if record.runtime.root_path:
+        parts.append("workspace on")
+    return " | ".join(parts)
+
+
 def _llm_config_for_runtime(
     config: StreamlitAssistantConfig,
     runtime: StreamlitRuntimeConfig,
@@ -741,6 +875,19 @@ def _build_assistant_runner(
         root=root,
         env=dict(os.environ),
     )
+    protection_controller = build_protection_controller(
+        config=config.protection,
+        provider=provider,
+        environment=build_protection_environment(
+            app_name="streamlit_assistant",
+            model_name=runtime.model_name,
+            workspace=runtime.root_path,
+            enabled_tools=sorted(exposed_tool_names),
+            allow_network=runtime.allow_network,
+            allow_filesystem=runtime.allow_filesystem and root is not None,
+            allow_subprocess=runtime.allow_subprocess and root is not None,
+        ),
+    )
     return run_interactive_chat_session_turn(
         user_message=user_message,
         session_state=session_state,
@@ -761,6 +908,7 @@ def _build_assistant_runner(
         tool_limits=config.tool_limits,
         redaction_config=config.policy.redaction,
         temperature=config.llm.temperature,
+        protection_controller=protection_controller,
     )
 
 
@@ -894,8 +1042,8 @@ def _apply_turn_result(
     turn_state.status_text = ""
     turn_state.busy = False
     turn_state.cancelling = False
-    pending_prompt = turn_state.pending_interrupt_draft
-    turn_state.pending_interrupt_draft = None
+    pending_prompt = turn_state.queued_follow_up_prompt
+    turn_state.queued_follow_up_prompt = None
     _touch_record(record)
     return pending_prompt
 
@@ -911,17 +1059,19 @@ def _apply_turn_error(
     *,
     session_id: str,
     error_message: str,
-) -> None:
+) -> str | None:
     record = app_state.sessions[session_id]
     turn_state = _turn_state_for(app_state, session_id)
     record.transcript.append(StreamlitTranscriptEntry(role="error", text=error_message))
+    pending_prompt = turn_state.queued_follow_up_prompt
     turn_state.busy = False
     turn_state.status_text = ""
     turn_state.pending_approval = None
     turn_state.approval_decision_in_flight = False
-    turn_state.pending_interrupt_draft = None
+    turn_state.queued_follow_up_prompt = None
     turn_state.cancelling = False
     _touch_record(record)
+    return pending_prompt
 
 
 def _apply_queued_event(
@@ -941,16 +1091,11 @@ def _apply_queued_event(
         approval_event = ChatWorkflowApprovalEvent.model_validate(queued_event.payload)
         turn_state.pending_approval = approval_event.approval
         turn_state.approval_decision_in_flight = False
-        turn_state.status_text = (
-            f"approval required for {approval_event.approval.tool_name}"
-        )
+        turn_state.status_text = "approval required"
         record.transcript.append(
             StreamlitTranscriptEntry(
                 role="system",
-                text=(
-                    f"Approval requested for {approval_event.approval.tool_name}: "
-                    f"{approval_event.approval.policy_reason}"
-                ),
+                text=_approval_request_copy(approval_event.approval),
             )
         )
         _touch_record(record)
@@ -961,12 +1106,7 @@ def _apply_queued_event(
         )
         turn_state.pending_approval = None
         turn_state.approval_decision_in_flight = False
-        resolution_text = {
-            "approved": "Approved pending approval request.",
-            "denied": "Denied pending approval request.",
-            "timed_out": "Pending approval request timed out.",
-            "cancelled": "Pending approval request was cancelled.",
-        }[approval_resolved_event.resolution]
+        resolution_text = _approval_resolution_copy(approval_resolved_event.resolution)
         record.transcript.append(
             StreamlitTranscriptEntry(role="system", text=resolution_text)
         )
@@ -1002,23 +1142,22 @@ def _apply_queued_event(
             event=result_event,
         )
     if queued_event.kind == "error":
-        _apply_turn_error(
+        return _apply_turn_error(
             app_state,
             session_id=queued_event.session_id,
             error_message=str(queued_event.payload),
         )
-        return None
     if queued_event.kind == "complete":
         if turn_state.busy and turn_state.cancelling:
-            pending_prompt = turn_state.pending_interrupt_draft
+            pending_prompt = turn_state.queued_follow_up_prompt
             turn_state.busy = False
             turn_state.status_text = ""
             turn_state.pending_approval = None
             turn_state.approval_decision_in_flight = False
-            turn_state.pending_interrupt_draft = None
+            turn_state.queued_follow_up_prompt = None
             turn_state.cancelling = False
             record.transcript.append(
-                StreamlitTranscriptEntry(role="system", text="Stopped active turn.")
+                StreamlitTranscriptEntry(role="system", text="Stopped the active turn.")
             )
             _touch_record(record)
             return pending_prompt
@@ -1026,12 +1165,14 @@ def _apply_queued_event(
     raise ValueError(f"Unsupported queued event kind: {queued_event.kind}")
 
 
-def _drain_active_turn_events(app_state: AssistantWorkspaceState) -> str | None:
+def _drain_active_turn_events(
+    app_state: AssistantWorkspaceState,
+) -> tuple[str, str] | None:
     st = _streamlit_module()
     handle = st.session_state.get(_ACTIVE_TURN_STATE_SLOT)
     if not isinstance(handle, AssistantActiveTurnHandle):
         return None
-    pending_prompt: str | None = None
+    pending_prompt: tuple[str, str] | None = None
     while True:
         try:
             queued_event = handle.event_queue.get_nowait()
@@ -1039,7 +1180,7 @@ def _drain_active_turn_events(app_state: AssistantWorkspaceState) -> str | None:
             break
         next_prompt = _apply_queued_event(app_state, queued_event)
         if next_prompt is not None:
-            pending_prompt = next_prompt
+            pending_prompt = (queued_event.session_id, next_prompt)
     turn_state = _turn_state_for(app_state, handle.session_id)
     if (
         not handle.thread.is_alive()
@@ -1086,8 +1227,9 @@ def _start_streamlit_turn(
     turn_state.status_text = "thinking"
     turn_state.pending_approval = None
     turn_state.approval_decision_in_flight = False
+    turn_state.queued_follow_up_prompt = None
     turn_state.cancelling = False
-    if record.summary.title == "New assistant chat" and not any(
+    if _is_default_assistant_session_title(record.summary.title) and not any(
         entry.role == "user" for entry in record.transcript
     ):
         record.summary.title = _title_from_prompt(user_message)
@@ -1104,21 +1246,16 @@ def _submit_streamlit_prompt(
     session_id: str,
     config: StreamlitAssistantConfig,
     prompt: str,
-) -> None:
+) -> bool:
     cleaned_prompt = prompt.strip()
     if not cleaned_prompt:
-        return
+        return False
     record = app_state.sessions[session_id]
     turn_state = _turn_state_for(app_state, session_id)
     if turn_state.busy:
-        turn_state.pending_interrupt_draft = cleaned_prompt
-        _cancel_active_turn(
-            app_state,
-            session_id=session_id,
-            preserve_pending_prompt=True,
-        )
+        turn_state.queued_follow_up_prompt = cleaned_prompt
         _save_workspace_state(app_state)
-        return
+        return True
     llm_config = _llm_config_for_runtime(config, record.runtime)
     api_key = _current_api_key(llm_config)
     provider = _create_provider_for_runtime(
@@ -1134,6 +1271,7 @@ def _submit_streamlit_prompt(
         provider=provider,
         user_message=cleaned_prompt,
     )
+    return True
 
 
 def _resolve_active_approval(
@@ -1169,8 +1307,6 @@ def _cancel_active_turn(
         not isinstance(handle, AssistantActiveTurnHandle)
         or handle.session_id != session_id
     ):
-        if not preserve_pending_prompt:
-            turn_state.pending_interrupt_draft = None
         if turn_state.busy:
             turn_state.pending_approval = None
             turn_state.approval_decision_in_flight = False
@@ -1178,11 +1314,9 @@ def _cancel_active_turn(
             turn_state.status_text = ""
             turn_state.busy = False
             app_state.sessions[session_id].transcript.append(
-                StreamlitTranscriptEntry(role="system", text="Stopped active turn.")
+                StreamlitTranscriptEntry(role="system", text="Stopped the active turn.")
             )
         return
-    if not preserve_pending_prompt:
-        turn_state.pending_interrupt_draft = None
     turn_state.pending_approval = None
     turn_state.approval_decision_in_flight = False
     turn_state.cancelling = True
@@ -1222,10 +1356,7 @@ def process_streamlit_assistant_turn(
             transcript_entries.append(
                 StreamlitTranscriptEntry(
                     role="system",
-                    text=(
-                        f"Approval requested for {approval_event.approval.tool_name}: "
-                        f"{approval_event.approval.policy_reason}"
-                    ),
+                    text=_approval_request_copy(approval_event.approval),
                 )
             )
             runner.resolve_pending_approval(resolve_approval(approval_event.approval))
@@ -1237,12 +1368,7 @@ def process_streamlit_assistant_turn(
             transcript_entries.append(
                 StreamlitTranscriptEntry(
                     role="system",
-                    text={
-                        "approved": "Approved pending approval request.",
-                        "denied": "Denied pending approval request.",
-                        "timed_out": "Pending approval request timed out.",
-                        "cancelled": "Pending approval request was cancelled.",
-                    }[approval_resolved_event.resolution],
+                    text=_approval_resolution_copy(approval_resolved_event.resolution),
                 )
             )
             continue
@@ -1356,7 +1482,7 @@ def _render_transcript_entry(
             if entry.final_response.confidence is not None:
                 st.caption(f"Confidence: {entry.final_response.confidence:.2f}")
             if entry.final_response.citations:
-                st.markdown("**Sources**")
+                st.markdown("**Source notes**")
                 for citation in entry.final_response.citations:
                     st.markdown(f"- `{format_citation(citation)}`")
                     if citation.excerpt:
@@ -1369,15 +1495,18 @@ def _render_summary_chips(
     record: StreamlitPersistedSessionRecord,
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
-    enabled_count = len(record.runtime.enabled_tools)
-    root_text = record.runtime.root_path or "no workspace"
+    root_text = record.runtime.root_path or "chat only"
+    readiness = "".join(
+        f"<span class='assistant-chip'>{token}</span>"
+        for token in _source_readiness_tokens(record.runtime)
+    )
     st.markdown(
         "<div class='assistant-panel'>"
-        "<div><strong>llm-tools assistant</strong></div>"
+        "<div><strong>Assistant session</strong></div>"
         f"<span class='assistant-chip'>model: {record.runtime.model_name}</span>"
         f"<span class='assistant-chip'>provider: {record.runtime.provider.value}</span>"
-        f"<span class='assistant-chip'>tools enabled: {enabled_count}</span>"
-        f"<span class='assistant-chip'>root: {root_text}</span>"
+        f"<span class='assistant-chip'>workspace: {root_text}</span>"
+        f"{readiness}"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -1388,10 +1517,13 @@ def _render_empty_state(
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
     root_text = record.runtime.root_path or "No workspace selected"
-    st.markdown("### Start a new assistant conversation")
-    st.caption(f"Current root: {root_text}")
+    st.markdown("### Start with a normal question")
+    st.caption(f"Workspace: {root_text}")
     st.markdown(
-        "Ask a normal question for a tool-free answer, or enable local, GitLab, or Atlassian tools in the sidebar when you need proprietary data."
+        "This assistant can answer directly without tools. Turn on local or connected sources in the sidebar only when you want it to pull from workspace or external systems."
+    )
+    st.markdown(
+        "Use the research panel for durable multi-turn work when you need something longer-running than a normal assistant reply."
     )
 
 
@@ -1443,6 +1575,10 @@ def _build_research_controller(
             tool_registry=registry,
             enabled_tool_names=exposed_tool_names,
             workspace_enabled=root is not None,
+            workspace=str(root) if root is not None else None,
+            allow_network=runtime.allow_network,
+            allow_filesystem=runtime.allow_filesystem and root is not None,
+            allow_subprocess=runtime.allow_subprocess and root is not None,
         )
         return HarnessSessionService(
             store=FileHarnessStateStore(_research_store_dir(config)),
@@ -1467,8 +1603,15 @@ def _render_sidebar_session_controls(
     runtime: StreamlitRuntimeConfig,
 ) -> bool:  # pragma: no cover
     st = _streamlit_module()
-    st.markdown("## Assistant")
-    if st.button("New chat", key="assistant-new-chat", use_container_width=True):
+    st.markdown("## Assistant sessions")
+    st.caption(
+        "New sessions reuse the current model, permissions, and enabled sources."
+    )
+    if st.button(
+        "New session from current setup",
+        key="assistant-new-chat",
+        use_container_width=True,
+    ):
         _create_session(
             app_state,
             template_runtime=runtime.model_copy(deep=True),
@@ -1476,12 +1619,15 @@ def _render_sidebar_session_controls(
         return True
     for session_id in list(app_state.session_order):
         record = app_state.sessions[session_id]
+        turn_state = _turn_state_for(app_state, session_id)
+        is_active = session_id == app_state.active_session_id
+        row = st.columns([5, 1])
         label = record.summary.title or session_id
-        if st.button(label, key=f"session:{session_id}", use_container_width=True):
+        if row[0].button(label, key=f"session:{session_id}", use_container_width=True):
             app_state.active_session_id = session_id
             _save_workspace_state(app_state)
-        if session_id == app_state.active_session_id and st.button(
-            "Delete active chat",
+        if is_active and row[1].button(
+            "Delete",
             key=f"delete:{session_id}",
             use_container_width=True,
         ):
@@ -1492,6 +1638,14 @@ def _render_sidebar_session_controls(
                 root_path=root_path,
             )
             return True
+        st.caption(
+            _session_meta_copy(
+                record,
+                turn_state=turn_state,
+                draft=app_state.drafts.get(session_id, ""),
+                is_active=is_active,
+            )
+        )
     st.markdown("---")
     return False
 
@@ -1552,7 +1706,7 @@ def _render_sidebar_permission_controls(
     runtime: StreamlitRuntimeConfig,
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
-    st.markdown("### Permissions")
+    st.markdown("### Session permissions")
     runtime.allow_network = st.checkbox("Network access", value=runtime.allow_network)
     runtime.allow_filesystem = st.checkbox(
         "Filesystem access",
@@ -1583,7 +1737,7 @@ def _render_sidebar_tool_controls(
     runtime: StreamlitRuntimeConfig,
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
-    st.markdown("### Tools")
+    st.markdown("### Sources and tools")
     capability_groups = build_tool_capabilities(
         tool_specs=_all_tool_specs(),
         enabled_tools=set(runtime.enabled_tools),
@@ -1594,9 +1748,12 @@ def _render_sidebar_tool_controls(
         allow_subprocess=runtime.allow_subprocess and runtime.root_path is not None,
         require_approval_for=set(runtime.require_approval_for),
     )
+    summaries = build_tool_group_capability_summaries(capability_groups)
     enabled = set(runtime.enabled_tools)
     for group_name, items in capability_groups.items():
         st.markdown(f"**{group_name}**")
+        summary = summaries[group_name]
+        st.caption(_group_readiness_copy(group_name, summary))
         for item in items:
             checked = st.checkbox(
                 item.tool_name,
@@ -1607,15 +1764,10 @@ def _render_sidebar_tool_controls(
                 enabled.add(item.tool_name)
             else:
                 enabled.discard(item.tool_name)
-            status_bits = [item.status.replace("_", " ")]
-            if item.approval_required:
-                status_bits.append("approval gated")
-            st.caption(
-                " | ".join(status_bits) + (f" | {item.detail}" if item.detail else "")
-            )
+            st.caption(_tool_capability_caption(item))
     runtime.enabled_tools = sorted(enabled)
     runtime.inspector_open = st.checkbox(
-        "Show inspector",
+        "Show inspector details",
         value=runtime.inspector_open,
     )
 
@@ -1645,22 +1797,22 @@ def _render_sidebar_research_controls(
     st = _streamlit_module()
     if not config.research.enabled:
         return
-    st.markdown("### Research sessions")
+    st.markdown("### Research tasks")
     controller = _build_research_controller(config=config, runtime=runtime)
     research_prompt = st.text_area(
-        "Launch durable research",
+        "Create a research task",
         value="",
-        placeholder="Create a durable research task from a prompt",
+        placeholder="Describe a longer-running research task",
         height=120,
         key="assistant-research-prompt",
     )
-    if st.button("Launch research session", use_container_width=True):
+    if st.button("Start research task", use_container_width=True):
         prompt = research_prompt.strip()
         if prompt:
             inspection = controller.launch(prompt=prompt)
             _append_research_summary(active, inspection, app_state)
         else:
-            st.warning("Enter a research prompt first.")
+            st.warning("Enter a research task first.")
     try:
         recent = controller.list_recent()
     except Exception as exc:
@@ -1671,7 +1823,7 @@ def _render_sidebar_research_controls(
         summary = item.summary
         st.markdown(f"`{summary.session_id}`")
         st.caption(
-            f"stop={summary.stop_reason.value if summary.stop_reason else 'running'} | turns={summary.total_turns} | approvals={len(summary.pending_approval_ids)}"
+            f"state={summary.stop_reason.value if summary.stop_reason else 'running'} | turns={summary.total_turns} | approvals={len(summary.pending_approval_ids)}"
         )
         if summary.pending_approval_ids:
             cols = st.columns(4)
@@ -1752,37 +1904,55 @@ def _render_status_and_composer(
     runtime = record.runtime
     turn_state = _turn_state_for(app_state, session_id)
     if turn_state.status_text:
-        st.caption(f"Status: {turn_state.status_text}")
+        st.caption(_assistant_status_copy(turn_state.status_text))
     if turn_state.pending_approval is not None:
+        st.markdown(
+            f"**Approval needed**: {_approval_request_copy(turn_state.pending_approval)}"
+        )
         cols = st.columns(2)
-        if cols[0].button("Approve", use_container_width=True):
+        if cols[0].button(
+            "Allow tool",
+            use_container_width=True,
+            disabled=turn_state.approval_decision_in_flight,
+        ):
             _resolve_active_approval(app_state, session_id=session_id, approved=True)
-        if cols[1].button("Deny", use_container_width=True):
+        if cols[1].button(
+            "Skip tool",
+            use_container_width=True,
+            disabled=turn_state.approval_decision_in_flight,
+        ):
             _resolve_active_approval(app_state, session_id=session_id, approved=False)
+    if turn_state.queued_follow_up_prompt:
+        st.caption(f"Queued follow-up: {turn_state.queued_follow_up_prompt}")
     prompt = st.text_area(
-        "Ask the assistant",
+        "Message the assistant",
         value=app_state.drafts.get(session_id, ""),
         height=140,
-        placeholder="Ask a normal question, or ask for help across local and remote sources.",
+        placeholder=(
+            "Ask directly, or turn on local and connected sources in the sidebar "
+            "when you need workspace or external data."
+        ),
         key=f"composer:{session_id}",
     )
     app_state.drafts[session_id] = prompt
     cols = st.columns(2)
-    if cols[0].button("Send", use_container_width=True, disabled=turn_state.busy):
+    send_label = "Queue follow-up" if turn_state.busy else "Send"
+    if cols[0].button(send_label, use_container_width=True):
         llm_config = _llm_config_for_runtime(config, runtime)
         metadata = llm_config.credential_prompt_metadata()
         if metadata.expects_api_key and _current_api_key(llm_config) is None:
             st.warning(_missing_api_key_text(llm_config))
         else:
-            _submit_streamlit_prompt(
+            submitted = _submit_streamlit_prompt(
                 app_state=app_state,
                 session_id=session_id,
                 config=config,
                 prompt=prompt,
             )
-            app_state.drafts[session_id] = ""
+            if submitted:
+                app_state.drafts[session_id] = ""
     if cols[1].button(
-        "Stop active turn",
+        "Stop current turn",
         use_container_width=True,
         disabled=not turn_state.busy,
     ):
@@ -1836,13 +2006,15 @@ def run_streamlit_assistant_app(
 
     _render_summary_chips(active_record)
 
-    if pending_prompt is not None and pending_prompt.strip():
-        _submit_streamlit_prompt(
-            app_state=app_state,
-            session_id=app_state.active_session_id,
-            config=config,
-            prompt=pending_prompt,
-        )
+    if pending_prompt is not None:
+        pending_session_id, pending_text = pending_prompt
+        if pending_session_id in app_state.sessions and pending_text.strip():
+            _submit_streamlit_prompt(
+                app_state=app_state,
+                session_id=pending_session_id,
+                config=config,
+                prompt=pending_text,
+            )
 
     visible_entries = _visible_transcript_entries(active_record.transcript)
     if not visible_entries:

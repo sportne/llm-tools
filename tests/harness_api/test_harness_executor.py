@@ -1099,3 +1099,62 @@ def test_harness_executor_helper_methods_cover_error_and_false_paths(
                 ],
             )
         )
+
+
+def test_harness_executor_helper_methods_cover_elapsed_budget_and_retryable_paths(
+    tmp_path: Path,
+    _workflow_executor: WorkflowExecutor,
+) -> None:
+    executor = HarnessExecutor(
+        store=InMemoryHarnessStateStore(),
+        workflow_executor=_workflow_executor,
+        driver=_StaticDriver(workspace=tmp_path),
+        applier=_RootTaskApplier(),
+    )
+    executed_turn = HarnessTurn(
+        turn_index=2,
+        started_at="2026-01-01T00:00:00Z",
+        selected_task_ids=["task-1"],
+        workflow_result=_success_workflow_result(),
+        decision=TurnDecision(action=TurnDecisionAction.CONTINUE),
+        ended_at="2026-01-01T00:00:01Z",
+    )
+    base_state = _state(max_turns=10)
+    state = base_state.model_copy(
+        update={
+            "session": base_state.session.model_copy(update={"current_turn_index": 1}),
+            "turns": [
+                HarnessTurn(
+                    turn_index=1,
+                    started_at="2026-01-01T00:00:00Z",
+                    selected_task_ids=["task-1"],
+                    decision=TurnDecision(action=TurnDecisionAction.CONTINUE),
+                    ended_at="2026-01-01T00:00:00Z",
+                ),
+                executed_turn,
+            ],
+        },
+        deep=True,
+    )
+
+    assert executor._count_persisted_tool_invocations(state) == 1
+    assert executor._has_retryable_tool_error(_retryable_workflow_result()) is True
+    assert (
+        executor._pre_turn_budget_stop(
+            state.model_copy(
+                update={
+                    "session": state.session.model_copy(
+                        update={
+                            "budget_policy": BudgetPolicy(
+                                max_turns=10,
+                                max_elapsed_seconds=1,
+                            )
+                        }
+                    )
+                },
+                deep=True,
+            ),
+            now=executor._parse_timestamp("2026-01-01T00:00:02Z"),
+        )
+        is HarnessStopReason.BUDGET_EXHAUSTED
+    )
