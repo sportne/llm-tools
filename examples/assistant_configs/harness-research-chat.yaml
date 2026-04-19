@@ -1,0 +1,54 @@
+# Harness-backed research assistant for local investigation work.
+# Keeps normal assistant chat available while enabling durable research
+# sessions; git helpers still require subprocess access in the UI.
+llm:
+  provider: ollama
+  model_name: gemma4:26b
+  temperature: 0.1
+  api_base_url: http://127.0.0.1:11434/v1
+  timeout_seconds: 60.0
+  api_key_env_var: null
+  prompt_for_api_key_if_missing: true
+
+session:
+  max_context_tokens: 24000
+  max_tool_round_trips: 8
+  max_tool_calls_per_round: 4
+  max_total_tool_calls_per_turn: 12
+
+tool_limits:
+  max_entries_per_call: 200
+  max_recursive_depth: 12
+  max_search_matches: 50
+  max_read_lines: 200
+  max_file_size_characters: 262144
+  max_read_file_chars: null
+  max_tool_result_chars: 24000
+
+policy:
+  enabled_tools:
+    - list_directory
+    - find_files
+    - get_file_info
+    - read_file
+    - search_text
+    - run_git_status
+    - run_git_diff
+    - run_git_log
+
+ui:
+  show_token_usage: true
+  show_footer_help: true
+  inspector_open_by_default: true
+
+workspace:
+  default_root: .
+
+research:
+  enabled: true
+  store_dir: .llm-tools/research
+  max_recent_sessions: 8
+  default_max_turns: 12
+  default_max_tool_invocations: 48
+  default_max_elapsed_seconds: 900
+  include_replay_by_default: true
