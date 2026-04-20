@@ -4,12 +4,33 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
+import tomllib
+from pathlib import Path
 
 import llm_tools
 
 
 def test_top_level_package_exports_version() -> None:
-    assert llm_tools.__version__ == "0.1.0"
+    assert llm_tools.__version__
+
+
+def test_pyproject_uses_package_version_as_single_source_of_truth() -> None:
+    pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+
+    assert pyproject["project"]["dynamic"] == ["version"]
+    assert pyproject["tool"]["setuptools"]["dynamic"]["version"]["attr"] == (
+        "llm_tools.__version__"
+    )
+
+
+def test_pyproject_includes_current_app_runtime_dependencies_in_base_install() -> None:
+    pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    dependencies = pyproject["project"]["dependencies"]
+
+    assert any(dep.startswith("streamlit>=") for dep in dependencies)
+    assert any(dep.startswith("PyYAML>=") for dep in dependencies)
 
 
 def test_scaffolded_subpackages_are_importable() -> None:

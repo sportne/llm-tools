@@ -10,12 +10,11 @@ permissions:
   contents: read
 
 jobs:
-  verify:
+  quality:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+
+    env:
+      VENV: .venv
 
     steps:
       - name: Checkout
@@ -24,7 +23,8 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.11"
+          cache: pip
 
       - name: Create virtual environment
         run: make setup-venv
@@ -41,11 +41,16 @@ jobs:
       - name: Type check
         run: make typecheck
 
-      - name: Run tests
-        run: make test
-
-  coverage:
+  tests:
     runs-on: ubuntu-latest
+
+    env:
+      VENV: .venv
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - name: Checkout
@@ -54,7 +59,8 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
+          cache: pip
 
       - name: Create virtual environment
         run: make setup-venv
@@ -62,11 +68,14 @@ jobs:
       - name: Install project and dev dependencies
         run: make install-dev
 
-      - name: Run CI target with coverage gates
-        run: make ci
+      - name: Run tests
+        run: make test
 
-  package:
+  coverage:
     runs-on: ubuntu-latest
+
+    env:
+      VENV: .venv
 
     steps:
       - name: Checkout
@@ -76,6 +85,32 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+
+      - name: Create virtual environment
+        run: make setup-venv
+
+      - name: Install project and dev dependencies
+        run: make install-dev
+
+      - name: Run coverage gates
+        run: make coverage
+
+  package:
+    runs-on: ubuntu-latest
+
+    env:
+      VENV: .venv
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
 
       - name: Create virtual environment
         run: make setup-venv

@@ -22,6 +22,8 @@ _SKIPPED_PARTS = {
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
+    "build",
+    "dist",
     "__pycache__",
     ".venv",
     "venv",

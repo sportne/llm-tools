@@ -81,7 +81,21 @@ def test_iter_direct_invocations_ignores_dynamic_getattr_and_rebound_names(
     assert list(iter_direct_invocations(tmp_path)) == []
 
 
-def _write_module(tmp_path: Path, source: str) -> Path:
-    path = tmp_path / "sample.py"
+def test_iter_direct_invocations_skips_generated_build_trees(tmp_path: Path) -> None:
+    build_dir = tmp_path / "build" / "lib"
+    build_dir.mkdir(parents=True)
+    _write_module(
+        build_dir,
+        """
+        def call(tool, context, payload):
+            return tool.invoke(context, payload)
+        """,
+    )
+
+    assert list(iter_direct_invocations(tmp_path)) == []
+
+
+def _write_module(tmp_path: Path, source: str, *, filename: str = "sample.py") -> Path:
+    path = tmp_path / filename
     path.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
     return path

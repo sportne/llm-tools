@@ -57,12 +57,17 @@ def test_remaining_console_scripts_are_declared_and_textual_scripts_are_gone() -
     assert "llm-tools-streamlit-chat" not in scripts
 
 
-def test_textual_dependency_hooks_are_removed() -> None:
+def test_dependency_groups_keep_streamlit_in_base_install_and_textual_removed() -> None:
     pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
     pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
-    optional_dependencies = pyproject["project"]["optional-dependencies"]
+    project = pyproject["project"]
+    dependencies = project["dependencies"]
+    optional_dependencies = project["optional-dependencies"]
     dev_dependencies = optional_dependencies["dev"]
 
+    assert any(dependency.startswith("streamlit>=") for dependency in dependencies)
+    assert any(dependency.startswith("PyYAML>=") for dependency in dependencies)
+    assert "streamlit" not in optional_dependencies
     assert "apps" not in optional_dependencies
     assert all("textual" not in dependency for dependency in dev_dependencies)
 

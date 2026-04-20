@@ -44,12 +44,9 @@ git worktrees at `~/.venvs/llm-tools`. Re-run `make install-dev` from the
 checkout you are actively using so the shared environment's editable install
 points at that tree.
 
-The optional Streamlit runtime is included in `.[dev]`. If you want only the
-assistant runtime extras:
-
-```bash
-~/.venvs/llm-tools/bin/python -m pip install -e .[streamlit]
-```
+The base package includes the current Streamlit assistant runtime and its
+config-loading dependencies. `.[dev]` adds the toolchain used for local
+development and CI.
 
 ## Development
 

@@ -4,12 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-tools"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Strict, typed tools for LLM and non-LLM Python applications."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "llm-tools Contributors" }]
+urls = { Repository = "https://github.com/sportne/llm-tools", Issues = "https://github.com/sportne/llm-tools/issues" }
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
   "Intended Audience :: Developers",
@@ -28,6 +30,8 @@ dependencies = [
   "mpxj>=16,<17",
   "openai>=1,<2",
   "pydantic>=2,<3",
+  "PyYAML>=6,<7",
+  "streamlit>=1.41,<2",
 ]
 
 [project.scripts]
@@ -35,24 +39,21 @@ llm-tools-harness = "llm_tools.apps.harness_cli:main"
 llm-tools-streamlit-assistant = "llm_tools.apps.streamlit_assistant:main"
 
 [project.optional-dependencies]
-streamlit = [
-  "PyYAML>=6,<7",
-  "streamlit>=1.41,<2",
-]
 dev = [
-  "PyYAML>=6,<7",
   "build>=1.2,<2",
   "mypy>=1.10,<2",
   "pytest>=8.3,<9",
   "pytest-cov>=5,<7",
   "ruff>=0.6,<1",
   "setuptools>=82,<83",
-  "streamlit>=1.41,<2",
   "wheel>=0.46,<0.47",
 ]
 
 [tool.setuptools]
 package-dir = { "" = "src" }
+
+[tool.setuptools.dynamic]
+version = { attr = "llm_tools.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -108,10 +109,12 @@ minversion = "8.0"
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra"
+xfail_strict = true
 
 [tool.coverage.run]
 source = ["llm_tools"]
 branch = true
+relative_files = true
 
 [tool.coverage.report]
 fail_under = 90

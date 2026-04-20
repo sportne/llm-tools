@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import yaml  # type: ignore[import-untyped]
+
 from llm_tools.workflow_api.protection_models import (
     ProtectionConfig,
     ProtectionCorpus,
@@ -14,11 +16,6 @@ from llm_tools.workflow_api.protection_models import (
     ProtectionFeedbackEntry,
     ProtectionFeedbackFile,
 )
-
-try:
-    import yaml  # type: ignore[import-untyped]
-except Exception:  # pragma: no cover - optional dependency fallback
-    yaml = None
 
 
 class ProtectionFeedbackStore:
@@ -57,10 +54,6 @@ class ProtectionFeedbackStore:
         if suffix == ".json":
             return json.loads(text)
         if suffix in {".yaml", ".yml"}:
-            if yaml is None:
-                raise ValueError(
-                    "PyYAML is required for YAML protection feedback files."
-                )
             loaded = yaml.safe_load(text)
             return {} if loaded is None else loaded
         raise ValueError(f"Unsupported protection feedback file type: {self._path}")
@@ -73,10 +66,6 @@ class ProtectionFeedbackStore:
             )
             return
         if suffix in {".yaml", ".yml"}:
-            if yaml is None:
-                raise ValueError(
-                    "PyYAML is required for YAML protection feedback files."
-                )
             self._path.write_text(
                 yaml.safe_dump(payload, sort_keys=True), encoding="utf-8"
             )

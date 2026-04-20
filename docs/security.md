@@ -29,7 +29,7 @@ Security-sensitive shipped surfaces include:
 
 ### Dependency surface
 
-Runtime and optional dependency exposure includes:
+Runtime dependency exposure includes:
 
 - `openai` and `instructor` for the OpenAI-compatible provider layer and
   structured response parsing
@@ -38,7 +38,7 @@ Runtime and optional dependency exposure includes:
 - `markitdown` for office and document conversion during read-oriented
   filesystem access
 - `mpxj` plus Java for Microsoft Project file reads
-- `streamlit` and YAML loading when installing `.[streamlit]`
+- `streamlit` and `PyYAML` for the shipped assistant UX and config loading
 
 Only enable the integrations you actually need in the current environment.
 
