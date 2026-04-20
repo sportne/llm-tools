@@ -266,6 +266,57 @@ def _research_summary_text(summary: Any) -> str:
     return "\n".join(lines)
 
 
+def _research_prompt_seed(
+    app_state: AssistantWorkspaceState,
+    *,
+    active: StreamlitPersistedSessionRecord,
+) -> str:
+    session_id = active.summary.session_id
+    draft = app_state.drafts.get(session_id, "").strip()
+    if draft:
+        return draft
+    turn_state = _turn_state_for(app_state, session_id)
+    queued = (turn_state.queued_follow_up_prompt or "").strip()
+    if queued:
+        return queued
+    return ""
+
+
+def _research_transition_copy(
+    app_state: AssistantWorkspaceState,
+    *,
+    active: StreamlitPersistedSessionRecord,
+) -> str:
+    session_id = active.summary.session_id
+    if app_state.drafts.get(session_id, "").strip():
+        return "Stay in chat for quick back-and-forth. Start research when the task needs multiple steps, may pause for approval, or should be resumable later. Your current chat draft is loaded below so you can continue it as research."
+    turn_state = _turn_state_for(app_state, session_id)
+    if (turn_state.queued_follow_up_prompt or "").strip():
+        return "Stay in chat for quick back-and-forth. Start research when the task needs multiple steps, may pause for approval, or should be resumable later. Your queued follow-up is loaded below so you can continue it as research."
+    return "Stay in chat for quick back-and-forth. Start research when the task needs multiple steps, may pause for approval, or should be resumable later. Research summaries come back into this chat so you can keep the conversation continuous."
+
+
+def _append_research_launch_note(
+    active: StreamlitPersistedSessionRecord,
+    *,
+    prompt: str,
+    inspection: HarnessSessionInspection,
+    app_state: AssistantWorkspaceState,
+) -> None:
+    active.transcript.append(
+        StreamlitTranscriptEntry(
+            role="system",
+            text=(
+                "Started research task from this chat.\n"
+                f"Prompt: {prompt}\n"
+                f"Research session: {inspection.summary.session_id}"
+            ),
+        )
+    )
+    _touch_record(active)
+    _save_workspace_state(app_state)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI parser shared by the bootstrap and script entrypoints."""
     parser = argparse.ArgumentParser(
@@ -2423,14 +2474,21 @@ def _launch_research_task(
     if not cleaned:
         st.warning("Enter a research task first.")
         return
-    inspection = _run_and_append_research_action(
-        active=active,
-        inspection_action=lambda: controller.launch(prompt=cleaned),
-        app_state=app_state,
-        session_id=_title_from_prompt(cleaned),
+    inspection = _run_research_action(
+        _title_from_prompt(cleaned),
+        action=lambda: controller.launch(prompt=cleaned),
         failure_prefix="Research launch failed",
     )
-    del inspection
+    if inspection is None:
+        return
+    _append_research_launch_note(
+        active,
+        prompt=cleaned,
+        inspection=inspection,
+        app_state=app_state,
+    )
+    _append_research_summary(active, inspection, app_state)
+    st.session_state["assistant-research-prompt"] = ""
 
 
 def _render_sidebar_research_session_item(
@@ -2542,10 +2600,11 @@ def _render_sidebar_research_controls(
     if not config.research.enabled:
         return
     st.markdown("### Research tasks")
+    st.caption(_research_transition_copy(app_state, active=active))
     controller = _build_research_controller(config=config, runtime=runtime)
     research_prompt = st.text_area(
         "Create a research task",
-        value="",
+        value=_research_prompt_seed(app_state, active=active),
         placeholder="Describe a longer-running research task",
         height=120,
         key="assistant-research-prompt",

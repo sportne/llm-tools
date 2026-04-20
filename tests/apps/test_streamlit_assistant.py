@@ -1628,6 +1628,47 @@ def test_streamlit_assistant_render_status_and_composer_shows_approval_copy(
     )
 
 
+def test_streamlit_assistant_research_controls_explain_transition_and_seed_from_draft(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+
+    class _FakeController:
+        def list_recent(self) -> object:
+            return SimpleNamespace(sessions=[])
+
+    monkeypatch.setattr(
+        _MODULES.app, "_build_research_controller", lambda **kwargs: _FakeController()
+    )
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+    app_state.drafts[session_id] = (
+        "Investigate why approvals keep pausing this workflow"
+    )
+    active = app_state.sessions[session_id]
+
+    _MODULES.app._render_sidebar_research_controls(
+        app_state,
+        config=StreamlitAssistantConfig(),
+        runtime=active.runtime,
+        active=active,
+    )
+
+    assert any(
+        "Stay in chat for quick back-and-forth." in item
+        for item in fake_st.caption_messages
+    )
+    assert any(
+        "Your current chat draft is loaded below" in item
+        for item in fake_st.caption_messages
+    )
+    assert fake_st.text_area_values["assistant-research-prompt"] == (
+        "Investigate why approvals keep pausing this workflow"
+    )
+
+
 def test_streamlit_assistant_research_controls_resume_with_explicit_approval_resolution(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2265,6 +2306,48 @@ llm:
     )
     _MODULES.app._run_streamlit_script([str(tmp_path), "--config", str(config_path)])
     assert called == [(tmp_path.resolve(), "ollama")]
+
+
+def test_launch_research_task_appends_transition_note_and_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(_MODULES.app, "_save_workspace_state", lambda app_state: None)
+    inspection = _fake_research_inspection(
+        session_id="research-42",
+        pending_approval_ids=[],
+        resumed_disposition=_MODULES.app.ResumeDisposition.RUNNABLE,
+    )
+
+    class _FakeController:
+        def launch(self, *, prompt: str) -> object:
+            assert prompt == "Investigate the failing integration path"
+            return inspection
+
+    monkeypatch.setattr(
+        _MODULES.app,
+        "_run_research_action",
+        lambda session_id, *, action, failure_prefix: action(),
+    )
+    app_state = _make_app_state(root_path=str(tmp_path))
+    active = app_state.sessions[app_state.active_session_id]
+
+    _MODULES.app._launch_research_task(
+        "Investigate the failing integration path",
+        controller=_FakeController(),
+        active=active,
+        app_state=app_state,
+    )
+
+    assert active.transcript[-2].text == (
+        "Started research task from this chat.\n"
+        "Prompt: Investigate the failing integration path\n"
+        "Research session: research-42"
+    )
+    assert active.transcript[-1].text.startswith("Research session: research-42")
+    assert fake_st.session_state["assistant-research-prompt"] == ""
 
 
 def test_assistant_research_controller_inspect_resume_stop_and_summary() -> None:
