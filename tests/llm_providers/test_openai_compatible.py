@@ -561,3 +561,37 @@ def test_provider_bypassed_instructor_does_not_resend_identical_requests(
         )
 
     assert len(client.chat.completions.calls) == 1
+
+
+def test_provider_run_auto_reports_all_retryable_mode_failures(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(provider_module, "_instructor", _FakeInstructor())
+    adapter, response_model = _response_model()
+    client = _SyncClient(
+        outcomes={
+            "TOOLS": _wrapped_schema_failure("schema validation failed"),
+            "JSON": _wrapped_schema_failure("json validation failed"),
+            "MD_JSON": _wrapped_schema_failure("markdown json validation failed"),
+        }
+    )
+    provider = OpenAICompatibleProvider(model="demo-model", client=client)
+
+    with pytest.raises(
+        ValueError, match="All provider mode attempts failed"
+    ) as exc_info:
+        provider.run(
+            adapter=adapter,
+            messages=[{"role": "user", "content": "hello"}],
+            response_model=response_model,
+        )
+
+    message = str(exc_info.value)
+    assert "tools: RuntimeError" in message
+    assert "json: RuntimeError" in message
+    assert "md_json: RuntimeError" in message
+    assert [call["__mode"] for call in client.chat.completions.calls] == [
+        "TOOLS",
+        "JSON",
+        "MD_JSON",
+    ]

@@ -6,6 +6,7 @@ import importlib
 import queue
 import runpy
 import sys
+import time
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,6 +45,7 @@ from llm_tools.harness_api import (
     HarnessStopReason,
     HarnessTurn,
     InMemoryHarnessStateStore,
+    ResumeDisposition,
     ScriptedParsedResponseProvider,
 )
 from llm_tools.harness_api.models import (
@@ -53,7 +55,7 @@ from llm_tools.harness_api.models import (
 )
 from llm_tools.harness_api.tasks import complete_task, start_task
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
-from llm_tools.tool_api import SideEffectClass, ToolContext
+from llm_tools.tool_api import SideEffectClass, ToolContext, ToolInvocationRequest
 from llm_tools.workflow_api import (
     ApprovalRequest,
     ChatFinalResponse,
@@ -2671,3 +2673,234 @@ def test_streamlit_assistant_apply_turn_result_and_queue_error_branches(
         )
 
     assert _MODULES.app._drain_active_turn_events(app_state) is None
+
+
+def _example_config_path(name: str) -> Path:
+    return Path(__file__).resolve().parents[2] / "examples" / "assistant_configs" / name
+
+
+def _final_response_payload(answer: str) -> dict[str, object]:
+    return {
+        "answer": answer,
+        "citations": [],
+        "confidence": 0.8,
+        "uncertainty": [],
+        "missing_information": [],
+        "follow_up_suggestions": [],
+    }
+
+
+def _drain_turn_until_idle(
+    app_state: object,
+    *,
+    fake_st: _FakeStreamlit,
+    max_attempts: int = 100,
+) -> None:
+    for _ in range(max_attempts):
+        _MODULES.app._drain_active_turn_events(app_state)
+        handle = fake_st.session_state.get(_MODULES.app._ACTIVE_TURN_STATE_SLOT)
+        if handle is None:
+            return
+        time.sleep(0.01)
+    raise AssertionError("assistant turn did not become idle")
+
+
+@pytest.mark.filterwarnings(
+    "ignore:coroutine 'BaseSubprocessTransport.__del__':RuntimeWarning"
+)
+def test_streamlit_assistant_product_journey_persists_direct_chat_and_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = load_streamlit_assistant_config(
+        _example_config_path("local-only-chat.yaml")
+    )
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setenv(_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "assistant-state"))
+
+    app_state = _MODULES.app._load_workspace_state(root_path=None, config=config)
+    session_id = app_state.active_session_id
+    _MODULES.app._render_empty_state(app_state.sessions[session_id])
+
+    monkeypatch.setattr(
+        _MODULES.app,
+        "_create_provider_for_runtime",
+        lambda *args, **kwargs: _FakeProvider(
+            [
+                ParsedModelResponse(
+                    final_response=_final_response_payload("Direct answer")
+                )
+            ]
+        ),
+    )
+
+    assert any(
+        "Start with a normal question" in item for item in fake_st.markdown_messages
+    )
+    assert (
+        _MODULES.app._submit_streamlit_prompt(
+            app_state=app_state,
+            session_id=session_id,
+            config=config,
+            prompt="How does this assistant behave with chat only?",
+        )
+        is True
+    )
+    _drain_turn_until_idle(app_state, fake_st=fake_st)
+
+    record = app_state.sessions[session_id]
+    assert [entry.role for entry in record.transcript] == ["user", "assistant"]
+    assert record.transcript[-1].final_response is not None
+    assert record.transcript[-1].final_response.answer == "Direct answer"
+    assert _MODULES.app._session_path(session_id).exists()
+
+    reloaded = _MODULES.app._load_workspace_state(root_path=None, config=config)
+    reloaded_record = reloaded.sessions[session_id]
+    assert reloaded.active_session_id == session_id
+    assert reloaded_record.transcript[-1].final_response is not None
+    assert reloaded_record.transcript[-1].final_response.answer == "Direct answer"
+
+
+@pytest.mark.filterwarnings(
+    "ignore:coroutine 'BaseSubprocessTransport.__del__':RuntimeWarning"
+)
+def test_streamlit_assistant_product_journey_supports_workspace_tool_turn_and_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = load_streamlit_assistant_config(
+        _example_config_path("local-only-chat.yaml")
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "plan.txt").write_text(
+        "Ship the evaluation workflow.", encoding="utf-8"
+    )
+    fake_st = _FakeStreamlit(
+        text_input_values={"Workspace root": str(workspace)},
+        checkbox_values={"Filesystem access": True},
+    )
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setenv(_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "assistant-state"))
+
+    app_state = _MODULES.app._load_workspace_state(root_path=None, config=config)
+    session_id = app_state.active_session_id
+    _MODULES.app._render_sidebar(app_state, config=config, root_path=None)
+
+    record = app_state.sessions[session_id]
+    assert record.runtime.root_path == str(workspace.resolve())
+    assert record.runtime.allow_filesystem is True
+
+    monkeypatch.setattr(
+        _MODULES.app,
+        "_create_provider_for_runtime",
+        lambda *args, **kwargs: _FakeProvider(
+            [
+                ParsedModelResponse(
+                    invocations=[
+                        ToolInvocationRequest(
+                            tool_name="read_file",
+                            arguments={"path": "plan.txt"},
+                        )
+                    ]
+                ),
+                ParsedModelResponse(
+                    final_response=_final_response_payload("Read the workspace plan.")
+                ),
+            ]
+        ),
+    )
+
+    assert (
+        _MODULES.app._submit_streamlit_prompt(
+            app_state=app_state,
+            session_id=session_id,
+            config=config,
+            prompt="Read plan.txt and summarize it.",
+        )
+        is True
+    )
+    _drain_turn_until_idle(app_state, fake_st=fake_st)
+
+    assert record.transcript[-1].final_response is not None
+    assert record.transcript[-1].final_response.answer == "Read the workspace plan."
+
+    reloaded = _MODULES.app._load_workspace_state(root_path=None, config=config)
+    reloaded_record = reloaded.sessions[session_id]
+    assert reloaded_record.runtime.root_path == str(workspace.resolve())
+    assert reloaded_record.runtime.allow_filesystem is True
+    assert reloaded_record.transcript[-1].final_response is not None
+    assert reloaded_record.transcript[-1].final_response.answer == (
+        "Read the workspace plan."
+    )
+
+
+@pytest.mark.filterwarnings(
+    "ignore:coroutine 'BaseSubprocessTransport.__del__':RuntimeWarning"
+)
+def test_streamlit_assistant_product_journey_supports_research_approval_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = load_streamlit_assistant_config(
+        _example_config_path("harness-research-chat.yaml")
+    )
+    config = config.model_copy(
+        update={
+            "research": config.research.model_copy(
+                update={"store_dir": str(tmp_path / "research-store")}
+            )
+        }
+    )
+    (tmp_path / "research-note.txt").write_text(
+        "Research details for the harness flow.",
+        encoding="utf-8",
+    )
+    runtime = _MODULES.models.StreamlitRuntimeConfig(
+        provider=config.llm.provider,
+        model_name=config.llm.model_name,
+        api_base_url=config.llm.api_base_url,
+        root_path=str(tmp_path),
+        enabled_tools=["read_file"],
+        allow_filesystem=True,
+        require_approval_for={SideEffectClass.LOCAL_READ},
+    )
+    provider = ScriptedParsedResponseProvider(
+        [
+            ParsedModelResponse(
+                invocations=[
+                    ToolInvocationRequest(
+                        tool_name="read_file",
+                        arguments={"path": "research-note.txt"},
+                    )
+                ]
+            ),
+            ParsedModelResponse(final_response="Research summary complete"),
+        ]
+    )
+
+    monkeypatch.setattr(_MODULES.app, "_current_api_key", lambda llm_config: None)
+    monkeypatch.setattr(
+        _MODULES.app,
+        "build_live_harness_provider",
+        lambda **kwargs: provider,
+    )
+
+    controller = _MODULES.app._build_research_controller(
+        config=config,
+        runtime=runtime,
+    )
+    waiting = controller.launch(prompt="Read research-note.txt then summarize it.")
+
+    assert waiting.resumed.disposition is ResumeDisposition.WAITING_FOR_APPROVAL
+    assert waiting.summary.pending_approval_ids
+
+    approved = controller.resume(
+        waiting.snapshot.session_id,
+        approval_resolution=ApprovalResolution.APPROVE,
+    )
+
+    assert approved.summary.stop_reason is HarnessStopReason.COMPLETED
+    assert approved.summary.pending_approval_ids == []
+    assert approved.snapshot.state.session.stop_reason is HarnessStopReason.COMPLETED
