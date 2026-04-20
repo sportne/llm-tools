@@ -736,6 +736,48 @@ def _group_readiness_copy(group_name: str, summary: Any) -> str:
     return " | ".join(parts)
 
 
+def _source_setup_summary_copy(summaries: dict[str, Any]) -> str:
+    enabled_summaries = [
+        f"{group_name}: {_group_readiness_copy(group_name, summary)}"
+        for group_name, summary in summaries.items()
+        if summary.enabled_tools
+    ]
+    if not enabled_summaries:
+        return "No sources are turned on yet. Chat-only replies still work."
+    return "Enabled sources: " + "; ".join(enabled_summaries)
+
+
+def _source_setup_next_steps_copy(
+    runtime: StreamlitRuntimeConfig,
+    summaries: dict[str, Any],
+) -> str:
+    if not any(summary.enabled_tools for summary in summaries.values()):
+        return "Next: turn on only the sources you need in Step 4."
+
+    next_steps: list[str] = []
+    if any(summary.missing_workspace_tools for summary in summaries.values()):
+        next_steps.append(
+            "Next: choose a workspace root in Step 2 for local file and git sources."
+        )
+    if any(summary.missing_credentials_tools for summary in summaries.values()):
+        next_steps.append(
+            "Next: provide the required service credentials in your environment for the enabled remote sources."
+        )
+    if any(summary.permission_blocked_tools for summary in summaries.values()):
+        next_steps.append(
+            "Next: turn on the required session permissions in Step 3 for the sources you enabled."
+        )
+    if not next_steps:
+        next_steps.append("Enabled sources are ready for this session.")
+    if any(summary.approval_gated_tools for summary in summaries.values()):
+        next_steps.append("Some enabled sources will pause for approval before use.")
+    if runtime.root_path is None and runtime.allow_filesystem:
+        next_steps.append(
+            "Filesystem access stays unavailable until a workspace root is selected."
+        )
+    return " ".join(next_steps)
+
+
 def _source_readiness_tokens(runtime: StreamlitRuntimeConfig) -> list[str]:
     capability_groups = build_tool_capabilities(
         tool_specs=_all_tool_specs(),
@@ -1676,6 +1718,10 @@ def _render_sidebar_runtime_settings(
     config: StreamlitAssistantConfig,
 ) -> Any:  # pragma: no cover
     st = _streamlit_module()
+    st.markdown("### 1. Connect model")
+    st.caption(
+        "Start here. Pick the endpoint and model you want the assistant to use for this session."
+    )
     provider_options = [preset.value for preset in type(runtime.provider)]
     provider_value = st.selectbox(
         "Provider",
@@ -1689,6 +1735,31 @@ def _render_sidebar_runtime_settings(
     runtime.api_base_url = (
         st.text_input("API base URL", value=runtime.api_base_url or "").strip() or None
     )
+
+    llm_config = _llm_config_for_runtime(config, runtime)
+    metadata = llm_config.credential_prompt_metadata()
+    if metadata.expects_api_key:
+        env_var = llm_config.api_key_env_var or "OPENAI_API_KEY"
+        secret = st.text_input(
+            env_var,
+            value="",
+            type="password",
+            placeholder="Optional session-only API key",
+        ).strip()
+        if secret:
+            cache = st.session_state.setdefault(_SECRET_CACHE_STATE_SLOT, {})
+            if isinstance(cache, dict):
+                cache[env_var] = secret
+        if _current_api_key(llm_config) is None:
+            st.caption(
+                f"This provider needs {env_var}. Use an environment variable or enter a session-only key here before you run a turn."
+            )
+        else:
+            st.caption("Model connection looks ready for this session.")
+    else:
+        st.caption("This provider does not require an API key for the current session.")
+
+    st.markdown("### 2. Choose workspace")
     current_root = st.text_input(
         "Workspace root",
         value=runtime.root_path or "",
@@ -1706,27 +1777,12 @@ def _render_sidebar_runtime_settings(
         runtime.allow_subprocess = False
     if runtime.root_path is None:
         st.caption(
-            "Select a workspace root to make filesystem and subprocess permissions available."
+            "Chat-only works now. Add a workspace root when you want local files or git."
         )
     else:
         st.caption(
-            "Selecting a workspace root only scopes local tools. Enable filesystem or subprocess access separately below."
+            "Workspace selected. Local tools are scoped now, and you can allow filesystem or subprocess access in Step 3."
         )
-
-    llm_config = _llm_config_for_runtime(config, runtime)
-    metadata = llm_config.credential_prompt_metadata()
-    if metadata.expects_api_key:
-        env_var = llm_config.api_key_env_var or "OPENAI_API_KEY"
-        secret = st.text_input(
-            env_var,
-            value="",
-            type="password",
-            placeholder="Optional session-only API key",
-        ).strip()
-        if secret:
-            cache = st.session_state.setdefault(_SECRET_CACHE_STATE_SLOT, {})
-            if isinstance(cache, dict):
-                cache[env_var] = secret
     return llm_config
 
 
@@ -1734,10 +1790,9 @@ def _render_sidebar_permission_controls(
     runtime: StreamlitRuntimeConfig,
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
-    st.markdown("### Session permissions")
+    st.markdown("### 3. Allow access")
     st.caption(
-        "Filesystem access enables local file tools within the selected workspace. "
-        "Subprocess access enables local command tools in that workspace."
+        "Turn on only what you need: network unlocks connected sources, filesystem unlocks local reads, and subprocess unlocks local command tools."
     )
     runtime.allow_network = st.checkbox("Network access", value=runtime.allow_network)
     runtime.allow_filesystem = st.checkbox(
@@ -1750,8 +1805,19 @@ def _render_sidebar_permission_controls(
         value=runtime.allow_subprocess,
         disabled=runtime.root_path is None,
     )
+    if runtime.root_path is None:
+        st.caption(
+            "Select a workspace in Step 2 before filesystem or subprocess access becomes available."
+        )
+    else:
+        st.caption(
+            "Filesystem and subprocess access stay off until you enable them here, even after a workspace is selected."
+        )
 
     st.markdown("### Approval gates")
+    st.caption(
+        "Use approval gates when you want the assistant to pause before reads or writes that matter for this session."
+    )
     for side_effect, label in (
         (SideEffectClass.LOCAL_READ, "Local reads"),
         (SideEffectClass.LOCAL_WRITE, "Local writes"),
@@ -1769,7 +1835,10 @@ def _render_sidebar_tool_controls(
     runtime: StreamlitRuntimeConfig,
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
-    st.markdown("### Sources and tools")
+    st.markdown("### 4. Choose sources")
+    st.caption(
+        "Turn on the sources you want after Steps 1-3 are configured. Each source shows what is ready and what is still missing."
+    )
     capability_groups = build_tool_capabilities(
         tool_specs=_all_tool_specs(),
         enabled_tools=set(runtime.enabled_tools),
@@ -1781,6 +1850,10 @@ def _render_sidebar_tool_controls(
         require_approval_for=set(runtime.require_approval_for),
     )
     summaries = build_tool_group_capability_summaries(capability_groups)
+    st.markdown("**Current source readiness**")
+    st.caption(_source_setup_summary_copy(summaries))
+    st.caption(_source_setup_next_steps_copy(runtime, summaries))
+
     enabled = set(runtime.enabled_tools)
     for group_name, items in capability_groups.items():
         st.markdown(f"**{group_name}**")
@@ -2469,6 +2542,9 @@ def _render_sidebar(
             runtime=runtime,
         ):
             return
+        st.caption(
+            "Follow the setup order below so the assistant always shows what is ready, what is blocked, and what to configure next."
+        )
         _render_sidebar_runtime_settings(runtime, config=config)
         _render_sidebar_permission_controls(runtime)
         _render_sidebar_tool_controls(runtime)

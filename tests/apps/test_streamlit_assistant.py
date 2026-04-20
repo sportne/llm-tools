@@ -990,11 +990,54 @@ def test_streamlit_assistant_runtime_settings_keep_permissions_opt_in(
     assert runtime.allow_filesystem is False
     assert runtime.allow_subprocess is False
     assert any(
-        "Selecting a workspace root only scopes local tools." in message
+        "### 1. Connect model" in message for message in fake_st.markdown_messages
+    )
+    assert any(
+        "### 2. Choose workspace" in message for message in fake_st.markdown_messages
+    )
+    assert any(
+        "### 3. Allow access" in message for message in fake_st.markdown_messages
+    )
+    assert any(
+        "Workspace selected. Local tools are scoped now" in message
         for message in fake_st.caption_messages
     )
     assert any(
-        "Filesystem access enables local file tools" in message
+        "Turn on only what you need: network unlocks connected sources" in message
+        for message in fake_st.caption_messages
+    )
+
+
+def test_streamlit_assistant_sidebar_tool_controls_show_guided_readiness_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    runtime = _MODULES.models.StreamlitRuntimeConfig(
+        enabled_tools=["read_file", "search_jira"],
+    )
+
+    _MODULES.app._render_sidebar_tool_controls(runtime)
+
+    assert any(
+        "### 4. Choose sources" in message for message in fake_st.markdown_messages
+    )
+    assert any(
+        "Current source readiness" in message for message in fake_st.markdown_messages
+    )
+    assert any(
+        "Enabled sources: Atlassian: 1 enabled | needs credentials; Local Files: 1 enabled | needs workspace"
+        in message
+        for message in fake_st.caption_messages
+    )
+    assert any(
+        "Next: choose a workspace root in Step 2 for local file and git sources."
+        in message
+        for message in fake_st.caption_messages
+    )
+    assert any(
+        "Next: provide the required service credentials in your environment for the enabled remote sources."
+        in message
         for message in fake_st.caption_messages
     )
 
