@@ -459,7 +459,7 @@ class OpenAICompatibleProvider:
                 f"The endpoint rejected model '{self.model}'. "
                 "Check the configured model name for this provider."
             )
-        if selected_mode is not None:
+        if selected_mode is not None and self._should_retry_mode_failure(exc):
             return (
                 f"The endpoint did not accept provider mode '{selected_mode.value}' for model '{self.model}'. "
                 "Choose a different provider mode for this endpoint."

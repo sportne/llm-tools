@@ -328,11 +328,11 @@ def _secret_cache() -> dict[str, str]:
 
 
 def _get_secret_value(name: str) -> str | None:
-    env_value = os.getenv(name)
-    if env_value:
-        return env_value
     cached_value = str(_secret_cache().get(name, "")).strip()
-    return cached_value or None
+    if cached_value:
+        return cached_value
+    env_value = os.getenv(name)
+    return env_value or None
 
 
 def _set_secret_value(name: str, value: str) -> None:
@@ -566,7 +566,7 @@ def _runtime_to_export_config(
                 }
             ),
             "workspace": config.workspace.model_copy(
-                update={"default_root": runtime.root_path}
+                update={"default_root": config.workspace.default_root}
             ),
             "ui": config.ui.model_copy(
                 update={"inspector_open_by_default": runtime.inspector_open}

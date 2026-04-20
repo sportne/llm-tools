@@ -1075,6 +1075,20 @@ def test_streamlit_assistant_sidebar_tool_controls_show_guided_readiness_copy(
     )
 
 
+def test_streamlit_assistant_session_secret_overrides_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setenv("OPENAI_API_KEY", "env-secret")
+
+    assert _MODULES.app._get_secret_value("OPENAI_API_KEY") == "env-secret"
+
+    _MODULES.app._set_secret_value("OPENAI_API_KEY", "session-secret")
+
+    assert _MODULES.app._get_secret_value("OPENAI_API_KEY") == "session-secret"
+
+
 def test_streamlit_assistant_execution_blocker_uses_session_only_remote_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1207,6 +1221,7 @@ def test_streamlit_assistant_config_export_and_state_persistence_omit_secrets(
 
     round_tripped = load_streamlit_assistant_config(export_path)
     assert round_tripped.llm.provider_mode_strategy.value == "json"
+    assert round_tripped.workspace.default_root is None
     assert round_tripped.protection.document_paths == [str(tmp_path)]
     assert round_tripped.protection.corrections_path == str(
         tmp_path / "corrections.yaml"

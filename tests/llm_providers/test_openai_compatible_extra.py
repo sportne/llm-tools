@@ -242,7 +242,7 @@ def test_provider_preflight_reports_mode_failure_for_selected_mode() -> None:
             chat=SimpleNamespace(
                 completions=SimpleNamespace(
                     create=lambda **kwargs: (_ for _ in ()).throw(
-                        RuntimeError("response format validation failed")
+                        InstructorMessageCarrierError("schema validation failed")
                     )
                 )
             ),
@@ -259,6 +259,31 @@ def test_provider_preflight_reports_mode_failure_for_selected_mode() -> None:
     assert report.selected_mode_supported is False
     assert report.model_listing_supported is True
     assert "provider mode 'json'" in report.actionable_message
+
+
+def test_provider_preflight_reports_transport_failures_without_blaming_mode() -> None:
+    provider = OpenAICompatibleProvider(
+        model="demo-model",
+        client=_BareClient(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=lambda **kwargs: (_ for _ in ()).throw(
+                        RuntimeError("401 unauthorized")
+                    )
+                )
+            ),
+            models=SimpleNamespace(list=lambda: [SimpleNamespace(id="demo-model")]),
+        ),
+        mode_strategy=ProviderModeStrategy.JSON,
+    )
+
+    report = provider.preflight()
+
+    assert report.ok is False
+    assert report.selected_mode_supported is False
+    assert report.actionable_message == (
+        "Unable to validate this provider configuration. RuntimeError: 401 unauthorized"
+    )
 
 
 def test_provider_preflight_handles_missing_model_listing_support() -> None:
