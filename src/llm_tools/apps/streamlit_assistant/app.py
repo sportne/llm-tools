@@ -1148,6 +1148,16 @@ def _append_inspector_entry(
     entries.append(StreamlitInspectorEntry(label=label, payload=payload))
 
 
+def _user_facing_turn_error_message(error_message: str) -> str:
+    if "All provider mode attempts failed." in error_message:
+        return (
+            "Provider compatibility error. "
+            "The endpoint did not return a usable structured response in any fallback mode. "
+            + error_message
+        )
+    return error_message
+
+
 def _apply_turn_error(
     app_state: AssistantWorkspaceState,
     *,
@@ -1156,7 +1166,12 @@ def _apply_turn_error(
 ) -> str | None:
     record = app_state.sessions[session_id]
     turn_state = _turn_state_for(app_state, session_id)
-    record.transcript.append(StreamlitTranscriptEntry(role="error", text=error_message))
+    record.transcript.append(
+        StreamlitTranscriptEntry(
+            role="error",
+            text=_user_facing_turn_error_message(error_message),
+        )
+    )
     pending_prompt = turn_state.queued_follow_up_prompt
     turn_state.busy = False
     turn_state.status_text = ""

@@ -2691,6 +2691,35 @@ def test_streamlit_assistant_process_turn_handles_approval_and_continuation() ->
     ]
 
 
+def test_streamlit_assistant_apply_turn_error_wraps_provider_compatibility_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(_MODULES.app, "_save_workspace_state", lambda app_state: None)
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+
+    _MODULES.app._apply_turn_error(
+        app_state,
+        session_id=session_id,
+        error_message=(
+            "All provider mode attempts failed. Overall failure type: schema/parse-related. "
+            "Tried modes: tools: schema/parse-related (RuntimeError: schema validation failed)."
+        ),
+    )
+
+    assert (
+        app_state.sessions[session_id]
+        .transcript[-1]
+        .text.startswith("Provider compatibility error.")
+    )
+    assert "Tried modes: tools: schema/parse-related" in (
+        app_state.sessions[session_id].transcript[-1].text
+    )
+
+
 def test_streamlit_assistant_apply_turn_result_and_queue_error_branches(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

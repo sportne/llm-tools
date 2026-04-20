@@ -465,7 +465,10 @@ def test_provider_missing_instructor_async_does_not_resend_identical_requests(
     )
     provider = OpenAICompatibleProvider(model="demo-model", async_client=client)
 
-    with pytest.raises(ValueError, match="tools: InstructorSchemaValidationError"):
+    with pytest.raises(
+        ValueError,
+        match=r"tools: schema/parse-related \(InstructorSchemaValidationError: schema validation failed\)",
+    ):
         asyncio.run(
             provider.run_async(
                 adapter=adapter,
@@ -506,7 +509,10 @@ def test_provider_missing_instructor_does_not_resend_identical_requests(
     )
     provider = OpenAICompatibleProvider(model="demo-model", client=client)
 
-    with pytest.raises(ValueError, match="tools: InstructorSchemaValidationError"):
+    with pytest.raises(
+        ValueError,
+        match=r"tools: schema/parse-related \(InstructorSchemaValidationError: schema validation failed\)",
+    ):
         provider.run(
             adapter=adapter,
             messages=[{"role": "user", "content": "hello"}],
@@ -553,7 +559,10 @@ def test_provider_bypassed_instructor_does_not_resend_identical_requests(
     )
     provider = OpenAICompatibleProvider(model="demo-model", client=client)
 
-    with pytest.raises(ValueError, match="tools: InstructorSchemaValidationError"):
+    with pytest.raises(
+        ValueError,
+        match=r"tools: schema/parse-related \(InstructorSchemaValidationError: schema validation failed\)",
+    ):
         provider.run(
             adapter=adapter,
             messages=[{"role": "user", "content": "hello"}],
@@ -587,9 +596,18 @@ def test_provider_run_auto_reports_all_retryable_mode_failures(
         )
 
     message = str(exc_info.value)
-    assert "tools: RuntimeError" in message
-    assert "json: RuntimeError" in message
-    assert "md_json: RuntimeError" in message
+    assert "Overall failure type: schema/parse-related" in message
+    assert (
+        "tools: schema/parse-related (RuntimeError: schema validation failed)"
+        in message
+    )
+    assert (
+        "json: schema/parse-related (RuntimeError: json validation failed)" in message
+    )
+    assert (
+        "md_json: schema/parse-related (RuntimeError: markdown json validation failed)"
+        in message
+    )
     assert [call["__mode"] for call in client.chat.completions.calls] == [
         "TOOLS",
         "JSON",

@@ -132,7 +132,11 @@ def test_provider_helper_methods_cover_listing_and_parameter_merging() -> None:
     message = provider._fallback_error_message(
         [(ProviderModeStrategy.TOOLS, RuntimeError("boom"))]
     )
-    assert "tools: RuntimeError" in message
+    assert "Overall failure type: transport-related" in message
+    assert "tools: transport-related (RuntimeError: boom)" in message
+    assert OpenAICompatibleProvider._failure_category(RuntimeError("boom")) == (
+        "transport-related"
+    )
     assert OpenAICompatibleProvider._is_real_instructor_module(_RealNamedInstructor())
     assert not OpenAICompatibleProvider._is_real_instructor_module(
         SimpleNamespace(__name__="other")

@@ -419,13 +419,38 @@ class OpenAICompatibleProvider:
 
         return chain
 
+    @classmethod
+    def _failure_category(cls, exc: Exception) -> str:
+        return (
+            "schema/parse-related"
+            if cls._should_retry_mode_failure(exc)
+            else "transport-related"
+        )
+
+    @staticmethod
+    def _exception_summary(exc: Exception) -> str:
+        message = str(exc).strip()
+        if not message:
+            return type(exc).__name__
+        return f"{type(exc).__name__}: {message}"
+
     def _fallback_error_message(
         self, failures: list[tuple[ProviderModeStrategy, Exception]]
     ) -> str:
-        details = ", ".join(
-            f"{mode.value}: {type(exc).__name__}" for mode, exc in failures
+        categories = {self._failure_category(exc) for _, exc in failures}
+        overall_category = categories.pop() if len(categories) == 1 else "mixed"
+        details = "; ".join(
+            (
+                f"{mode.value}: {self._failure_category(exc)} "
+                f"({self._exception_summary(exc)})"
+            )
+            for mode, exc in failures
         )
-        return f"All provider mode attempts failed ({details})."
+        return (
+            "All provider mode attempts failed. "
+            f"Overall failure type: {overall_category}. "
+            f"Tried modes: {details}."
+        )
 
     def _merged_request_params(
         self, request_params: dict[str, Any] | None
