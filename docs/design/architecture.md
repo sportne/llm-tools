@@ -75,7 +75,7 @@ assistant app code, and harness orchestration.
 
 ### `llm_adapters`
 
-`llm_adapters` translates provider/model output into canonical internal turn
+`llm_adapters` translates provider or model output into canonical internal turn
 results.
 
 Today the main adapter is `ActionEnvelopeAdapter`, backed by shared parsed
@@ -86,7 +86,7 @@ response contracts in `base.py`.
 `llm_providers` owns typed model transport through OpenAI-compatible endpoints.
 
 It does not execute tools directly. It prepares and validates structured model
-responses against adapter/workflow-provided response models.
+responses against adapter or workflow-provided response models.
 
 ### `tools`
 
@@ -109,21 +109,29 @@ and Atlassian are intentionally bundled remote integrations.
 `workflow_api` currently contains two related but distinct surfaces:
 
 - one-turn execution primitives centered on `WorkflowExecutor`
-- assistant-oriented interactive chat/protection helpers used by the Streamlit
-  assistant
+- assistant-oriented interactive chat and protection helpers used by the
+  Streamlit assistant
 
 The cleanest one-turn boundary is:
 
-- prepare model-facing contract
+- prepare the model-facing contract
 - parse model output through the adapter
 - execute resulting tool invocations through `WorkflowExecutor`
 - return `WorkflowTurnResult`
 
 That boundary is what `harness_api` builds on.
 
-The package also currently includes interactive session state, approval waiting,
-and protection helpers. Those are real supported surfaces today, but they make
-`workflow_api` broader than a strict one-turn package.
+The package also exports interactive session state and protection helpers, but
+the public modules are now split differently than earlier audit docs implied:
+
+- `workflow_api/chat_session.py` is a thin facade over `chat_runner.py`,
+  `chat_state.py`, and `chat_inspector.py`
+- `workflow_api/protection.py` is a thin facade over `protection_models.py`,
+  `protection_store.py`, `protection_provenance.py`, and
+  `protection_controller.py`
+
+Those helpers are still real supported surfaces today, but they no longer all
+live in one implementation file.
 
 ### `harness_api`
 
@@ -139,7 +147,14 @@ It owns:
 - a public session service plus state-store abstractions
 
 The key seam between workflow and harness is the handoff from
-`WorkflowTurnResult` into persisted `HarnessTurn` / `HarnessState`.
+`WorkflowTurnResult` into persisted `HarnessTurn` and `HarnessState`.
+
+Public harness modules are also intentionally split:
+
+- `harness_api/executor.py` is a thin facade over execution internals such as
+  `executor_loop.py`, `executor_approvals.py`, and `executor_persistence.py`
+- `harness_api/session.py` is a thin facade over `session_service.py` and the
+  default driver or applier helpers
 
 ### `apps`
 
@@ -165,18 +180,14 @@ The intended durable split is:
 - `harness_api` owns durable session orchestration and persisted state
 
 This boundary is mostly clean in the import graph and in the durable models, but
-it is semantically blurred in implementation because:
-
-- `workflow_api/chat_session.py` is itself an in-memory orchestrator
-- approval suspension/resume exists in both workflow and harness layers
-- `workflow_api/protection.py` manages filesystem-backed feedback and pending
-  prompt state
-
-This is a refactor target, not evidence that either layer is unnecessary.
+it is still semantically blurred in implementation because approval suspension,
+resume behavior, and assistant-facing orchestration concerns span both layers.
+That is a continuing refactor target, not evidence that either layer is
+unnecessary.
 
 ### Core substrate vs bundled integrations
 
-The typed substrate remains reusable, but the runtime currently knows how to
+The typed substrate remains reusable, but the runtime still knows how to
 instantiate remote-service gateways and document-conversion helpers directly.
 That keeps behavior centralized, but it means some bundled integrations are not
 fully modular from the runtime's perspective.
@@ -184,23 +195,24 @@ fully modular from the runtime's perspective.
 ### Library surface vs app glue
 
 Some app-layer modules are clearly product-specific and should stay that way.
-Others, such as assistant bootstrap helpers, currently mix reusable runtime
-assembly with product presentation concerns. The cleanup goal is to separate
-those concerns without pretending the assistant surface is outside repo scope.
+Others, such as assistant bootstrap helpers, still mix reusable runtime assembly
+with product presentation concerns. The cleanup goal is to separate those
+concerns without pretending the assistant surface is outside repo scope.
 
 ## Known concentration points
 
-Current hotspots called out by the scope audit are:
+Current hotspots are implementation modules, not the thin public facades:
 
 - `src/llm_tools/apps/streamlit_assistant/app.py`
 - `src/llm_tools/apps/assistant_runtime.py`
-- `src/llm_tools/workflow_api/chat_session.py`
-- `src/llm_tools/workflow_api/protection.py`
-- `src/llm_tools/harness_api/executor.py`
+- `src/llm_tools/harness_api/executor_loop.py`
+- `src/llm_tools/workflow_api/chat_runner.py`
+- `src/llm_tools/tool_api/runtime.py`
 - `src/llm_tools/tools/atlassian/tools.py`
 - `src/llm_tools/tools/filesystem/_content.py`
 
-These are concentration and modularization problems. They are not, by themselves, proof that the surrounding surfaces should be removed.
+These are concentration and modularization problems. They are not, by
+themselves, proof that the surrounding surfaces should be removed.
 
 ## Public API guidance
 
@@ -224,5 +236,6 @@ When changing architecture:
 - preserve tested import-layer rules
 - preserve the one-turn workflow primitive even if assistant session helpers move
 - preserve durable harness state and public session contracts
-- prefer splitting concentrated modules over deleting supported behavior
+- prefer splitting concentrated implementation modules over deleting supported
+  behavior
 - keep docs aligned with the actual codebase and test suite

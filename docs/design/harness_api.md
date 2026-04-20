@@ -37,7 +37,8 @@ That includes:
 - task lifecycle state transitions
 - deterministic planning and replanning triggers
 - verification contracts and no-progress signals
-- a public session service for create/run/resume/inspect/list/stop flows
+- a public session service for create, run, resume, inspect, list, and stop
+  flows
 
 ## Public surface
 
@@ -47,45 +48,9 @@ The supported public `harness_api` surface is centered on:
 - replay, resume, store, task, and verification contracts
 - `HarnessExecutor`
 - `HarnessSessionService`
-- request/result models for session operations
+- request and result models for session operations
 - default driver, applier, and provider protocols used by the built-in service
   path
-
-- `TaskLifecycleStatus`: task lifecycle enum for pending, in-progress, blocked,
-  completed, failed, canceled, and superseded work.
-- `TaskOrigin`: durable provenance enum distinguishing user-requested tasks
-  from derived subtasks.
-- `VerificationStatus`: task verification enum for not-run, passed, failed, and
-  inconclusive checks.
-- `HarnessStopReason`: canonical session stop reasons such as completed,
-  budget-exhausted, verification-failed, no-progress, canceled, and error.
-- `TurnDecisionAction`: post-turn action enum for continue, select-tasks, and
-  stop decisions.
-- `BudgetPolicy`: configured session budget limits. It holds only durable limit
-  settings and requires at least one positive configured bound.
-- `VerificationExpectation`: lightweight durable expectations attached to tasks
-  so verification requirements survive replay and resume.
-- `VerificationOutcome`: persisted verification result attached to a task,
-  including status, checked timestamp, summary, and evidence references.
-- `TaskRecord`: canonical durable unit-of-work record, with task identity,
-  title, intent, origin, lifecycle status, parent/dependency links,
-  verification expectations, verification state, artifact refs, supersession
-  metadata, and durable status timestamps.
-- `TurnDecision`: harness-owned decision emitted after a turn completes,
-  including action, selected task ids, optional stop reason, and summary text.
-- `PendingApprovalRecord`: durable approval-resume record that preserves the
-  blocked `ApprovalRequest`, the parsed model response, the base `ToolContext`,
-  and the pending invocation index needed to continue the interrupted turn.
-- `HarnessTurn`: one persisted harness turn, including the turn index, durable
-  timestamps, optional `WorkflowTurnResult`, optional `TurnDecision`, any
-  no-progress signals detected for the turn, turn-local verification snapshots,
-  and minimized approval-audit metadata for resumed approval history.
-- `HarnessSession`: session-level metadata including session id, root task id,
-  budget policy, current turn index, start time, and terminal stop metadata.
-- `HarnessState`: top-level persisted envelope containing `schema_version`,
-  `HarnessSession`, all `TaskRecord` entries, all persisted verification
-  evidence records, all `HarnessTurn` entries, and any durable pending
-  approvals required for resume.
 
 The live public session API is service-based, not free functions. The key entry
 point is `HarnessSessionService`, which exposes typed create, run, resume,
@@ -98,8 +63,8 @@ implementation is now split into narrower modules:
 - `session.py` is a thin public facade over session-service and default-driver
   internals
 - lower-level implementation details live in modules such as
-  `executor_loop.py`, `executor_approvals.py`, `session_service.py`, and
-  `defaults.py`
+  `executor_loop.py`, `executor_approvals.py`, `executor_persistence.py`,
+  `session_service.py`, and `defaults.py`
 
 ## Canonical models
 
@@ -135,7 +100,7 @@ The persistence contract is:
 - persist `HarnessState` as structured data using Pydantic serialization
 - keep store metadata such as revisions outside `HarnessState`
 - require explicit `schema_version` on persisted records
-- gate unsupported versions through the store/resume layer
+- gate unsupported versions through the store or resume layer
 - preserve embedded `WorkflowTurnResult` payloads as part of canonical turn
   history
 - derive prompt context, summaries, and operator views from canonical state
@@ -203,6 +168,9 @@ It is responsible for:
 - enforcing retry budgets and stop conditions
 - persisting the next canonical snapshot plus derived artifacts
 
+The thin public executor facade is not the hotspot anymore. Most execution
+concentration now lives in `executor_loop.py`.
+
 `workflow_api` remains the one-turn bridge. `harness_api` does not push durable
 session state, task lifecycle logic, or resume semantics down into the workflow
 layer.
@@ -216,8 +184,11 @@ The built-in service path composes:
 - `MinimalHarnessTurnApplier`
 - `ScriptedParsedResponseProvider` for deterministic tests and scripts
 
+The thin public session facade is not the hotspot anymore. Most service logic
+lives in `session_service.py` and the default-driver helpers.
+
 These defaults are intentionally narrow. They support root-task sessions,
-basic planning/context projection, durable approval handling, and replayable
+basic planning and context projection, durable approval handling, and replayable
 session traces without forcing applications to adopt a larger agent runtime.
 
 ## Replay and summaries
@@ -234,50 +205,18 @@ session traces without forcing applications to adopt a larger agent runtime.
 Stored artifacts are cache-only derived views. Canonical `HarnessState` remains
 authoritative for inspect, list, replay, and resume.
 
-Public inspect/list flows rebuild trusted artifacts from canonical state through
-`build_canonical_artifacts(...)` rather than trusting stale or tampered stored
-summary or trace payloads.
+Public inspect and list flows rebuild trusted artifacts from canonical state
+through `build_canonical_artifacts(...)` rather than trusting stale or tampered
+stored summary or trace payloads.
 
-Per-turn trace data may include:
-
-- workflow outcome statuses
-- redacted policy metadata
-- approval ids and minimal approval metadata
-- decision summaries and stop reasons
-- per-turn verification-status snapshots for selected tasks
-
-- canonical persisted fields stay on `HarnessState`, `TaskRecord`, and
-  `HarnessTurn`
-- only approved canonical fields are copied into projections
-- copied task fields are limited to task identity, title, intent, lifecycle
-  state, parent/dependency links, status summary, retry count, verification
-  status, and artifact refs
-- copied session fields are limited to session identity, root task id, current
-  turn index, session start time, retry count, and configured `BudgetPolicy`
-- copied turn fields are limited to turn index, selected task ids, decision
-  action, decision stop reason, decision summary, and workflow outcome statuses
-- derived fields such as selected/actionable flags, omission counts,
-  truncation flags, and remaining budget are kept separate from copied
-  canonical data
-- prompt text, provider payloads, token estimates, and formatted instructions
-  are not stored in canonical state and are not emitted by this builder
-
-The default budget policy is explicit and provider-neutral:
-
-- selected tasks are projected first
-- additional actionable tasks are projected second in durable task order
-- completed turns are projected third in newest-first order
-- each copied text field is capped by `max_chars_per_text_field`
-- total copied text across projected fields is capped by `max_total_chars`
-- once the total text budget is exhausted, lower-priority optional projections
-  are omitted and omission metadata is recorded
-- the projection is serialized into `ToolContext.metadata["harness_turn_context"]`
-  without writing anything back into canonical harness state
+Persisted trace payloads should stay minimal and must not be treated as the
+canonical store of raw request arguments, environment state, or other
+unredacted execution payloads.
 
 ## Turn sequencing and commit points
 
-The durable control loop is intentionally explicit and now uses an incomplete
-turn checkpoint plus one persisted commit point per durable outcome:
+The durable control loop is intentionally explicit and uses an incomplete-turn
+checkpoint plus one persisted commit point per durable outcome:
 
 1. Load or save the current `HarnessState` snapshot.
 2. Classify it through `resume_session(...)`.
@@ -296,8 +235,8 @@ turn checkpoint plus one persisted commit point per durable outcome:
 10. Otherwise, apply the completed turn, stamp `ended_at`, persist any
     no-progress signals, and save the completed turn.
 11. Continue only for `TurnDecisionAction.CONTINUE` and
-   `TurnDecisionAction.SELECT_TASKS`; terminal stops stamp
-   `session.ended_at` and `session.stop_reason`.
+    `TurnDecisionAction.SELECT_TASKS`; terminal stops stamp
+    `session.ended_at` and `session.stop_reason`.
 
 If the process crashes after the incomplete-turn checkpoint but before the
 completed-turn save, resume classifies the tail turn as `interrupted`. The
@@ -313,36 +252,15 @@ Retry and recovery are explicit rather than inferred from UI state:
   retry up to `max_retryable_tool_retries`
 - approval waits, approval denials, approval expirations, validation failures,
   and non-retryable tool errors do not auto-retry
-- approval denial, expiration, and operator cancel are fail-closed: the
-  denied invocation is recorded, but later invocations from that same parsed
-  response do not run
+- approval denial, expiration, and operator cancel are fail-closed: the denied
+  invocation is recorded, but later invocations from that same parsed response
+  do not run
 - interrupted non-approval tail turns are not replayed automatically; they must
   be explicitly acknowledged and dropped before rerun
 - every actual retry attempt increments `HarnessSession.retry_count` and the
   selected tasks' `TaskRecord.retry_count`
 - optimistic-concurrency save conflicts reload the latest snapshot and retry
   only when the canonical pre-turn state is unchanged
-
-Unresolved approvals remain durable through the combination of an incomplete
-tail `HarnessTurn` and a `PendingApprovalRecord`. Resolved approvals reuse the
-persisted `WorkflowTurnResult` outcome list as the durable history surface, so
-approval approval, denial, timeout, and operator cancel can be replayed without
-adding a second approval-history model in Phase 7. Session-level stop reasons
-now distinguish `approval_denied`, `approval_expired`, and
-`approval_canceled`.
-
-The implemented evidence shape is intentionally minimal and additive:
-
-- `VerificationEvidenceRecord.evidence_id`: stable record id
-- `task_id`: optional owning task reference
-- `recorded_at`: optional durable timestamp
-- `summary`: optional human-readable description
-- `artifact_ref`: optional pointer to an external artifact, file, or report
-- `verifier_name`: optional verifier identifier
-
-Persisted trace payloads should stay minimal and must not be treated as the
-canonical store of raw request arguments, environment state, or other
-unredacted execution payloads.
 
 ## Dependency direction
 

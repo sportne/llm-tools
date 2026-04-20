@@ -4,9 +4,8 @@
 
 This file is the repository's active backlog and status tracker.
 
-The previous `streamlit_chat` removal work is complete. The current baseline is
-the code-first scope audit and documentation re-baselining captured in
-[docs/implementation/scope-audit.md](docs/implementation/scope-audit.md).
+The current baseline is the rebuilt documentation canon plus the supported code
+surfaces described in `README.md` and the design docs.
 
 ## Status conventions
 
@@ -16,68 +15,50 @@ the code-first scope audit and documentation re-baselining captured in
 
 ## Current backlog
 
-### [x] Establish current scope truth
+### [x] Re-baseline repository documentation
 
-- [x] Audit every module under `src/llm_tools`.
-- [x] Re-baseline `README.md`, `TASKS.md`, and the core design docs.
-- [x] Record supported surfaces, dependency paths, and cleanup candidates
-  without removing supported behavior.
+- [x] Collapse the Markdown set into a smaller canonical doc tree.
+- [x] Remove stale references to deleted implementation, usage, and security
+  index docs.
+- [x] Align `README.md`, `AGENTS.md`, and the design docs with the current
+  package layout and split facade/internal module structure.
 
 ### [ ] Decompose oversized assistant app surfaces
 
-- [ ] Split `src/llm_tools/apps/streamlit_assistant/app.py` into narrower
-  modules for state persistence, turn execution, research-session controls, and
-  rendering.
-- [ ] Split `src/llm_tools/apps/assistant_runtime.py` so registry assembly,
-  policy/context helpers, and research-provider wiring are no longer co-located
-  in one file.
-- [ ] Remove repeated assistant setup logic shared between normal chat turns and
-  research-session launches.
+- [ ] Split `src/llm_tools/apps/streamlit_assistant/app.py` further so state
+  persistence, turn execution, research-session controls, and rendering stop
+  concentrating in one module.
+- [ ] Reduce repeated assistant setup logic shared between direct chat turns and
+  harness-backed research launches.
+- [ ] Decide how much of `assistant_runtime.py` should remain a convenience
+  export surface versus moving into narrower assistant-specific modules.
 
-### [ ] Simplify overlapping app/runtime assembly
+### [ ] Reduce concentration in workflow and harness internals
 
-- [ ] Decide whether `src/llm_tools/apps/chat_runtime.py` remains a supported
-  helper or should be folded into a more explicit assistant/harness bootstrap
-  layer.
-- [ ] Eliminate reliance on private APIs in app helpers where feasible.
-- [ ] Narrow app-layer code that currently reaches through lower-layer private
-  internals.
-
-### [ ] Reduce concentration in workflow and harness execution code
-
-- [ ] Split `src/llm_tools/workflow_api/chat_session.py` into smaller session,
-  event, and approval-flow components.
-- [ ] Revisit whether interactive chat session orchestration belongs inside
-  `workflow_api` or should move to a more explicit session/orchestration layer.
-- [ ] Split `src/llm_tools/workflow_api/protection.py` into narrower controller,
-  persistence, and model/config modules.
-- [ ] Split `src/llm_tools/harness_api/executor.py` so run-loop control,
-  persistence/retry handling, and approval resumption are easier to follow and
-  test.
-- [ ] Separate the public service API in `src/llm_tools/harness_api/session.py`
-  from default driver/applier implementations.
+- [ ] Keep the thin public facades in `workflow_api/chat_session.py`,
+  `workflow_api/protection.py`, `harness_api/executor.py`, and
+  `harness_api/session.py`, but continue splitting heavy internal logic where it
+  is still concentrated.
+- [ ] Revisit whether interactive chat orchestration should continue to live in
+  `workflow_api` or move to a more explicit session/orchestration package while
+  preserving the one-turn workflow surface.
+- [ ] Continue narrowing large internal modules such as
+  `workflow_api/chat_runner.py`, `workflow_api/protection_controller.py`, and
+  `harness_api/executor_loop.py`.
 
 ### [ ] Modularize bundled integration surfaces
 
-- [ ] Split `src/llm_tools/tools/atlassian/tools.py` by product area instead of
-  keeping Jira, Bitbucket, and Confluence in one module.
-- [ ] Revisit the `filesystem` and `text` tool boundary, which currently shares
-  the same readable-content pipeline and cache path.
+- [ ] Finish the Atlassian split so product-specific implementation stops
+  concentrating in `src/llm_tools/tools/atlassian/tools.py`.
+- [ ] Revisit the `filesystem` and `text` tool boundary, which still shares the
+  same readable-content pipeline and cache path.
 - [ ] Review remote-integration wiring that is still embedded directly in
-  `tool_api` runtime/execution helpers.
-
-### [ ] Finish secondary documentation cleanup
-
-- [ ] Refresh usage docs that still describe outdated cache paths or stale
-  dependency details.
-- [ ] Ensure dependency documentation matches the actual packaged and lazily
-  imported runtime surface.
-- [ ] Keep architecture docs aligned with the tested import-layer rules.
+  `tool_api` runtime and execution helpers.
 
 ### [ ] Validate safe dead-code removals
 
-- [ ] Confirm whether any current duplicate or transitional helpers can be
-  deleted without affecting supported assistant, workflow, harness, or bundled
-  integration behavior.
-- [ ] Do not remove supported surfaces until their replacement path is explicit
-  and documented.
+- [ ] Confirm whether duplicate or transitional helpers in `apps`,
+  `workflow_api`, and `harness_api` can now be deleted without affecting
+  supported behavior.
+- [ ] Remove only surfaces whose replacement path is explicit, documented, and
+  covered by tests.

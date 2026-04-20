@@ -1,0 +1,226 @@
+# Security
+
+`llm-tools` includes multiple sensitive execution surfaces: local filesystem
+tools, subprocess-backed Git helpers, remote enterprise read integrations,
+structured provider calls, a Streamlit assistant client, and durable
+harness-backed research sessions. Treat configs, examples, caches, and
+persisted session state as part of the security surface.
+
+## Current posture
+
+The current baseline is:
+
+- architectural layering is enforced by tests
+- tool execution remains runtime-mediated through `tool_api`
+- central policy, approval, and redaction controls exist in the lower layers
+- harness persistence now treats stored summaries and traces as cache-only
+  derived views
+- persisted approval waits and interrupted turns now fail closed by default
+- malformed file-backed harness session records are treated as corruption
+
+Security-sensitive shipped surfaces include:
+
+- filesystem, subprocess, and network-capable tools
+- OpenAI-compatible provider transport
+- persisted harness sessions and replay data
+- the Streamlit assistant and harness CLI entrypoints
+
+## Operational guidance
+
+### Dependency surface
+
+Runtime and optional dependency exposure includes:
+
+- `openai` and `instructor` for the OpenAI-compatible provider layer and
+  structured response parsing
+- `atlassian-python-api` for Jira, Bitbucket, and Confluence tools
+- `python-gitlab` for GitLab read tools
+- `markitdown` for office and document conversion during read-oriented
+  filesystem access
+- `mpxj` plus Java for Microsoft Project file reads
+- `streamlit` and YAML loading when installing `.[streamlit]`
+
+Only enable the integrations you actually need in the current environment.
+
+### Assistant permissions and approvals
+
+In `llm_tools.apps.streamlit_assistant`:
+
+- selecting a workspace root only picks the directory available to local file
+  and subprocess tools
+- fresh sessions start with network, filesystem, and subprocess permissions off
+- write-capable side effects are approval-gated by default, even after a tool is
+  enabled
+- additional approval requirements can come from `policy.require_approval_for`
+  in assistant config
+
+The sidebar runtime controls are session-scoped. "New session from current
+setup" clones the current model, enabled tools, permissions, and approval
+settings into the new session.
+
+### Secret handling
+
+Prefer one of these patterns for credentials:
+
+- environment variables consumed by providers or integrations
+- the Streamlit assistant's session-only API-key entry
+
+Do not commit secrets into assistant YAML configs, scripted harness payloads, or
+examples. If you need local overrides, keep them in ignored files.
+
+### Persisted data and caches
+
+Default storage locations:
+
+- Streamlit assistant state: `~/.llm-tools/assistant/streamlit`
+- Streamlit assistant research store: `~/.llm-tools/assistant/streamlit/research`
+- Harness CLI state: `~/.llm-tools/harness`
+
+Cache locations are split by feature:
+
+- filesystem and document conversion cache: workspace-local
+  `.llm_tools/cache/read_file`
+- Confluence attachment cache: platform temp dir under
+  `tempfile.gettempdir()/llm_tools/confluence_attachment_cache`
+
+If you intentionally redirect any of these into a repository checkout, keep the
+paths ignored. This repository ignores `.llm_tools/` in addition to the older
+`.llm-tools/` scratch paths.
+
+### Pending approval snapshots
+
+Newly persisted harness approval records store only a scrubbed base context:
+
+- preserved: `invocation_id`, `workspace`, and `metadata`
+- cleared before persistence: process environment variables, logs, artifacts,
+  and source provenance
+- rebuilt on resume: execution context derived from the stored base context plus
+  the current process environment
+
+Pending approval turns also keep a minimal approval-audit record so replay and
+inspection can show approval status without persisting raw request payloads.
+
+Non-approved approval outcomes are fail-closed: denial, expiration, or operator
+cancel records the blocked invocation, but later invocations from that same
+paused model turn do not continue running.
+
+Older snapshots created before this hardening change may still contain raw
+environment data. Delete those persisted session files if they may have held
+sensitive values. The repository does not migrate or scrub old snapshots in
+place.
+
+### Harness replay and inspection artifacts
+
+Persisted harness `summary` and `trace` artifacts should be treated as cache-only
+derived views. Canonical `HarnessState` remains authoritative for resume,
+replay, and inspection, so cached artifacts may be rebuilt or ignored when
+absent, stale, inconsistent, or corrupt.
+
+Persisted trace payloads should stay minimal. Keep redacted policy metadata,
+status summaries, identifiers, and explicit artifact references when needed, but
+do not rely on stored traces to preserve raw request arguments, environment
+state, or other unredacted payloads by default.
+
+Harness turns checkpoint an incomplete tail record before provider or tool
+execution begins. Resume classifies those partial non-approval turns as
+`interrupted` and fails closed by default; callers must opt in before the tail
+turn is dropped and replayed.
+
+Protection-triggered purge is broader than final-answer replacement. Persisted
+tool-result payloads, logs, artifacts, and execution-record outputs are scrubbed
+from stored harness turns so replay, raw inspection payloads, and Streamlit
+research detail views do not re-render the protected material.
+
+### Remote enterprise tools
+
+Confluence reads are split intentionally:
+
+- `read_confluence_page` is a pure remote page read with no filesystem write
+- `read_confluence_attachment` downloads attachment bytes into the internal
+  cache and therefore requires filesystem permission plus `LOCAL_WRITE`
+
+Jira issue reads no longer expose the full remote `fields` map by default.
+Use `requested_fields` when a caller needs additional fields beyond the
+allowlisted summary view. GitLab, Jira, Bitbucket, and Confluence collection
+reads now apply hard limits and surface truncation metadata instead of returning
+unbounded result sets, and the shipped remote tool specs set explicit per-tool
+timeouts with retryability only for transient upstream failures.
+
+## Active hardening backlog
+
+Open work:
+
+- `tools`: cross-check every built-in tool spec against actual side effects,
+  capability flags, and required secrets
+- `workflow_api` and model mediation: identify remaining attack paths where
+  model-controlled content could trigger unexpected tool execution, unbounded
+  work, or sensitive data disclosure
+- `apps`: finish review of shared app config, prompt helpers, `streamlit_assistant`,
+  app compatibility surfaces, and `harness_cli`
+- project-wide: re-run relevant tests for confirmed security issues and produce
+  a final confidence summary
+
+Deferred work:
+
+- bind persisted approval resumes to a reviewed integrity mechanism rather than
+  trusting unauthenticated stored approval payloads
+- constrain approval resume environment rehydration to a reviewed allowlist or
+  stable approved snapshot instead of the full current process environment
+- minimize prompt-protection correction state and inspector payload retention
+  further once the long-term contract is settled
+
+## Completed review summary
+
+### 2026-04-19: `workflow_api` sequencing, approvals, protection, and replay
+
+- Reviewed the workflow execution path, approval behavior, protection state, and
+  replay or trace exposure across `workflow_api`, `tool_api`, `llm_adapters`,
+  and `harness_api`.
+- Confirmed and then addressed fail-open approval behavior and raw request
+  retention in workflow-adjacent replay paths.
+- Remaining deferred items are approval-record integrity binding and further
+  prompt-protection retention minimization.
+
+### 2026-04-19: `harness_api` lifecycle, control flow, persistence, and replay
+
+- Reviewed durable models, executor control flow, resume semantics, replay,
+  summaries, persistence hardening, and corruption handling.
+- Addressed `completed` terminalization on blocked work, crash-before-save
+  replay risk through incomplete-turn checkpointing, over-budget dispatch, stale
+  summary or trace trust, and corrupt file handling.
+- Remaining deferred item is narrowing approval-resume environment rehydration.
+
+### 2026-04-19: architecture and security coverage review
+
+- Reviewed architecture tests plus security-relevant tests across tools,
+  providers, workflow, harness, and apps.
+- Addressed missing regressions for replay, approval, inspection, purge
+  propagation, and indirect runtime-bypass shapes.
+- Remaining work is project-wide confidence closure rather than the previously
+  identified coverage gaps.
+
+### 2026-04-19: GitLab and Atlassian tool-family review
+
+- Reviewed credential handling, request scoping, pagination, remote trust
+  assumptions, timeout behavior, and tool contract accuracy.
+- Addressed Confluence attachment cache side effects, Jira field exposure,
+  bounded collection outputs, and explicit timeout or retry behavior.
+- Remaining open work is the broader cross-check of all built-in tool specs.
+
+## Review evidence model
+
+Security review entries in this repository use a consistent evidence bar:
+
+- reviewed code paths are named explicitly
+- relevant tests are listed, including whether they were inspected or run
+- findings are recorded with severity and affected components
+- remediation or deferral status is captured explicitly
+- residual risk is summarized even when most findings are addressed
+
+Severity buckets:
+
+- `Critical`: broken core trust boundary or broad compromise path
+- `High`: material weakness with realistic exploitation or strong impact
+- `Medium`: meaningful weakness with narrower preconditions or partial
+  mitigation
+- `Low`: defense-in-depth issue or hardening gap

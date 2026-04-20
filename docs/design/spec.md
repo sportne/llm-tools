@@ -6,13 +6,12 @@
 executing tools, with higher-level workflow, harness, and assistant surfaces
 built on top of that substrate.
 
-The repository is no longer accurately described as only a minimal tool core.
-It now supports:
+The repository is not just a minimal tool core. It currently supports:
 
 - typed tool definition and execution
 - model-output normalization and OpenAI-compatible provider transport
 - one-turn workflow execution
-- interactive assistant chat orchestration
+- assistant-facing chat and protection flows
 - durable harness sessions for longer-running research and workflow tasks
 - bundled built-in integrations for local and remote read surfaces
 
@@ -30,26 +29,6 @@ Every disagreement should be called out as one of:
 - docs stale
 - code drift
 - unresolved product decision
-
-## Goals
-
-Primary goals:
-
-- keep the typed tool/runtime substrate clean and reusable
-- support safe, observable tool execution with explicit policy
-- preserve a public workflow layer for one-turn execution primitives
-- preserve a public harness layer for durable orchestration and future
-  workflow/agent extensions
-- support the assistant client without baking all product decisions into the
-  lowest layers
-- keep bundled integrations available while documenting their role clearly
-
-Secondary goals:
-
-- keep assistant-facing app surfaces usable and well-scoped
-- make boundaries between core substrate, orchestration, and app glue easier to
-  understand
-- reduce concentration and duplication before removing supported features
 
 ## Supported surfaces
 
@@ -80,7 +59,7 @@ The canonical substrate is still the typed tool system:
   models live in `tool_api`
 - `ToolRegistry` owns registration and lookup
 - `ToolRuntime` owns validation, policy enforcement, execution mediation,
-  service wiring, and result normalization
+  gateway wiring, and result normalization
 - built-in tools are implemented outside `tool_api`
 
 ### Adapters and providers
@@ -97,11 +76,19 @@ Today it contains two kinds of functionality:
 
 - one-turn workflow primitives centered on `WorkflowExecutor`,
   `PreparedModelInteraction`, and `WorkflowTurnResult`
-- assistant-oriented interactive chat/protection helpers used by the Streamlit
-  assistant
+- assistant-oriented interactive chat and protection helpers used by the
+  Streamlit assistant
 
-The repo should preserve the clean one-turn workflow primitive even while the
-assistant-oriented session helpers remain in the same package for now.
+Some public workflow modules are now intentionally thin facades:
+
+- `workflow_api/chat_session.py` re-exports split chat internals from
+  `chat_runner.py`, `chat_state.py`, and `chat_inspector.py`
+- `workflow_api/protection.py` re-exports split protection internals from
+  `protection_models.py`, `protection_store.py`, and
+  `protection_controller.py`
+
+The repo should preserve the clean one-turn workflow primitive even while
+assistant-oriented session helpers remain in the same package.
 
 ### Harness layer
 
@@ -117,6 +104,13 @@ It owns:
 - verification contracts and no-progress signals
 - a public session service and store abstractions
 
+Some public harness modules are also intentionally thin facades:
+
+- `harness_api/executor.py` fronts split execution internals such as
+  `executor_loop.py`, `executor_approvals.py`, and `executor_persistence.py`
+- `harness_api/session.py` fronts `session_service.py` and default driver or
+  applier helpers
+
 This layer is in scope for prescribed workflows and future definable-agent
 capabilities.
 
@@ -127,7 +121,7 @@ the repository. It supports:
 
 - direct assistant chat
 - policy-aware tool exposure and approvals
-- prompt/response protection hooks
+- prompt and response protection hooks
 - durable research sessions backed by `harness_api`
 - optional bundled remote integrations alongside the local tool core
 
@@ -144,7 +138,7 @@ The bundled built-in tool families are:
 The assistant's local working set is primarily filesystem, git, and text.
 GitLab and Atlassian are intentionally bundled but secondary integrations.
 Document-conversion backends such as MarkItDown and MPXJ are part of the
-filesystem/text read pipeline rather than first-class tool families.
+filesystem and text read pipeline rather than first-class tool families.
 
 ## Current architectural constraints
 
@@ -162,9 +156,9 @@ These constraints are enforced in part by the architecture tests.
 ## What this spec does not claim
 
 This spec does not claim that the current package boundaries are already ideal.
-The codebase contains significant concentration in assistant, workflow, harness,
-and bundled integration modules. The near-term priority is to modularize those
-surfaces without removing supported behavior prematurely.
+The codebase still contains concentration in assistant, workflow, harness, and
+bundled integration modules. The near-term priority is to keep splitting the
+largest internal modules without removing supported behavior prematurely.
 
 ## Acceptance criteria for the current repository state
 
