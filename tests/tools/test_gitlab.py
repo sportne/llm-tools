@@ -89,7 +89,7 @@ def test_search_gitlab_code_tool_maps_project_results(
         ) -> list[dict[str, object]]:
             assert scope == "blobs"
             assert query == "needle"
-            assert kwargs == {"per_page": 2, "ref": "main"}
+            assert kwargs == {"per_page": 3, "ref": "main"}
             return [
                 {
                     "path": "src/app.py",
@@ -135,7 +135,9 @@ def test_search_gitlab_code_tool_marks_truncated_when_results_exceed_limit(
         def search(
             self, scope: str, query: str, **kwargs: object
         ) -> list[dict[str, object]]:
-            del scope, query, kwargs
+            assert scope == "blobs"
+            assert query == "needle"
+            assert kwargs == {"per_page": 3}
             return [
                 {"path": f"src/file-{index}.py", "snippet": "needle()"}
                 for index in range(3)

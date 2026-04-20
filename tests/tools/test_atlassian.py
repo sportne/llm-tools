@@ -131,7 +131,7 @@ def test_search_jira_tool_maps_search_results(
 
         def enhanced_jql(self, jql: str, *, limit: int) -> dict[str, object]:
             assert jql == "project = DEMO"
-            assert limit == 5
+            assert limit == 6
             return {
                 "issues": [
                     {
@@ -226,7 +226,7 @@ def test_search_jira_tool_falls_back_to_jql_method(
 
         def jql(self, jql: str, *, limit: int) -> dict[str, object]:
             assert jql == "project = DEMO"
-            assert limit == 3
+            assert limit == 4
             return {
                 "issues": [
                     {
@@ -251,6 +251,36 @@ def test_search_jira_tool_falls_back_to_jql_method(
 
     assert result.issues[0].key == "DEMO-3"
     assert result.issues[0].summary == "Fallback issue"
+
+
+def test_search_jira_tool_marks_truncated_when_extra_issue_is_fetched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeJira:
+        def __init__(self, **kwargs: str) -> None:
+            del kwargs
+
+        def enhanced_jql(self, jql: str, *, limit: int) -> dict[str, object]:
+            assert jql == "project = DEMO"
+            assert limit == 3
+            return {
+                "issues": [
+                    {"key": "DEMO-1", "fields": {"summary": "One"}},
+                    {"key": "DEMO-2", "fields": {"summary": "Two"}},
+                    {"key": "DEMO-3", "fields": {"summary": "Three"}},
+                ]
+            }
+
+    _install_fake_atlassian_module(monkeypatch, jira_cls=FakeJira)
+
+    result = SearchJiraTool.output_model.model_validate(
+        _invoke_tool(
+            "search_jira", _jira_context(), {"jql": "project = DEMO", "limit": 2}
+        ).output
+    )
+
+    assert [issue.key for issue in result.issues] == ["DEMO-1", "DEMO-2"]
+    assert result.truncated is True
 
 
 def test_search_jira_tool_rejects_unsupported_client(
@@ -363,7 +393,7 @@ def test_search_bitbucket_code_tool_maps_results(
         ) -> dict[str, object]:
             assert team == "PROJ"
             assert search_query == "needle"
-            assert limit == 5
+            assert limit == 6
             return {
                 "values": [
                     {
@@ -390,6 +420,41 @@ def test_search_bitbucket_code_tool_maps_results(
     assert result.matches[0].path == "src/main.py"
     assert result.matches[0].line_number == 12
     assert result.matches[0].snippet == "needle()"
+
+
+def test_search_bitbucket_code_tool_marks_truncated_when_extra_match_is_fetched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeBitbucket:
+        def __init__(self, **kwargs: str) -> None:
+            del kwargs
+
+        def search_code(
+            self, team: str, search_query: str, *, limit: int
+        ) -> dict[str, object]:
+            assert team == "PROJ"
+            assert search_query == "needle"
+            assert limit == 3
+            return {
+                "values": [
+                    {"repository": {"slug": "repo"}, "path": "a.py"},
+                    {"repository": {"slug": "repo"}, "path": "b.py"},
+                    {"repository": {"slug": "repo"}, "path": "c.py"},
+                ]
+            }
+
+    _install_fake_atlassian_module(monkeypatch, bitbucket_cls=FakeBitbucket)
+
+    result = SearchBitbucketCodeTool.output_model.model_validate(
+        _invoke_tool(
+            "search_bitbucket_code",
+            _bitbucket_context(),
+            {"project_key": "PROJ", "query": "needle", "limit": 2},
+        ).output
+    )
+
+    assert [match.path for match in result.matches] == ["a.py", "b.py"]
+    assert result.truncated is True
 
 
 def test_read_bitbucket_file_tool_reads_text_and_applies_ranges(
@@ -561,7 +626,7 @@ def test_search_confluence_tool_maps_results(
 
         def cql(self, cql: str, *, limit: int, excerpt: str) -> dict[str, object]:
             assert cql == "type = page"
-            assert limit == 4
+            assert limit == 5
             assert excerpt == "highlight"
             return {
                 "results": [
@@ -596,6 +661,39 @@ def test_search_confluence_tool_maps_results(
         result.matches[0].web_url
         == "https://confluence.example.com/spaces/ENG/pages/123"
     )
+
+
+def test_search_confluence_tool_marks_truncated_when_extra_match_is_fetched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeConfluence:
+        def __init__(self, **kwargs: str) -> None:
+            del kwargs
+
+        def cql(self, cql: str, *, limit: int, excerpt: str) -> dict[str, object]:
+            assert cql == "type = page"
+            assert limit == 3
+            assert excerpt == "highlight"
+            return {
+                "results": [
+                    {"content": {"id": "1", "title": "One", "type": "page"}},
+                    {"content": {"id": "2", "title": "Two", "type": "page"}},
+                    {"content": {"id": "3", "title": "Three", "type": "page"}},
+                ]
+            }
+
+    _install_fake_atlassian_module(monkeypatch, confluence_cls=FakeConfluence)
+
+    result = SearchConfluenceTool.output_model.model_validate(
+        _invoke_tool(
+            "search_confluence",
+            _confluence_context(),
+            {"cql": "type = page", "limit": 2},
+        ).output
+    )
+
+    assert [match.content_id for match in result.matches] == ["1", "2"]
+    assert result.truncated is True
 
 
 def test_read_confluence_page_tool_reads_page_with_ranges(

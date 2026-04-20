@@ -317,7 +317,7 @@ def test_runtime_executes_bitbucket_builtins_with_mocked_client(
         ) -> dict[str, object]:
             assert team == "PROJ"
             assert search_query == "needle"
-            assert limit == 2
+            assert limit == 3
             return {
                 "values": [
                     {

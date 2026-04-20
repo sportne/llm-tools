@@ -32,6 +32,10 @@ _REMOTE_COLLECTION_LIMIT = 100
 _RETRYABLE_STATUS_CODES = frozenset({429, 502, 503, 504})
 
 
+def _search_fetch_limit(limit: int) -> int:
+    return limit + 1
+
+
 def _append_remote_source_provenance(
     context: ToolExecutionContext,
     *,
@@ -266,7 +270,7 @@ class SearchGitLabCodeTool(Tool[SearchGitLabCodeInput, SearchGitLabCodeOutput]):
             project,
             args.query,
             ref=args.ref,
-            limit=args.limit,
+            limit=_search_fetch_limit(args.limit),
         )
         matches = [
             GitLabCodeSearchMatch(

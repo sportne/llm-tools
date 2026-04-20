@@ -47,6 +47,10 @@ _REMOTE_COLLECTION_LIMIT = 100
 _RETRYABLE_STATUS_CODES = frozenset({429, 502, 503, 504})
 
 
+def _search_fetch_limit(limit: int) -> int:
+    return limit + 1
+
+
 def _append_remote_source_provenance(
     context: ToolExecutionContext,
     *,
@@ -463,11 +467,12 @@ class SearchJiraTool(Tool[SearchJiraInput, SearchJiraOutput]):
         self, context: ToolExecutionContext, args: SearchJiraInput
     ) -> SearchJiraOutput:
         client = context.services.require_jira().client
+        fetch_limit = _search_fetch_limit(args.limit)
         try:
             if hasattr(client, "enhanced_jql"):
-                payload = client.enhanced_jql(args.jql, limit=args.limit)
+                payload = client.enhanced_jql(args.jql, limit=fetch_limit)
             elif hasattr(client, "jql"):
-                payload = client.jql(args.jql, limit=args.limit)
+                payload = client.jql(args.jql, limit=fetch_limit)
             else:
                 raise RuntimeError(
                     "Configured Jira client does not support JQL search."
@@ -592,8 +597,11 @@ class SearchBitbucketCodeTool(
         self, context: ToolExecutionContext, args: SearchBitbucketCodeInput
     ) -> SearchBitbucketCodeOutput:
         client = context.services.require_bitbucket().client
+        fetch_limit = _search_fetch_limit(args.limit)
         try:
-            payload = client.search_code(args.project_key, args.query, limit=args.limit)
+            payload = client.search_code(
+                args.project_key, args.query, limit=fetch_limit
+            )
         except Exception as exc:
             raise _normalize_remote_exception(exc) from exc
         raw_matches = _extract_collection(payload)
@@ -890,8 +898,9 @@ class SearchConfluenceTool(Tool[SearchConfluenceInput, SearchConfluenceOutput]):
     ) -> SearchConfluenceOutput:
         client = context.services.require_confluence().client
         base_url = context.secrets.get_required("CONFLUENCE_BASE_URL")
+        fetch_limit = _search_fetch_limit(args.limit)
         try:
-            payload = client.cql(args.cql, limit=args.limit, excerpt="highlight")
+            payload = client.cql(args.cql, limit=fetch_limit, excerpt="highlight")
         except Exception as exc:
             raise _normalize_remote_exception(exc) from exc
         raw_matches = _extract_collection(payload)
