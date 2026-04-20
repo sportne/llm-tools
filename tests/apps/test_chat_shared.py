@@ -16,6 +16,7 @@ from llm_tools.apps.chat_presentation import (
     pretty_json,
 )
 from llm_tools.apps.streamlit_models import StreamlitPreferences, StreamlitRuntimeConfig
+from llm_tools.llm_providers import ProviderModeStrategy
 from llm_tools.tool_api.redaction import RedactionConfig
 from llm_tools.workflow_api import ChatCitation, ChatFinalResponse
 
@@ -29,12 +30,14 @@ def test_chat_config_validation_and_metadata() -> None:
     assert metadata.api_key_env_var == "OPENAI_API_KEY"
     assert metadata.expects_api_key is True
 
-    custom_metadata = ChatLLMConfig(
+    custom_config = ChatLLMConfig(
         provider=ProviderPreset.CUSTOM_OPENAI_COMPATIBLE,
         prompt_for_api_key_if_missing=False,
-    ).credential_prompt_metadata()
+    )
+    custom_metadata = custom_config.credential_prompt_metadata()
     assert custom_metadata.api_key_env_var == "OPENAI_API_KEY"
     assert custom_metadata.prompt_for_api_key_if_missing is False
+    assert custom_config.provider_mode_strategy is ProviderModeStrategy.JSON
 
     ollama_metadata = ChatLLMConfig(api_key_env_var=None).credential_prompt_metadata()
     assert ollama_metadata.api_key_env_var == "API key"
@@ -65,6 +68,8 @@ def test_streamlit_models_validate_and_normalize() -> None:
     assert runtime.root_path is None
     assert runtime.enabled_tools == ["read_file", "search_text"]
     assert runtime.provider_mode_strategy.value == "json"
+
+    assert StreamlitRuntimeConfig().protection.enabled is False
 
     with pytest.raises(ValueError):
         StreamlitRuntimeConfig(model_name="   ")
@@ -183,9 +188,16 @@ def test_chat_runtime_provider_factory_and_executor_defaults(
         model_name="custom-model",
         mode_strategy="tools",
     )
+    default_custom_provider = _CHAT_RUNTIME_MODULE.create_provider(
+        custom_config,
+        api_key="provided",
+        model_name="custom-model",
+    )
     assert custom_provider.kind == "custom-provider"
+    assert default_custom_provider.kind == "custom-provider"
     assert custom_calls[0]["api_key"] == "provided"
     assert custom_calls[0]["mode_strategy"] == "tools"
+    assert custom_calls[1]["mode_strategy"] == ProviderModeStrategy.JSON
     with pytest.raises(ValueError, match="require api_base_url"):
         _CHAT_RUNTIME_MODULE.create_provider(
             custom_config.model_copy(update={"api_base_url": None}),

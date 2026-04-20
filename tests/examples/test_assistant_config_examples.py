@@ -17,6 +17,7 @@ from llm_tools.apps.assistant_config import (
 from llm_tools.apps.chat_config import ChatLLMConfig, ChatPolicyConfig, ChatUIConfig
 from llm_tools.harness_api import HarnessStopReason, ScriptedParsedResponseProvider
 from llm_tools.llm_adapters import ParsedModelResponse
+from llm_tools.llm_providers import ProviderModeStrategy
 from llm_tools.tool_api import SideEffectClass, ToolInvocationRequest
 from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import ChatSessionConfig, ChatSessionState
@@ -112,6 +113,8 @@ def test_local_only_chat_example_loads_cleanly() -> None:
     config = load_streamlit_assistant_config(path)
 
     assert config.llm.provider.value == "ollama"
+    assert config.llm.provider_mode_strategy is ProviderModeStrategy.AUTO
+    assert config.llm.provider_mode_strategy is ProviderModeStrategy.AUTO
     assert config.workspace.default_root == "."
     assert config.research.enabled is False
     assert set(config.policy.enabled_tools or []) == LOCAL_ONLY_TOOLS
@@ -126,6 +129,7 @@ def test_enterprise_data_chat_example_loads_cleanly() -> None:
     config = load_streamlit_assistant_config(path)
 
     assert config.llm.provider.value == "custom_openai_compatible"
+    assert config.llm.provider_mode_strategy is ProviderModeStrategy.JSON
     assert config.workspace.default_root is None
     assert config.research.enabled is False
     assert set(config.policy.enabled_tools or []) == ENTERPRISE_DATA_TOOLS

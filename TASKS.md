@@ -62,3 +62,12 @@ surfaces described in `README.md` and the design docs.
   supported behavior.
 - [ ] Remove only surfaces whose replacement path is explicit, documented, and
   covered by tests.
+
+### [~] Productize the Streamlit assistant for internal deployment
+
+- [x] Make assistant YAML optional and keep the no-config startup path working.
+- [x] Add provider-mode selection and validation for OpenAI-compatible endpoints, with `custom_openai_compatible` defaulting to `json`.
+- [x] Add session-only remote credential inputs for GitLab, Jira, Confluence, and Bitbucket.
+- [x] Add export-from-session YAML generation that excludes secret values.
+- [x] Add proprietary protection corpus path controls in the UI and save them in exported config.
+- [~] Tighten Streamlit tests and docs around readiness gating, exported config, and protection corpus loading.

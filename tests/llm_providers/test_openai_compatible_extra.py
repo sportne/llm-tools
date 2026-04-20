@@ -205,6 +205,84 @@ def test_provider_helper_methods_cover_exception_chain_context_and_cycles() -> N
     assert [type(exc).__name__ for exc in chain] == ["RuntimeError"]
 
 
+def test_provider_preflight_reports_success_for_selected_mode() -> None:
+    create_calls: list[dict[str, object]] = []
+    provider = OpenAICompatibleProvider(
+        model="demo-model",
+        client=_BareClient(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=lambda **kwargs: (
+                        create_calls.append(kwargs) or {"status": "ok"}
+                    )
+                )
+            ),
+            models=SimpleNamespace(list=lambda: [SimpleNamespace(id="demo-model")]),
+        ),
+        mode_strategy=ProviderModeStrategy.JSON,
+    )
+
+    report = provider.preflight(request_params={"temperature": 0.0})
+
+    assert report.ok is True
+    assert report.connection_succeeded is True
+    assert report.model_accepted is True
+    assert report.selected_mode_supported is True
+    assert report.model_listing_supported is True
+    assert report.available_models == ["demo-model"]
+    assert report.resolved_mode is ProviderModeStrategy.JSON
+    assert create_calls[0]["model"] == "demo-model"
+    assert create_calls[0]["temperature"] == 0.0
+
+
+def test_provider_preflight_reports_mode_failure_for_selected_mode() -> None:
+    provider = OpenAICompatibleProvider(
+        model="demo-model",
+        client=_BareClient(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=lambda **kwargs: (_ for _ in ()).throw(
+                        RuntimeError("response format validation failed")
+                    )
+                )
+            ),
+            models=SimpleNamespace(list=lambda: [SimpleNamespace(id="demo-model")]),
+        ),
+        mode_strategy=ProviderModeStrategy.JSON,
+    )
+
+    report = provider.preflight()
+
+    assert report.ok is False
+    assert report.connection_succeeded is True
+    assert report.model_accepted is True
+    assert report.selected_mode_supported is False
+    assert report.model_listing_supported is True
+    assert "provider mode 'json'" in report.actionable_message
+
+
+def test_provider_preflight_handles_missing_model_listing_support() -> None:
+    provider = OpenAICompatibleProvider(
+        model="demo-model",
+        client=_BareClient(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(create=lambda **kwargs: {"status": "ok"})
+            ),
+            models=SimpleNamespace(
+                list=lambda: (_ for _ in ()).throw(RuntimeError("listing disabled"))
+            ),
+        ),
+    )
+
+    report = provider.preflight()
+
+    assert report.ok is True
+    assert report.connection_succeeded is True
+    assert report.model_listing_supported is False
+    assert report.available_models == []
+    assert report.error_message == "RuntimeError: listing disabled"
+
+
 def test_provider_client_factory_and_instructor_wrapping_helpers(
     monkeypatch: Any,
 ) -> None:

@@ -848,6 +848,32 @@ def test_assistant_config_validation_rejects_invalid_shapes(tmp_path: Path) -> N
         )
 
 
+def test_build_assistant_context_merges_env_overrides_and_default_read_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KEEP_ME", "from-env")
+    config = StreamlitAssistantConfig()
+    config.tool_limits.max_read_file_chars = None
+    context = build_assistant_context(
+        root_path=None,
+        config=config,
+        app_name="assistant-test",
+        env_overrides={
+            "KEEP_ME": " from-override ",
+            "DROP_ME": "   ",
+            "ADD_ME": " present ",
+        },
+    )
+
+    assert context.workspace is None
+    assert context.env["KEEP_ME"] == "from-override"
+    assert context.env["ADD_ME"] == "present"
+    assert "DROP_ME" not in context.env
+    assert context.metadata["tool_limits"]["max_read_file_chars"] == (
+        config.session.max_context_tokens * 4
+    )
+
+
 def test_assistant_runtime_builds_policy_and_context() -> None:
     tool_specs = build_assistant_available_tool_specs()
     policy = build_assistant_policy(
@@ -983,7 +1009,11 @@ def test_streamlit_assistant_runtime_settings_keep_permissions_opt_in(
     )
     runtime = _MODULES.app._default_runtime_config(config, root_path=None)
 
-    _MODULES.app._render_sidebar_runtime_settings(runtime, config=config)
+    _MODULES.app._render_sidebar_runtime_settings(
+        runtime,
+        config=config,
+        session_id="session-1",
+    )
     _MODULES.app._render_sidebar_permission_controls(runtime)
 
     assert runtime.root_path == str(tmp_path.resolve())
@@ -993,10 +1023,13 @@ def test_streamlit_assistant_runtime_settings_keep_permissions_opt_in(
         "### 1. Connect model" in message for message in fake_st.markdown_messages
     )
     assert any(
-        "### 2. Choose workspace" in message for message in fake_st.markdown_messages
+        "### 2. Remote credentials" in message for message in fake_st.markdown_messages
     )
     assert any(
-        "### 3. Allow access" in message for message in fake_st.markdown_messages
+        "### 3. Choose workspace" in message for message in fake_st.markdown_messages
+    )
+    assert any(
+        "### 4. Allow access" in message for message in fake_st.markdown_messages
     )
     assert any(
         "Workspace selected. Local tools are scoped now" in message
@@ -1020,7 +1053,7 @@ def test_streamlit_assistant_sidebar_tool_controls_show_guided_readiness_copy(
     _MODULES.app._render_sidebar_tool_controls(runtime)
 
     assert any(
-        "### 4. Choose sources" in message for message in fake_st.markdown_messages
+        "### 5. Choose sources" in message for message in fake_st.markdown_messages
     )
     assert any(
         "Current source readiness" in message for message in fake_st.markdown_messages
@@ -1031,15 +1064,163 @@ def test_streamlit_assistant_sidebar_tool_controls_show_guided_readiness_copy(
         for message in fake_st.caption_messages
     )
     assert any(
-        "Next: choose a workspace root in Step 2 for local file and git sources."
+        "Next: choose a workspace root in Step 3 for local file and git sources."
         in message
         for message in fake_st.caption_messages
     )
     assert any(
-        "Next: provide the required service credentials in your environment for the enabled remote sources."
+        "Next: provide the required service credentials in Step 2 for the enabled remote sources."
         in message
         for message in fake_st.caption_messages
     )
+
+
+def test_streamlit_assistant_execution_blocker_uses_session_only_remote_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(
+        _MODULES.app,
+        "_ensure_model_connection_ready",
+        lambda **kwargs: _MODULES.app.ProviderPreflightResult(
+            ok=True,
+            connection_succeeded=True,
+            model_accepted=True,
+            selected_mode_supported=True,
+            model_listing_supported=True,
+            available_models=["demo-model"],
+            resolved_mode=None,
+            actionable_message="ready",
+        ),
+    )
+    runtime = _MODULES.models.StreamlitRuntimeConfig(
+        enabled_tools=["search_jira"],
+        allow_network=True,
+    )
+
+    blocker = _MODULES.app._execution_blocker(
+        session_id="session-1",
+        config=StreamlitAssistantConfig(),
+        runtime=runtime,
+        require_tool_readiness=True,
+    )
+
+    assert blocker == (
+        "Research is not ready yet. Add credentials for the enabled remote "
+        "sources in Step 2."
+    )
+
+    _MODULES.app._set_secret_value("JIRA_BASE_URL", "https://jira.internal")
+    _MODULES.app._set_secret_value("JIRA_USERNAME", "assistant")
+    _MODULES.app._set_secret_value("JIRA_API_TOKEN", "jira-token")
+
+    assert (
+        _MODULES.app._execution_blocker(
+            session_id="session-1",
+            config=StreamlitAssistantConfig(),
+            runtime=runtime,
+            require_tool_readiness=True,
+        )
+        is None
+    )
+
+
+def test_streamlit_assistant_protection_controls_accept_directory_entries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit(
+        checkbox_values={"Enable proprietary protection": True},
+        text_input_values={
+            "assistant-protection-paths": str(tmp_path),
+            "Protection corrections path": str(tmp_path / "corrections.yaml"),
+        },
+    )
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    (tmp_path / "policy.txt").write_text("keep private", encoding="utf-8")
+    (tmp_path / "skip.bin").write_bytes(b"\x00\x01")
+    runtime = _MODULES.models.StreamlitRuntimeConfig()
+
+    _MODULES.app._render_sidebar_protection_controls(runtime)
+
+    assert runtime.protection.enabled is True
+    assert runtime.protection.document_paths == [str(tmp_path)]
+    assert runtime.protection.corrections_path == str(tmp_path / "corrections.yaml")
+    assert any(
+        "Loaded protection documents: 1" in message
+        for message in fake_st.caption_messages
+    )
+    assert any(
+        "Skipped unsupported file type for protection corpus." in message
+        for message in fake_st.caption_messages
+    )
+
+
+def test_streamlit_assistant_config_export_and_state_persistence_omit_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    export_path = tmp_path / "exports" / "assistant.yaml"
+    fake_st = _FakeStreamlit(
+        button_values={
+            "generate-config:session-1": True,
+            "save-config:session-1": True,
+        },
+        text_input_values={
+            "save-config-path:session-1": str(export_path),
+        },
+    )
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setenv(_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
+    config = StreamlitAssistantConfig()
+    runtime = _MODULES.models.StreamlitRuntimeConfig(
+        provider="custom_openai_compatible",
+        provider_mode_strategy="json",
+        model_name="internal-model",
+        api_base_url="http://llm.internal/v1",
+        root_path=str(tmp_path),
+        enabled_tools=["search_jira"],
+        protection=_MODULES.app.ProtectionConfig(
+            enabled=True,
+            document_paths=[str(tmp_path)],
+            corrections_path=str(tmp_path / "corrections.yaml"),
+        ),
+    )
+    _MODULES.app._set_secret_value("OPENAI_API_KEY", "model-secret")
+    _MODULES.app._set_secret_value("JIRA_API_TOKEN", "jira-secret")
+    _MODULES.app._set_secret_value("JIRA_BASE_URL", "https://jira.internal")
+    _MODULES.app._set_secret_value("JIRA_USERNAME", "assistant")
+
+    _MODULES.app._render_sidebar_config_export(
+        config=config,
+        runtime=runtime,
+        session_id="session-1",
+    )
+
+    exported = export_path.read_text(encoding="utf-8")
+    assert "provider_mode_strategy: json" in exported
+    assert "document_paths:" in exported
+    assert str(tmp_path) in exported
+    assert "model-secret" not in exported
+    assert "jira-secret" not in exported
+
+    round_tripped = load_streamlit_assistant_config(export_path)
+    assert round_tripped.llm.provider_mode_strategy.value == "json"
+    assert round_tripped.protection.document_paths == [str(tmp_path)]
+    assert round_tripped.protection.corrections_path == str(
+        tmp_path / "corrections.yaml"
+    )
+
+    app_state = _make_app_state()
+    _MODULES.app._save_workspace_state(app_state)
+    persisted_payloads = [
+        path.read_text(encoding="utf-8")
+        for path in (tmp_path / "state").rglob("*.json")
+    ]
+    assert persisted_payloads
+    assert all("model-secret" not in payload for payload in persisted_payloads)
+    assert all("jira-secret" not in payload for payload in persisted_payloads)
 
 
 def test_streamlit_assistant_tool_capability_caption_uses_explicit_blockers() -> None:
@@ -1057,15 +1238,15 @@ def test_streamlit_assistant_tool_capability_caption_uses_explicit_blockers() ->
     items = {item.tool_name: item for group in capabilities.values() for item in group}
 
     assert _MODULES.app._tool_capability_caption(items["read_file"]) == (
-        "Not ready yet. Choose a workspace root in Step 2. "
+        "Not ready yet. Choose a workspace root in Step 3. "
         "This tool pauses for approval before it runs."
     )
     assert _MODULES.app._tool_capability_caption(items["search_jira"]) == (
         "Not ready yet. Add credentials: JIRA_API_TOKEN, JIRA_BASE_URL, JIRA_USERNAME. "
-        "Turn on network access in Step 3."
+        "Turn on network access in Step 4."
     )
     assert _MODULES.app._tool_capability_caption(items["run_git_status"]) == (
-        "Not ready yet. Choose a workspace root in Step 2. "
+        "Not ready yet. Choose a workspace root in Step 3. "
         "This tool pauses for approval before it runs."
     )
 
@@ -1722,6 +1903,7 @@ def test_streamlit_assistant_research_controls_resume_with_explicit_approval_res
     monkeypatch.setattr(
         _MODULES.app, "resume_session", lambda snapshot: inspection.resumed
     )
+    monkeypatch.setattr(_MODULES.app, "_execution_blocker", lambda **kwargs: None)
     appended: list[object] = []
     monkeypatch.setattr(
         _MODULES.app,
@@ -2137,6 +2319,7 @@ def test_streamlit_assistant_research_detail_resolves_approval_and_appends_summa
     monkeypatch.setattr(
         _MODULES.app, "_build_research_controller", lambda **kwargs: controller
     )
+    monkeypatch.setattr(_MODULES.app, "_execution_blocker", lambda **kwargs: None)
     appended: list[object] = []
     monkeypatch.setattr(
         _MODULES.app,

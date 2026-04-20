@@ -3,6 +3,7 @@
 # still must be enabled per session in the Streamlit sidebar.
 llm:
   provider: custom_openai_compatible
+  provider_mode_strategy: json
   model_name: assistant-model
   temperature: 0.1
   api_base_url: https://llm.example.internal/v1

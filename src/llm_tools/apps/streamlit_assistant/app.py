@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import queue
 import sys
@@ -10,11 +11,14 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
+
+import yaml  # type: ignore[import-untyped]
 
 from llm_tools.apps.assistant_config import (
     StreamlitAssistantConfig,
@@ -68,7 +72,11 @@ from llm_tools.harness_api import (
     ResumeDisposition,
     resume_session,
 )
-from llm_tools.llm_providers import OpenAICompatibleProvider
+from llm_tools.harness_api.context import (
+    DefaultHarnessContextBuilder,
+    TurnContextBundle,
+)
+from llm_tools.llm_providers import OpenAICompatibleProvider, ProviderPreflightResult
 from llm_tools.tool_api import SideEffectClass, ToolSpec
 from llm_tools.workflow_api import (
     ChatSessionState,
@@ -82,6 +90,9 @@ from llm_tools.workflow_api import (
     ChatWorkflowStatusEvent,
     ChatWorkflowTurnResult,
     ModelTurnProvider,
+    ProtectionConfig,
+    ProtectionCorpusLoadReport,
+    inspect_protection_corpus,
     run_interactive_chat_session_turn,
 )
 
@@ -89,12 +100,29 @@ _APP_STATE_SLOT = "llm_tools_streamlit_assistant_app_state"
 _ACTIVE_TURN_STATE_SLOT = "llm_tools_streamlit_assistant_active_turn"
 _SELECTED_RESEARCH_SESSION_SLOT = "llm_tools_streamlit_assistant_research_selection"
 _SECRET_CACHE_STATE_SLOT = "llm_tools_streamlit_assistant_secret_cache"  # noqa: S105
+_CONNECTION_CHECK_STATE_SLOT = "llm_tools_streamlit_assistant_connection_check"
+_EXPORTED_CONFIG_STATE_SLOT = "llm_tools_streamlit_assistant_exported_config"
 _STREAMLIT_BROWSER_USAGE_STATS_FLAG = "--browser.gatherUsageStats=false"
 _STREAMLIT_TOOLBAR_MODE_FLAG = "--client.toolbarMode=minimal"
 _POLL_INTERVAL_SECONDS = 1.0
 _DEFAULT_THEME_MODE: Literal["dark", "light"] = "light"
 _STORAGE_ENV_VAR = "LLM_TOOLS_STREAMLIT_ASSISTANT_STATE_DIR"
 _SESSION_STORAGE_DIR_NAME = "sessions"
+
+_REMOTE_CREDENTIAL_FIELDS: dict[str, tuple[str, ...]] = {
+    "GitLab": ("GITLAB_BASE_URL", "GITLAB_API_TOKEN"),
+    "Jira": ("JIRA_BASE_URL", "JIRA_USERNAME", "JIRA_API_TOKEN"),
+    "Confluence": (
+        "CONFLUENCE_BASE_URL",
+        "CONFLUENCE_USERNAME",
+        "CONFLUENCE_API_TOKEN",
+    ),
+    "Bitbucket": (
+        "BITBUCKET_BASE_URL",
+        "BITBUCKET_USERNAME",
+        "BITBUCKET_API_TOKEN",
+    ),
+}
 
 
 @dataclass(slots=True)
@@ -250,6 +278,314 @@ class AssistantResearchSessionController:
         return _research_summary_text(inspection.summary)
 
 
+class AssistantHarnessContextBuilder:
+    """App-local harness context builder that injects session env overrides."""
+
+    def __init__(
+        self,
+        *,
+        env_overrides: dict[str, str] | None = None,
+    ) -> None:
+        self._delegate = DefaultHarnessContextBuilder()
+        self._env_overrides = dict(env_overrides or {})
+
+    def build(
+        self,
+        *,
+        state: Any,
+        selected_task_ids: Sequence[str],
+        turn_index: int,
+        workspace: str | None = None,
+    ) -> TurnContextBundle:
+        bundle = self._delegate.build(
+            state=state,
+            selected_task_ids=selected_task_ids,
+            turn_index=turn_index,
+            workspace=workspace,
+        )
+        env = _merged_runtime_env(self._env_overrides)
+        metadata = dict(bundle.tool_context.metadata)
+        metadata["assistant_mode"] = "streamlit_assistant_research"
+        return bundle.model_copy(
+            update={
+                "tool_context": bundle.tool_context.model_copy(
+                    update={
+                        "env": env,
+                        "metadata": metadata,
+                    }
+                )
+            }
+        )
+
+
+def _secret_cache() -> dict[str, str]:
+    st = _streamlit_module()
+    cache = st.session_state.setdefault(_SECRET_CACHE_STATE_SLOT, {})
+    if not isinstance(cache, dict):
+        cache = {}
+        st.session_state[_SECRET_CACHE_STATE_SLOT] = cache
+    return cache
+
+
+def _get_secret_value(name: str) -> str | None:
+    env_value = os.getenv(name)
+    if env_value:
+        return env_value
+    cached_value = str(_secret_cache().get(name, "")).strip()
+    return cached_value or None
+
+
+def _set_secret_value(name: str, value: str) -> None:
+    cleaned = value.strip()
+    cache = _secret_cache()
+    if cleaned:
+        cache[name] = cleaned
+    else:
+        cache.pop(name, None)
+
+
+def _remote_env_overrides() -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    for fields in _REMOTE_CREDENTIAL_FIELDS.values():
+        for field_name in fields:
+            value = str(_secret_cache().get(field_name, "")).strip()
+            if value:
+                overrides[field_name] = value
+    return overrides
+
+
+def _merged_runtime_env(env_overrides: dict[str, str] | None = None) -> dict[str, str]:
+    env = dict(os.environ)
+    for key, value in (env_overrides or {}).items():
+        cleaned = value.strip()
+        if cleaned:
+            env[key] = cleaned
+    return env
+
+
+def _runtime_env() -> dict[str, str]:
+    return _merged_runtime_env(_remote_env_overrides())
+
+
+def _provider_signature(
+    *,
+    runtime: StreamlitRuntimeConfig,
+    api_key: str | None,
+) -> tuple[str, ...]:
+    api_key_fingerprint = "missing"
+    cleaned_api_key = (api_key or "").strip()
+    if cleaned_api_key:
+        api_key_fingerprint = hashlib.sha256(
+            cleaned_api_key.encode("utf-8")
+        ).hexdigest()[:12]
+    return (
+        runtime.provider.value,
+        runtime.provider_mode_strategy.value,
+        runtime.model_name,
+        runtime.api_base_url or "",
+        api_key_fingerprint,
+    )
+
+
+def _stored_connection_report(
+    session_id: str,
+    *,
+    signature: tuple[str, ...],
+) -> ProviderPreflightResult | None:
+    st = _streamlit_module()
+    raw = st.session_state.setdefault(_CONNECTION_CHECK_STATE_SLOT, {})
+    if not isinstance(raw, dict):
+        raw = {}
+        st.session_state[_CONNECTION_CHECK_STATE_SLOT] = raw
+    candidate = raw.get(session_id)
+    if not isinstance(candidate, dict):
+        return None
+    if tuple(candidate.get("signature", ())) != signature:
+        return None
+    payload = candidate.get("report")
+    if not isinstance(payload, dict):
+        return None
+    return ProviderPreflightResult.model_validate(payload)
+
+
+def _store_connection_report(
+    session_id: str,
+    *,
+    signature: tuple[str, ...],
+    report: ProviderPreflightResult,
+) -> None:
+    st = _streamlit_module()
+    raw = st.session_state.setdefault(_CONNECTION_CHECK_STATE_SLOT, {})
+    if not isinstance(raw, dict):
+        raw = {}
+        st.session_state[_CONNECTION_CHECK_STATE_SLOT] = raw
+    raw[session_id] = {
+        "signature": list(signature),
+        "report": report.model_dump(mode="json"),
+    }
+
+
+def _validate_model_connection(
+    *,
+    session_id: str,
+    llm_config: Any,
+    runtime: StreamlitRuntimeConfig,
+) -> ProviderPreflightResult:
+    api_key = _current_api_key(llm_config)
+    signature = _provider_signature(runtime=runtime, api_key=api_key)
+    provider = _create_provider_for_runtime(
+        llm_config,
+        runtime,
+        api_key=api_key,
+        model_name=runtime.model_name,
+    )
+    if not hasattr(provider, "preflight"):
+        report = ProviderPreflightResult(
+            ok=True,
+            connection_succeeded=True,
+            model_accepted=True,
+            selected_mode_supported=True,
+            model_listing_supported=False,
+            resolved_mode=(
+                None
+                if runtime.provider_mode_strategy.value == "auto"
+                else runtime.provider_mode_strategy
+            ),
+            actionable_message=(
+                "Model connection is ready for this session. "
+                "Provider preflight is unavailable for this provider instance."
+            ),
+        )
+        _store_connection_report(session_id, signature=signature, report=report)
+        return report
+    report = provider.preflight(request_params={"temperature": 0.0})
+    _store_connection_report(session_id, signature=signature, report=report)
+    return report
+
+
+def _ensure_model_connection_ready(
+    *,
+    session_id: str,
+    llm_config: Any,
+    runtime: StreamlitRuntimeConfig,
+) -> ProviderPreflightResult:
+    api_key = _current_api_key(llm_config)
+    signature = _provider_signature(runtime=runtime, api_key=api_key)
+    cached = _stored_connection_report(session_id, signature=signature)
+    if cached is not None and cached.ok:
+        return cached
+    return _validate_model_connection(
+        session_id=session_id,
+        llm_config=llm_config,
+        runtime=runtime,
+    )
+
+
+def _protection_report(protection: ProtectionConfig) -> ProtectionCorpusLoadReport:
+    return inspect_protection_corpus(protection)
+
+
+def _protection_next_steps(report: ProtectionCorpusLoadReport) -> str:
+    if report.usable_document_count > 0 and not report.issues:
+        return "Protection corpus is ready for this session."
+    if report.usable_document_count > 0:
+        return "Protection corpus is usable, but some configured paths need attention."
+    return (
+        "Protection is enabled but not ready yet. Add at least one readable document "
+        "file or directory in Step 6."
+    )
+
+
+def _execution_blocker(
+    *,
+    session_id: str,
+    config: StreamlitAssistantConfig,
+    runtime: StreamlitRuntimeConfig,
+    require_tool_readiness: bool = False,
+) -> str | None:
+    llm_config = _llm_config_for_runtime(config, runtime)
+    metadata = llm_config.credential_prompt_metadata()
+    if metadata.expects_api_key and _current_api_key(llm_config) is None:
+        return _missing_api_key_text(llm_config)
+    report = _ensure_model_connection_ready(
+        session_id=session_id,
+        llm_config=llm_config,
+        runtime=runtime,
+    )
+    if not report.ok:
+        return report.actionable_message
+    if runtime.protection.enabled:
+        protection_report = _protection_report(runtime.protection)
+        if protection_report.usable_document_count == 0:
+            return _protection_next_steps(protection_report)
+    if require_tool_readiness:
+        summaries = build_tool_group_capability_summaries(
+            build_tool_capabilities(
+                tool_specs=_all_tool_specs(),
+                enabled_tools=set(runtime.enabled_tools),
+                root_path=runtime.root_path,
+                env=_runtime_env(),
+                allow_network=runtime.allow_network,
+                allow_filesystem=(
+                    runtime.allow_filesystem and runtime.root_path is not None
+                ),
+                allow_subprocess=(
+                    runtime.allow_subprocess and runtime.root_path is not None
+                ),
+                require_approval_for=set(runtime.require_approval_for),
+            )
+        )
+        if any(summary.missing_credentials_tools for summary in summaries.values()):
+            return (
+                "Research is not ready yet. Add credentials for the enabled remote "
+                "sources in Step 2."
+            )
+    return None
+
+
+def _runtime_to_export_config(
+    *,
+    config: StreamlitAssistantConfig,
+    runtime: StreamlitRuntimeConfig,
+) -> StreamlitAssistantConfig:
+    return config.model_copy(
+        deep=True,
+        update={
+            "llm": config.llm.model_copy(
+                update={
+                    "provider": runtime.provider,
+                    "provider_mode_strategy": runtime.provider_mode_strategy,
+                    "model_name": runtime.model_name,
+                    "api_base_url": runtime.api_base_url,
+                }
+            ),
+            "policy": config.policy.model_copy(
+                update={
+                    "enabled_tools": list(runtime.enabled_tools),
+                    "require_approval_for": set(runtime.require_approval_for),
+                }
+            ),
+            "workspace": config.workspace.model_copy(
+                update={"default_root": runtime.root_path}
+            ),
+            "ui": config.ui.model_copy(
+                update={"inspector_open_by_default": runtime.inspector_open}
+            ),
+            "protection": runtime.protection.model_copy(deep=True),
+        },
+    )
+
+
+def _rendered_exported_config(
+    *,
+    config: StreamlitAssistantConfig,
+    runtime: StreamlitRuntimeConfig,
+) -> str:
+    exported = _runtime_to_export_config(config=config, runtime=runtime)
+    payload = exported.model_dump(mode="json")
+    return cast(str, yaml.safe_dump(payload, sort_keys=False))
+
+
 def _research_summary_text(summary: Any) -> str:
     """Return the assistant transcript summary for one research session."""
     lines = [
@@ -328,6 +664,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path)
     parser.add_argument("--provider")
     parser.add_argument("--model", type=str)
+    parser.add_argument("--provider-mode-strategy", type=str)
     parser.add_argument("--temperature", type=float)
     parser.add_argument("--api-base-url", type=str)
     parser.add_argument("--max-context-tokens", type=int)
@@ -357,6 +694,8 @@ def _resolve_assistant_config(args: argparse.Namespace) -> StreamlitAssistantCon
         raw["llm"]["provider"] = args.provider
     if args.model is not None:
         raw["llm"]["model_name"] = args.model
+    if args.provider_mode_strategy is not None:
+        raw["llm"]["provider_mode_strategy"] = args.provider_mode_strategy
     if args.temperature is not None:
         raw["llm"]["temperature"] = args.temperature
     if args.api_base_url is not None:
@@ -501,6 +840,7 @@ def _default_runtime_config(
     )
     return StreamlitRuntimeConfig(
         provider=config.llm.provider,
+        provider_mode_strategy=config.llm.provider_mode_strategy,
         model_name=config.llm.model_name,
         api_base_url=config.llm.api_base_url,
         root_path=str(root_path) if root_path is not None else None,
@@ -510,6 +850,7 @@ def _default_runtime_config(
         allow_filesystem=False,
         allow_subprocess=False,
         inspector_open=config.ui.inspector_open_by_default,
+        protection=config.protection.model_copy(deep=True),
     )
 
 
@@ -766,18 +1107,18 @@ def _tool_status_copy(status: str) -> str:
 
 def _tool_reason_copy(reason: AssistantToolCapabilityReason) -> str:
     if reason.code is AssistantToolCapabilityReasonCode.WORKSPACE_REQUIRED:
-        return "Choose a workspace root in Step 2."
+        return "Choose a workspace root in Step 3."
     if reason.code is AssistantToolCapabilityReasonCode.MISSING_CREDENTIALS:
         if reason.missing_secrets:
             missing = ", ".join(reason.missing_secrets)
             return f"Add credentials: {missing}."
         return "Add the required credentials for this source."
     if reason.code is AssistantToolCapabilityReasonCode.NETWORK_PERMISSION_BLOCKED:
-        return "Turn on network access in Step 3."
+        return "Turn on network access in Step 4."
     if reason.code is AssistantToolCapabilityReasonCode.FILESYSTEM_PERMISSION_BLOCKED:
-        return "Turn on filesystem access in Step 3."
+        return "Turn on filesystem access in Step 4."
     if reason.code is AssistantToolCapabilityReasonCode.SUBPROCESS_PERMISSION_BLOCKED:
-        return "Turn on subprocess access in Step 3."
+        return "Turn on subprocess access in Step 4."
     if reason.code is AssistantToolCapabilityReasonCode.APPROVAL_REQUIRED:
         return "This tool pauses for approval before it runs."
     return reason.message
@@ -840,15 +1181,15 @@ def _source_setup_next_steps_copy(
     next_steps: list[str] = []
     if any(summary.missing_workspace_tools for summary in summaries.values()):
         next_steps.append(
-            "Next: choose a workspace root in Step 2 for local file and git sources."
+            "Next: choose a workspace root in Step 3 for local file and git sources."
         )
     if any(summary.missing_credentials_tools for summary in summaries.values()):
         next_steps.append(
-            "Next: provide the required service credentials in your environment for the enabled remote sources."
+            "Next: provide the required service credentials in Step 2 for the enabled remote sources."
         )
     if any(summary.permission_blocked_tools for summary in summaries.values()):
         next_steps.append(
-            "Next: turn on the required session permissions in Step 3 for the sources you enabled."
+            "Next: turn on the required session permissions in Step 4 for the sources you enabled."
         )
     if not next_steps:
         next_steps.append("Enabled sources are ready for this session.")
@@ -866,7 +1207,7 @@ def _source_readiness_tokens(runtime: StreamlitRuntimeConfig) -> list[str]:
         tool_specs=_all_tool_specs(),
         enabled_tools=set(runtime.enabled_tools),
         root_path=runtime.root_path,
-        env=dict(os.environ),
+        env=_runtime_env(),
         allow_network=runtime.allow_network,
         allow_filesystem=runtime.allow_filesystem and runtime.root_path is not None,
         allow_subprocess=runtime.allow_subprocess and runtime.root_path is not None,
@@ -924,6 +1265,7 @@ def _llm_config_for_runtime(
     return config.llm.model_copy(
         update={
             "provider": runtime.provider,
+            "provider_mode_strategy": runtime.provider_mode_strategy,
             "model_name": runtime.model_name,
             "api_base_url": runtime.api_base_url,
         }
@@ -946,20 +1288,11 @@ def _create_provider_for_runtime(
 
 
 def _current_api_key(llm_config: Any) -> str | None:  # pragma: no cover
-    st = _streamlit_module()
     metadata = llm_config.credential_prompt_metadata()
     if not metadata.expects_api_key:
         return None
     env_var = llm_config.api_key_env_var or "OPENAI_API_KEY"
-    env_value = os.getenv(env_var)
-    if env_value:
-        return env_value
-    cache = st.session_state.setdefault(_SECRET_CACHE_STATE_SLOT, {})
-    if not isinstance(cache, dict):
-        cache = {}
-        st.session_state[_SECRET_CACHE_STATE_SLOT] = cache
-    cached_value = str(cache.get(env_var, "")).strip()
-    return cached_value or None
+    return _get_secret_value(env_var)
 
 
 def _missing_api_key_text(llm_config: Any) -> str:
@@ -1000,10 +1333,12 @@ def _build_assistant_runner(
     provider: ModelTurnProvider,
     session_state: ChatSessionState,
     user_message: str,
+    env_overrides: dict[str, str] | None = None,
 ) -> ChatSessionTurnRunner:
     tool_specs = _all_tool_specs()
     root = Path(runtime.root_path) if runtime.root_path is not None else None
     enabled_tools = set(runtime.enabled_tools)
+    effective_env = _merged_runtime_env(env_overrides)
     policy = build_assistant_policy(
         enabled_tools=enabled_tools,
         tool_specs=tool_specs,
@@ -1018,10 +1353,10 @@ def _build_assistant_runner(
         tool_specs=tool_specs,
         runtime=runtime,
         root=root,
-        env=dict(os.environ),
+        env=effective_env,
     )
     protection_controller = build_protection_controller(
-        config=config.protection,
+        config=runtime.protection,
         provider=provider,
         environment=build_protection_environment(
             app_name="streamlit_assistant",
@@ -1048,6 +1383,7 @@ def _build_assistant_runner(
             root_path=root,
             config=config,
             app_name=f"streamlit-assistant-{session_id}",
+            env_overrides=env_overrides,
         ),
         session_config=config.session,
         tool_limits=config.tool_limits,
@@ -1359,6 +1695,7 @@ def _start_streamlit_turn(
     config: StreamlitAssistantConfig,
     provider: ModelTurnProvider,
     user_message: str,
+    env_overrides: dict[str, str] | None = None,
 ) -> None:
     st = _streamlit_module()
     record = app_state.sessions[session_id]
@@ -1371,6 +1708,7 @@ def _start_streamlit_turn(
         provider=provider,
         session_state=record.workflow_session_state,
         user_message=user_message,
+        env_overrides=env_overrides,
     )
     event_queue: queue.Queue[AssistantQueuedEvent] = queue.Queue()
     handle = AssistantActiveTurnHandle(
@@ -1416,8 +1754,18 @@ def _submit_streamlit_prompt(
         turn_state.queued_follow_up_prompt = cleaned_prompt
         _save_workspace_state(app_state)
         return True
+    blocker = _execution_blocker(
+        session_id=session_id,
+        config=config,
+        runtime=record.runtime,
+    )
+    if blocker is not None:
+        with suppress(ModuleNotFoundError):
+            _streamlit_module().warning(blocker)
+        return False
     llm_config = _llm_config_for_runtime(config, record.runtime)
     api_key = _current_api_key(llm_config)
+    env_overrides = _remote_env_overrides()
     provider = _create_provider_for_runtime(
         llm_config,
         record.runtime,
@@ -1430,6 +1778,7 @@ def _submit_streamlit_prompt(
         config=config,
         provider=provider,
         user_message=cleaned_prompt,
+        env_overrides=env_overrides,
     )
     return True
 
@@ -1493,9 +1842,14 @@ def process_streamlit_assistant_turn(
     user_message: str,
     approval_resolver: Callable[[ChatWorkflowApprovalState], bool] | None = None,
     runtime_config: StreamlitRuntimeConfig | None = None,
+    env_overrides: dict[str, str] | None = None,
 ) -> StreamlitAssistantTurnOutcome:
     """Execute one assistant turn using the shared reducers."""
     runtime = runtime_config or _default_runtime_config(config, root_path=root_path)
+    if runtime.protection.enabled:
+        protection_report = _protection_report(runtime.protection)
+        if protection_report.usable_document_count == 0:
+            raise ValueError(_protection_next_steps(protection_report))
     transcript_entries: list[StreamlitTranscriptEntry] = []
     token_usage: ChatTokenUsage | None = None
     runner = _build_assistant_runner(
@@ -1505,6 +1859,7 @@ def process_streamlit_assistant_turn(
         provider=provider,
         session_state=session_state,
         user_message=user_message,
+        env_overrides=env_overrides,
     )
     updated_session_state = session_state
     resolve_approval = approval_resolver or (lambda approval: False)
@@ -1710,6 +2065,7 @@ def _build_research_controller(
         enabled_tools = set(runtime.enabled_tools)
         llm_config = _llm_config_for_runtime(config, runtime)
         api_key = _current_api_key(llm_config)
+        env_overrides = _remote_env_overrides()
         policy = build_assistant_policy(
             enabled_tools=enabled_tools,
             tool_specs=tool_specs,
@@ -1724,10 +2080,12 @@ def _build_research_controller(
             tool_specs=tool_specs,
             runtime=runtime,
             root=root,
-            env=dict(os.environ),
+            env=_runtime_env(),
         )
         harness_provider = build_live_harness_provider(
-            config=config,
+            config=config.model_copy(
+                update={"protection": runtime.protection}, deep=True
+            ),
             provider_config=llm_config,
             model_name=runtime.model_name,
             api_key=api_key,
@@ -1744,6 +2102,9 @@ def _build_research_controller(
             store=FileHarnessStateStore(_research_store_dir(config)),
             workflow_executor=workflow_executor,
             provider=harness_provider,
+            context_builder=AssistantHarnessContextBuilder(
+                env_overrides=env_overrides,
+            ),
             workspace=str(root) if root is not None else None,
         )
 
@@ -1814,11 +2175,12 @@ def _render_sidebar_runtime_settings(
     runtime: StreamlitRuntimeConfig,
     *,
     config: StreamlitAssistantConfig,
+    session_id: str,
 ) -> Any:  # pragma: no cover
     st = _streamlit_module()
     st.markdown("### 1. Connect model")
     st.caption(
-        "Start here. Pick the endpoint and model you want the assistant to use for this session."
+        "Start here. Pick the endpoint, response mode, and model you want the assistant to use for this session."
     )
     provider_options = [preset.value for preset in type(runtime.provider)]
     provider_value = st.selectbox(
@@ -1827,6 +2189,13 @@ def _render_sidebar_runtime_settings(
         index=provider_options.index(runtime.provider.value),
     )
     runtime.provider = type(runtime.provider)(provider_value)
+    mode_options = [mode.value for mode in type(runtime.provider_mode_strategy)]
+    mode_value = st.selectbox(
+        "Provider mode",
+        options=mode_options,
+        index=mode_options.index(runtime.provider_mode_strategy.value),
+    )
+    runtime.provider_mode_strategy = type(runtime.provider_mode_strategy)(mode_value)
     runtime.model_name = (
         st.text_input("Model", value=runtime.model_name).strip() or runtime.model_name
     )
@@ -1840,24 +2209,64 @@ def _render_sidebar_runtime_settings(
         env_var = llm_config.api_key_env_var or "OPENAI_API_KEY"
         secret = st.text_input(
             env_var,
-            value="",
+            value=str(_secret_cache().get(env_var, "")),
             type="password",
             placeholder="Optional session-only API key",
         ).strip()
-        if secret:
-            cache = st.session_state.setdefault(_SECRET_CACHE_STATE_SLOT, {})
-            if isinstance(cache, dict):
-                cache[env_var] = secret
+        _set_secret_value(env_var, secret)
         if _current_api_key(llm_config) is None:
             st.caption(
-                f"This provider needs {env_var}. Use an environment variable or enter a session-only key here before you run a turn."
+                f"This provider needs {env_var}. Use an environment variable or enter a session-only key here before you validate or run a turn."
             )
         else:
-            st.caption("Model connection looks ready for this session.")
+            st.caption("Model credentials are available for this session.")
     else:
         st.caption("This provider does not require an API key for the current session.")
 
-    st.markdown("### 2. Choose workspace")
+    if st.button("Validate model connection", key=f"validate-connection:{session_id}"):
+        report = _validate_model_connection(
+            session_id=session_id,
+            llm_config=llm_config,
+            runtime=runtime,
+        )
+        if report.ok:
+            st.caption(report.actionable_message)
+        else:
+            st.warning(report.actionable_message)
+    else:
+        cached_report = _stored_connection_report(
+            session_id,
+            signature=_provider_signature(
+                runtime=runtime,
+                api_key=_current_api_key(llm_config),
+            ),
+        )
+        if cached_report is None:
+            st.caption(
+                "Validate the current model settings before you run chat or research."
+            )
+        elif cached_report.ok:
+            st.caption(cached_report.actionable_message)
+        else:
+            st.warning(cached_report.actionable_message)
+
+    st.markdown("### 2. Remote credentials")
+    st.caption(
+        "Add session-only credentials for the connected sources you want to use. These values are kept in memory only and are never written to session storage or exported YAML."
+    )
+    for group_name, field_names in _REMOTE_CREDENTIAL_FIELDS.items():
+        st.markdown(f"**{group_name}**")
+        for field_name in field_names:
+            secret = st.text_input(
+                field_name,
+                value=str(_secret_cache().get(field_name, "")),
+                key=f"remote-secret:{field_name}",
+                type="password",
+                placeholder="Optional session-only credential",
+            ).strip()
+            _set_secret_value(field_name, secret)
+
+    st.markdown("### 3. Choose workspace")
     current_root = st.text_input(
         "Workspace root",
         value=runtime.root_path or "",
@@ -1879,7 +2288,7 @@ def _render_sidebar_runtime_settings(
         )
     else:
         st.caption(
-            "Workspace selected. Local tools are scoped now, and you can allow filesystem or subprocess access in Step 3."
+            "Workspace selected. Local tools are scoped now, and you can allow filesystem or subprocess access in Step 4."
         )
     return llm_config
 
@@ -1888,7 +2297,7 @@ def _render_sidebar_permission_controls(
     runtime: StreamlitRuntimeConfig,
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
-    st.markdown("### 3. Allow access")
+    st.markdown("### 4. Allow access")
     st.caption(
         "Turn on only what you need: network unlocks connected sources, filesystem unlocks local reads, and subprocess unlocks local command tools."
     )
@@ -1905,7 +2314,7 @@ def _render_sidebar_permission_controls(
     )
     if runtime.root_path is None:
         st.caption(
-            "Select a workspace in Step 2 before filesystem or subprocess access becomes available."
+            "Select a workspace in Step 3 before filesystem or subprocess access becomes available."
         )
     else:
         st.caption(
@@ -1933,15 +2342,15 @@ def _render_sidebar_tool_controls(
     runtime: StreamlitRuntimeConfig,
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
-    st.markdown("### 4. Choose sources")
+    st.markdown("### 5. Choose sources")
     st.caption(
-        "Turn on the sources you want after Steps 1-3 are configured. Each source shows what is ready and what is still missing."
+        "Turn on the sources you want after Steps 1-4 are configured. Each source shows what is ready and what is still missing."
     )
     capability_groups = build_tool_capabilities(
         tool_specs=_all_tool_specs(),
         enabled_tools=set(runtime.enabled_tools),
         root_path=runtime.root_path,
-        env=dict(os.environ),
+        env=_runtime_env(),
         allow_network=runtime.allow_network,
         allow_filesystem=runtime.allow_filesystem and runtime.root_path is not None,
         allow_subprocess=runtime.allow_subprocess and runtime.root_path is not None,
@@ -1973,6 +2382,83 @@ def _render_sidebar_tool_controls(
         "Show inspector details",
         value=runtime.inspector_open,
     )
+
+
+def _render_sidebar_protection_controls(
+    runtime: StreamlitRuntimeConfig,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    st.markdown("### 6. Protection")
+    runtime.protection.enabled = st.checkbox(
+        "Enable proprietary protection",
+        value=runtime.protection.enabled,
+    )
+    if not runtime.protection.enabled:
+        st.caption("Protection is off for this session.")
+        return
+    raw_paths = st.text_area(
+        "Protection corpus paths",
+        value="\n".join(runtime.protection.document_paths),
+        placeholder="One file or directory path per line",
+        key="assistant-protection-paths",
+    )
+    runtime.protection.document_paths = [
+        entry.strip() for entry in raw_paths.splitlines() if entry.strip()
+    ]
+    runtime.protection.corrections_path = (
+        st.text_input(
+            "Protection corrections path",
+            value=runtime.protection.corrections_path or "",
+            placeholder="Optional JSON or YAML corrections file",
+        ).strip()
+        or None
+    )
+    report = _protection_report(runtime.protection)
+    st.caption(_protection_next_steps(report))
+    if report.usable_document_count:
+        st.caption(f"Loaded protection documents: {report.usable_document_count}")
+    for issue in report.issues[:10]:
+        st.caption(f"{issue.path}: {issue.message}")
+
+
+def _render_sidebar_config_export(
+    *,
+    config: StreamlitAssistantConfig,
+    runtime: StreamlitRuntimeConfig,
+    session_id: str,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    st.markdown("### 7. Save configuration")
+    st.caption(
+        "Config YAML is optional. Generate a reusable preset from the current session setup when you want to save or share the non-secret defaults."
+    )
+    if st.button("Generate config YAML", key=f"generate-config:{session_id}"):
+        st.session_state[_EXPORTED_CONFIG_STATE_SLOT] = _rendered_exported_config(
+            config=config,
+            runtime=runtime,
+        )
+    exported = st.session_state.get(_EXPORTED_CONFIG_STATE_SLOT, "")
+    if isinstance(exported, str) and exported.strip():
+        st.text_area(
+            "Exported config YAML",
+            value=exported,
+            key=f"exported-config:{session_id}",
+            height=220,
+        )
+        save_path = st.text_input(
+            "Save config path",
+            value="",
+            key=f"save-config-path:{session_id}",
+            placeholder="Optional file path to save this YAML",
+        ).strip()
+        if st.button("Save config YAML", key=f"save-config:{session_id}"):
+            if not save_path:
+                st.warning("Enter a config path first.")
+            else:
+                target = Path(save_path).expanduser()
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(exported, encoding="utf-8")
+                st.caption(f"Saved config YAML to {target.resolve()}.")
 
 
 def _append_research_summary(
@@ -2179,7 +2665,19 @@ def _run_and_append_research_action(
     app_state: AssistantWorkspaceState,
     session_id: str,
     failure_prefix: str,
+    config: StreamlitAssistantConfig | None = None,
+    require_ready: bool = False,
 ) -> HarnessSessionInspection | None:
+    if require_ready and config is not None:
+        blocker = _execution_blocker(
+            session_id=active.summary.session_id,
+            config=config,
+            runtime=active.runtime,
+            require_tool_readiness=True,
+        )
+        if blocker is not None:
+            _streamlit_module().warning(blocker)
+            return None
     inspection = _run_research_action(
         session_id,
         action=inspection_action,
@@ -2253,6 +2751,7 @@ def _render_research_detail_actions(
     active: StreamlitPersistedSessionRecord,
     app_state: AssistantWorkspaceState,
     view: AssistantResearchSessionView,
+    config: StreamlitAssistantConfig,
 ) -> HarnessSessionInspection:  # pragma: no cover
     st = _streamlit_module()
     session_id = inspection.summary.session_id
@@ -2265,77 +2764,91 @@ def _render_research_detail_actions(
         _append_research_summary(active, inspection, app_state)
     inspection = _apply_research_action_result(
         inspection,
-        updated=_run_and_append_research_action(
-            active=active,
-            inspection_action=lambda: controller.resume(
-                session_id,
-                approval_resolution=ApprovalResolution.APPROVE,
-            ),
-            app_state=app_state,
-            session_id=session_id,
-            failure_prefix="Research approval failed",
-        )
-        if _conditional_button(
-            action_cols[1],
-            visible=view.waiting_for_approval,
-            label="Approve",
-            key=f"research-detail-approve:{session_id}",
-        )
-        else None,
+        updated=(
+            _run_and_append_research_action(
+                active=active,
+                inspection_action=lambda: controller.resume(
+                    session_id,
+                    approval_resolution=ApprovalResolution.APPROVE,
+                ),
+                app_state=app_state,
+                session_id=session_id,
+                failure_prefix="Research approval failed",
+                config=config,
+                require_ready=True,
+            )
+            if _conditional_button(
+                action_cols[1],
+                visible=view.waiting_for_approval,
+                label="Approve",
+                key=f"research-detail-approve:{session_id}",
+            )
+            else None
+        ),
     )
     inspection = _apply_research_action_result(
         inspection,
-        updated=_run_and_append_research_action(
-            active=active,
-            inspection_action=lambda: controller.resume(
-                session_id,
-                approval_resolution=ApprovalResolution.DENY,
-            ),
-            app_state=app_state,
-            session_id=session_id,
-            failure_prefix="Research denial failed",
-        )
-        if _conditional_button(
-            action_cols[2],
-            visible=view.waiting_for_approval,
-            label="Deny",
-            key=f"research-detail-deny:{session_id}",
-        )
-        else None,
+        updated=(
+            _run_and_append_research_action(
+                active=active,
+                inspection_action=lambda: controller.resume(
+                    session_id,
+                    approval_resolution=ApprovalResolution.DENY,
+                ),
+                app_state=app_state,
+                session_id=session_id,
+                failure_prefix="Research denial failed",
+                config=config,
+                require_ready=True,
+            )
+            if _conditional_button(
+                action_cols[2],
+                visible=view.waiting_for_approval,
+                label="Deny",
+                key=f"research-detail-deny:{session_id}",
+            )
+            else None
+        ),
     )
     inspection = _apply_research_action_result(
         inspection,
-        updated=_run_and_append_research_action(
-            active=active,
-            inspection_action=lambda: controller.resume(session_id),
-            app_state=app_state,
-            session_id=session_id,
-            failure_prefix="Research resume failed",
-        )
-        if _conditional_button(
-            action_cols[3],
-            visible=view.can_resume and not view.waiting_for_approval,
-            label="Resume",
-            key=f"research-detail-resume:{session_id}",
-        )
-        else None,
+        updated=(
+            _run_and_append_research_action(
+                active=active,
+                inspection_action=lambda: controller.resume(session_id),
+                app_state=app_state,
+                session_id=session_id,
+                failure_prefix="Research resume failed",
+                config=config,
+                require_ready=True,
+            )
+            if _conditional_button(
+                action_cols[3],
+                visible=view.can_resume and not view.waiting_for_approval,
+                label="Resume",
+                key=f"research-detail-resume:{session_id}",
+            )
+            else None
+        ),
     )
     inspection = _apply_research_action_result(
         inspection,
-        updated=_run_and_append_research_action(
-            active=active,
-            inspection_action=lambda: controller.stop(session_id),
-            app_state=app_state,
-            session_id=session_id,
-            failure_prefix="Research stop failed",
-        )
-        if _conditional_button(
-            action_cols[4],
-            visible=not view.is_stopped,
-            label="Stop",
-            key=f"research-detail-stop:{session_id}",
-        )
-        else None,
+        updated=(
+            _run_and_append_research_action(
+                active=active,
+                inspection_action=lambda: controller.stop(session_id),
+                app_state=app_state,
+                session_id=session_id,
+                failure_prefix="Research stop failed",
+            )
+            if _conditional_button(
+                action_cols[4],
+                visible=not view.is_stopped,
+                label="Stop",
+                key=f"research-detail-stop:{session_id}",
+            )
+            else None
+        ),
     )
     return inspection
 
@@ -2454,6 +2967,7 @@ def _render_research_session_details(
             active=active,
             app_state=app_state,
             view=view,
+            config=config,
         )
         _render_research_overview(inspection)
         _render_research_approval_state(inspection)
@@ -2468,9 +2982,20 @@ def _launch_research_task(
     controller: AssistantResearchSessionController,
     active: StreamlitPersistedSessionRecord,
     app_state: AssistantWorkspaceState,
+    config: StreamlitAssistantConfig | None = None,
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
     cleaned = prompt.strip()
+    if config is not None:
+        blocker = _execution_blocker(
+            session_id=active.summary.session_id,
+            config=config,
+            runtime=active.runtime,
+            require_tool_readiness=True,
+        )
+        if blocker is not None:
+            st.warning(blocker)
+            return
     if not cleaned:
         st.warning("Enter a research task first.")
         return
@@ -2497,6 +3022,7 @@ def _render_sidebar_research_session_item(
     controller: AssistantResearchSessionController,
     active: StreamlitPersistedSessionRecord,
     app_state: AssistantWorkspaceState,
+    config: StreamlitAssistantConfig,
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
     summary = item.summary
@@ -2544,6 +3070,8 @@ def _render_sidebar_research_session_item(
             app_state=app_state,
             session_id=session_id,
             failure_prefix="Research approval failed",
+            config=config,
+            require_ready=True,
         )
     if _conditional_button(
         columns[3],
@@ -2560,6 +3088,8 @@ def _render_sidebar_research_session_item(
             app_state=app_state,
             session_id=session_id,
             failure_prefix="Research denial failed",
+            config=config,
+            require_ready=True,
         )
     if _conditional_button(
         columns[2],
@@ -2573,6 +3103,8 @@ def _render_sidebar_research_session_item(
             app_state=app_state,
             session_id=session_id,
             failure_prefix="Research resume failed",
+            config=config,
+            require_ready=True,
         )
     if _conditional_button(
         columns[4],
@@ -2615,6 +3147,7 @@ def _render_sidebar_research_controls(
             controller=controller,
             active=active,
             app_state=app_state,
+            config=config,
         )
     try:
         recent = controller.list_recent()
@@ -2628,6 +3161,7 @@ def _render_sidebar_research_controls(
             controller=controller,
             active=active,
             app_state=app_state,
+            config=config,
         )
 
 
@@ -2651,9 +3185,19 @@ def _render_sidebar(
         st.caption(
             "Follow the setup order below so the assistant always shows what is ready, what is blocked, and what to configure next."
         )
-        _render_sidebar_runtime_settings(runtime, config=config)
+        _render_sidebar_runtime_settings(
+            runtime,
+            config=config,
+            session_id=active.summary.session_id,
+        )
         _render_sidebar_permission_controls(runtime)
         _render_sidebar_tool_controls(runtime)
+        _render_sidebar_protection_controls(runtime)
+        _render_sidebar_config_export(
+            config=config,
+            runtime=runtime,
+            session_id=active.summary.session_id,
+        )
         _render_sidebar_research_controls(
             app_state,
             config=config,
@@ -2767,6 +3311,8 @@ def run_streamlit_assistant_app(
     st.session_state.setdefault(_ACTIVE_TURN_STATE_SLOT, None)
     st.session_state.setdefault(_SELECTED_RESEARCH_SESSION_SLOT, None)
     st.session_state.setdefault(_SECRET_CACHE_STATE_SLOT, {})
+    st.session_state.setdefault(_CONNECTION_CHECK_STATE_SLOT, {})
+    st.session_state.setdefault(_EXPORTED_CONFIG_STATE_SLOT, "")
     app_state: AssistantWorkspaceState = st.session_state[_APP_STATE_SLOT]
 
     _render_theme(app_state.preferences)

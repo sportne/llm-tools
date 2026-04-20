@@ -12,9 +12,12 @@ place for runnable examples and assistant config samples.
 These YAML files configure `llm_tools.apps.streamlit_assistant` for common
 assistant usage modes.
 
-Config examples preselect tools, research defaults, and sometimes a workspace
-root, but they do not grant filesystem, subprocess, or network access. Those
-permissions still have to be enabled per session in the Streamlit sidebar.
+The YAML file is optional. The Streamlit assistant can start without one, and
+it can export the current non-secret session setup back into YAML when you want
+a reusable preset. Config examples preselect tools, research defaults,
+protection corpus paths, and sometimes a workspace root, but they do not grant
+filesystem, subprocess, or network access. Those permissions still have to be
+enabled per session in the Streamlit sidebar.
 
 - `assistant_configs/local-only-chat.yaml`
   Use this for local workspace Q&A when you want file browsing and text search
@@ -22,7 +25,8 @@ permissions still have to be enabled per session in the Streamlit sidebar.
   Launch: `llm-tools-streamlit-assistant . --config examples/assistant_configs/local-only-chat.yaml`
 - `assistant_configs/enterprise-data-chat.yaml`
   Use this when the assistant should start with remote enterprise read tools for
-  Jira, Confluence, Bitbucket, and GitLab.
+  Jira, Confluence, Bitbucket, and GitLab, including private-network
+  OpenAI-compatible endpoints that work best with explicit JSON mode.
   Launch: `llm-tools-streamlit-assistant --config examples/assistant_configs/enterprise-data-chat.yaml`
 - `assistant_configs/harness-research-chat.yaml`
   Use this for assistant chat that also launches durable harness-backed research

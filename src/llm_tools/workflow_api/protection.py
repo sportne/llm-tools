@@ -25,7 +25,10 @@ from llm_tools.workflow_api.protection_provenance import (
     collect_provenance_from_tool_results,
 )
 from llm_tools.workflow_api.protection_store import (
+    ProtectionCorpusLoadIssue,
+    ProtectionCorpusLoadReport,
     ProtectionFeedbackStore,
+    inspect_protection_corpus,
     load_protection_corpus,
 )
 
@@ -42,11 +45,14 @@ __all__ = [
     "ProtectionEnvironment",
     "ProtectionFeedbackEntry",
     "ProtectionFeedbackPrompt",
+    "ProtectionCorpusLoadIssue",
+    "ProtectionCorpusLoadReport",
     "ProtectionFeedbackStore",
     "ProtectionPendingPrompt",
     "ResponseProtectionDecision",
     "SensitivityClassifier",
     "collect_provenance_from_tool_results",
+    "inspect_protection_corpus",
     "load_protection_corpus",
     "_parse_bool",
     "_sanitize_payload",

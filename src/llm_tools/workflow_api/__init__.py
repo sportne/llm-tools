@@ -36,6 +36,8 @@ from llm_tools.workflow_api.protection import (
     ProtectionConfig,
     ProtectionController,
     ProtectionCorpus,
+    ProtectionCorpusLoadIssue,
+    ProtectionCorpusLoadReport,
     ProtectionDocument,
     ProtectionEnvironment,
     ProtectionFeedbackEntry,
@@ -45,6 +47,7 @@ from llm_tools.workflow_api.protection import (
     ResponseProtectionDecision,
     SensitivityClassifier,
     collect_provenance_from_tool_results,
+    inspect_protection_corpus,
     load_protection_corpus,
 )
 
@@ -57,6 +60,8 @@ __all__ = [
     "ProtectionConfig",
     "ProtectionController",
     "ProtectionCorpus",
+    "ProtectionCorpusLoadIssue",
+    "ProtectionCorpusLoadReport",
     "ProtectionDocument",
     "ProtectionEnvironment",
     "ProtectionFeedbackEntry",
@@ -66,6 +71,7 @@ __all__ = [
     "ResponseProtectionDecision",
     "SensitivityClassifier",
     "collect_provenance_from_tool_results",
+    "inspect_protection_corpus",
     "load_protection_corpus",
     "ApprovalRequest",
     "ChatCitation",

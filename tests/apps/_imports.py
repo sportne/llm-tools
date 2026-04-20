@@ -12,12 +12,26 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 
 class _FakeProviderModeStrategy(StrEnum):
     AUTO = "auto"
     TOOLS = "tools"
     JSON = "json"
     MD_JSON = "md_json"
+
+
+class _FakeProviderPreflightResult(BaseModel):
+    ok: bool
+    connection_succeeded: bool = False
+    model_accepted: bool = False
+    selected_mode_supported: bool = False
+    model_listing_supported: bool = False
+    available_models: list[str] = Field(default_factory=list)
+    resolved_mode: _FakeProviderModeStrategy | None = None
+    actionable_message: str
+    error_message: str | None = None
 
 
 class _FakeOpenAICompatibleProvider:
@@ -54,6 +68,27 @@ class _FakeOpenAICompatibleProvider:
         if self.model.strip():
             return [self.model]
         return ["demo-model"]
+
+    def preflight(
+        self,
+        *,
+        request_params: dict[str, Any] | None = None,
+    ) -> _FakeProviderPreflightResult:
+        del request_params
+        return _FakeProviderPreflightResult(
+            ok=True,
+            connection_succeeded=True,
+            model_accepted=True,
+            selected_mode_supported=True,
+            model_listing_supported=True,
+            available_models=self.list_available_models(),
+            resolved_mode=(
+                None
+                if self.mode_strategy is _FakeProviderModeStrategy.AUTO
+                else self.mode_strategy
+            ),
+            actionable_message="Model connection is ready for this session.",
+        )
 
     def run(
         self,
@@ -104,7 +139,12 @@ def _fake_provider_module() -> ModuleType:
     module = ModuleType("llm_tools.llm_providers")
     module.OpenAICompatibleProvider = _FakeOpenAICompatibleProvider
     module.ProviderModeStrategy = _FakeProviderModeStrategy
-    module.__all__ = ["OpenAICompatibleProvider", "ProviderModeStrategy"]
+    module.ProviderPreflightResult = _FakeProviderPreflightResult
+    module.__all__ = [
+        "OpenAICompatibleProvider",
+        "ProviderModeStrategy",
+        "ProviderPreflightResult",
+    ]
     return module
 
 

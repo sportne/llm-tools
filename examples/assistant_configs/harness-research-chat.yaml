@@ -5,6 +5,7 @@
 # helpers still require subprocess access in the UI.
 llm:
   provider: ollama
+  provider_mode_strategy: auto
   model_name: gemma4:26b
   temperature: 0.1
   api_base_url: http://127.0.0.1:11434/v1

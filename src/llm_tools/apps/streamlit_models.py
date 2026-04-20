@@ -13,6 +13,7 @@ from llm_tools.workflow_api import (
     ChatFinalResponse,
     ChatSessionState,
     ChatTokenUsage,
+    ProtectionConfig,
 )
 
 
@@ -55,6 +56,7 @@ class StreamlitRuntimeConfig(BaseModel):
     allow_filesystem: bool = True
     allow_subprocess: bool = False
     inspector_open: bool = False
+    protection: ProtectionConfig = Field(default_factory=ProtectionConfig)
 
     @field_validator("model_name")
     @classmethod

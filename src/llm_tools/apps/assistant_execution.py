@@ -43,6 +43,7 @@ def build_assistant_context(
     root_path: Path | None,
     config: StreamlitAssistantConfig,
     app_name: str,
+    env_overrides: dict[str, str] | None = None,
 ) -> ToolContext:
     """Build the tool context passed into assistant workflow execution."""
     effective_read_limit = (
@@ -53,10 +54,16 @@ def build_assistant_context(
     effective_tool_limits = config.tool_limits.model_copy(
         update={"max_read_file_chars": effective_read_limit}
     )
+    env = dict(os.environ)
+    for key, value in (env_overrides or {}).items():
+        cleaned = value.strip()
+        if cleaned:
+            env[key] = cleaned
+
     return ToolContext(
         invocation_id=f"{app_name}-{uuid4()}",
         workspace=str(root_path) if root_path is not None else None,
-        env=dict(os.environ),
+        env=env,
         metadata={
             "tool_limits": effective_tool_limits.model_dump(mode="json"),
             "assistant_mode": "streamlit_assistant",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +21,7 @@ from llm_tools.workflow_api import (
     ProtectionFeedbackStore,
     ProtectionPendingPrompt,
     collect_provenance_from_tool_results,
+    inspect_protection_corpus,
     load_protection_corpus,
 )
 
@@ -159,6 +161,21 @@ def test_default_environment_comparator_uses_environment_label_sets() -> None:
         )
         is ProtectionAction.SANITIZE
     )
+
+
+def test_feedback_store_path_and_load_rejects_unsupported_existing_extension(
+    tmp_path: Path,
+) -> None:
+    yaml_store = ProtectionFeedbackStore(tmp_path / "empty.yaml")
+    yaml_store.path.write_text("", encoding="utf-8")
+
+    assert yaml_store.path == tmp_path / "empty.yaml"
+    assert yaml_store.load_entries() == []
+
+    unsupported = ProtectionFeedbackStore(tmp_path / "corrections.txt")
+    unsupported.path.write_text("entries: []", encoding="utf-8")
+    with pytest.raises(ValueError, match="Unsupported protection feedback file type"):
+        unsupported.load_entries()
 
 
 def test_feedback_store_yaml_round_trip_and_unsupported_extension(tmp_path) -> None:
@@ -302,6 +319,80 @@ def test_controller_messages_and_helper_functions_cover_private_paths(tmp_path) 
         "content": "clean",
     }
     assert protection_module._sanitize_payload(42, None) == "[REDACTED]"
+
+
+def test_inspect_protection_corpus_reports_read_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    corpus_dir = tmp_path / "policies"
+    corpus_dir.mkdir()
+    good_file = corpus_dir / "policy.txt"
+    bad_dir_file = corpus_dir / "broken.txt"
+    standalone_file = tmp_path / "standalone.txt"
+    unsupported_file = tmp_path / "binary.bin"
+    good_file.write_text("internal guidance", encoding="utf-8")
+    bad_dir_file.write_text("broken", encoding="utf-8")
+    standalone_file.write_text("also broken", encoding="utf-8")
+    unsupported_file.write_bytes(b"bin")
+
+    original_read_text = Path.read_text
+
+    def fake_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self in {bad_dir_file, standalone_file}:
+            raise OSError("boom")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+
+    report = inspect_protection_corpus(
+        ProtectionConfig(
+            enabled=True,
+            document_paths=[
+                str(corpus_dir),
+                str(standalone_file),
+                str(unsupported_file),
+            ],
+        )
+    )
+
+    assert [document.path for document in report.corpus.documents] == [str(good_file)]
+    assert any(
+        issue.path == str(bad_dir_file) and "Unable to read" in issue.message
+        for issue in report.issues
+    )
+    assert any(
+        issue.path == str(standalone_file) and "Unable to read" in issue.message
+        for issue in report.issues
+    )
+    assert any(
+        issue.path == str(unsupported_file) and "Unsupported file type" in issue.message
+        for issue in report.issues
+    )
+
+
+def test_inspect_protection_corpus_accepts_directory_entries(
+    tmp_path: Path,
+) -> None:
+    corpus_dir = tmp_path / "policies"
+    corpus_dir.mkdir()
+    (corpus_dir / "policy.txt").write_text("internal guidance", encoding="utf-8")
+    (corpus_dir / "notes.md").write_text("more guidance", encoding="utf-8")
+    (corpus_dir / "skip.png").write_bytes(b"png")
+
+    report = inspect_protection_corpus(
+        ProtectionConfig(
+            enabled=True,
+            document_paths=[str(corpus_dir), str(tmp_path / "missing.txt")],
+        )
+    )
+
+    assert sorted(document.path for document in report.corpus.documents) == [
+        str(corpus_dir / "notes.md"),
+        str(corpus_dir / "policy.txt"),
+    ]
+    assert any(issue.path == str(tmp_path / "missing.txt") for issue in report.issues)
+    assert any(issue.path == str(corpus_dir / "skip.png") for issue in report.issues)
 
 
 def test_feedback_prompt_validators_trim_and_require_label() -> None:

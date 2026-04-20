@@ -76,7 +76,9 @@ Supported product entrypoints:
 - `llm_tools.apps.harness_cli`
 
 `apps/*` are supported product surfaces, but they are not the default extension
-API for downstream consumers.
+API for downstream consumers. The Streamlit assistant is the primary interactive
+product surface for internal deployments; the harness CLI is the lower-level
+operator surface for durable session management.
 
 ## Common Usage
 
@@ -192,14 +194,18 @@ result = service.run_session(HarnessSessionRunRequest(session_id=created.session
 Launch the Streamlit assistant:
 
 ```bash
-python -m llm_tools.apps.streamlit_assistant <directory> --config <path>
+python -m llm_tools.apps.streamlit_assistant <directory>
 ```
 
-or:
+or with an optional reusable YAML preset:
 
 ```bash
 llm-tools-streamlit-assistant <directory> --config <path>
 ```
+
+The config YAML is optional. The Streamlit UI can also generate and save a
+non-secret config preset from the current session. Remote integration
+credentials stay session-only and are never written into the exported YAML.
 
 Launch the persisted harness CLI:
 
@@ -213,8 +219,12 @@ or:
 llm-tools-harness start --title "Task" --intent "Do work"
 ```
 
-The Streamlit assistant is the main interactive client. The harness CLI is a
-minimal operational surface over the public `harness_api` session service.
+The Streamlit assistant is the main interactive client for private-network
+deployments. It supports explicit provider-mode selection for OpenAI-compatible
+endpoints, per-integration remote credentials entered in the UI, and optional
+proprietary-protection corpus paths that can be saved as part of exported
+config. The harness CLI remains an operational surface over the public
+`harness_api` session service.
 
 ## Dependency Surface
 
@@ -225,9 +235,10 @@ The base package currently includes:
 - `markitdown` and `mpxj` for document-conversion support in read-oriented local
   tools
 
-These integrations are not equally central. The local assistant core is mainly
-filesystem, Git, and text tools; the remote integrations are bundled but
-secondary.
+These integrations are supported product scope. The Streamlit assistant treats
+local workspace, GitLab, Jira, Confluence, and Bitbucket as first-class source
+groups, with readiness and credential requirements surfaced explicitly in the
+UI.
 
 ## Documentation
 

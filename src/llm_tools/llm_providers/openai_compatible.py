@@ -8,7 +8,7 @@ from enum import Enum
 from typing import Any
 
 from openai import AsyncOpenAI, OpenAI
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 
@@ -45,6 +45,24 @@ class ProviderModeStrategy(str, Enum):  # noqa: UP042
     TOOLS = "tools"
     JSON = "json"
     MD_JSON = "md_json"
+
+
+class ProviderPreflightResult(BaseModel):
+    """Typed result for one provider connectivity and mode probe."""
+
+    ok: bool
+    connection_succeeded: bool = False
+    model_accepted: bool = False
+    selected_mode_supported: bool = False
+    model_listing_supported: bool = False
+    available_models: list[str] = Field(default_factory=list)
+    resolved_mode: ProviderModeStrategy | None = None
+    actionable_message: str
+    error_message: str | None = None
+
+
+class _ProviderPreflightResponse(BaseModel):
+    status: str
 
 
 class OpenAICompatibleProvider:
@@ -159,6 +177,109 @@ class OpenAICompatibleProvider:
         }
         return sorted(model_ids)
 
+    def preflight(
+        self,
+        *,
+        request_params: dict[str, Any] | None = None,
+    ) -> ProviderPreflightResult:
+        """Probe one provider configuration for connection, model, and mode support."""
+        available_models: list[str] = []
+        model_listing_supported = False
+        connection_succeeded = False
+        error_message: str | None = None
+
+        try:
+            available_models = self.list_available_models()
+            model_listing_supported = True
+            connection_succeeded = True
+        except Exception as exc:
+            error_message = self._exception_summary(exc)
+
+        if self.mode_strategy is ProviderModeStrategy.AUTO:
+            try:
+                self.run_structured(
+                    messages=self._preflight_messages(),
+                    response_model=_ProviderPreflightResponse,
+                    request_params=request_params,
+                )
+            except Exception as exc:
+                connection_succeeded = connection_succeeded or self._looks_connected(
+                    exc
+                )
+                error_message = self._exception_summary(exc)
+                return ProviderPreflightResult(
+                    ok=False,
+                    connection_succeeded=connection_succeeded,
+                    model_accepted=not self._looks_like_model_error(exc),
+                    selected_mode_supported=False,
+                    model_listing_supported=model_listing_supported,
+                    available_models=available_models,
+                    resolved_mode=None,
+                    actionable_message=self._preflight_error_message(
+                        exc,
+                        available_models=available_models,
+                        model_listing_supported=model_listing_supported,
+                    ),
+                    error_message=error_message,
+                )
+            return ProviderPreflightResult(
+                ok=True,
+                connection_succeeded=True,
+                model_accepted=True,
+                selected_mode_supported=True,
+                model_listing_supported=model_listing_supported,
+                available_models=available_models,
+                resolved_mode=self.last_mode_used,
+                actionable_message=(
+                    "Model connection is ready for this session. "
+                    f"Resolved provider mode: {(self.last_mode_used or self.mode_strategy).value}."
+                ),
+                error_message=error_message,
+            )
+
+        selected_mode = self.mode_strategy
+        try:
+            self._run_in_mode(
+                mode=selected_mode,
+                messages=self._preflight_messages(),
+                response_model=_ProviderPreflightResponse,
+                request_params=request_params,
+            )
+        except Exception as exc:
+            connection_succeeded = connection_succeeded or self._looks_connected(exc)
+            error_message = self._exception_summary(exc)
+            return ProviderPreflightResult(
+                ok=False,
+                connection_succeeded=connection_succeeded,
+                model_accepted=not self._looks_like_model_error(exc),
+                selected_mode_supported=False,
+                model_listing_supported=model_listing_supported,
+                available_models=available_models,
+                resolved_mode=None,
+                actionable_message=self._preflight_error_message(
+                    exc,
+                    available_models=available_models,
+                    model_listing_supported=model_listing_supported,
+                    selected_mode=selected_mode,
+                ),
+                error_message=error_message,
+            )
+        self.last_mode_used = selected_mode
+        return ProviderPreflightResult(
+            ok=True,
+            connection_succeeded=True,
+            model_accepted=True,
+            selected_mode_supported=True,
+            model_listing_supported=model_listing_supported,
+            available_models=available_models,
+            resolved_mode=selected_mode,
+            actionable_message=(
+                "Model connection is ready for this session. "
+                f"Configured provider mode '{selected_mode.value}' works with this endpoint."
+            ),
+            error_message=error_message,
+        )
+
     async def run_structured_async(
         self,
         *,
@@ -206,11 +327,11 @@ class OpenAICompatibleProvider:
                 break
 
             try:
-                payload = client.chat.completions.create(
-                    model=self.model,
-                    messages=list(messages),
+                payload = self._create_sync_completion(
+                    client=client,
+                    messages=messages,
                     response_model=response_model,
-                    **self._merged_request_params(request_params),
+                    request_params=request_params,
                 )
                 self.last_mode_used = mode
                 return payload
@@ -241,11 +362,11 @@ class OpenAICompatibleProvider:
                 break
 
             try:
-                payload = await client.chat.completions.create(
-                    model=self.model,
-                    messages=list(messages),
+                payload = await self._create_async_completion(
+                    client=client,
+                    messages=messages,
                     response_model=response_model,
-                    **self._merged_request_params(request_params),
+                    request_params=request_params,
                 )
                 self.last_mode_used = mode
                 return payload
@@ -258,6 +379,122 @@ class OpenAICompatibleProvider:
                 previous_client = client
 
         raise ValueError(self._fallback_error_message(failures)) from failures[-1][1]
+
+    def _run_in_mode(
+        self,
+        *,
+        mode: ProviderModeStrategy,
+        messages: Sequence[dict[str, Any]],
+        response_model: type[BaseModel],
+        request_params: dict[str, Any] | None,
+    ) -> object:
+        client = self._instructor_sync_client(mode)
+        payload = self._create_sync_completion(
+            client=client,
+            messages=messages,
+            response_model=response_model,
+            request_params=request_params,
+        )
+        self.last_mode_used = mode
+        return payload
+
+    def _create_sync_completion(
+        self,
+        *,
+        client: Any,
+        messages: Sequence[dict[str, Any]],
+        response_model: type[BaseModel],
+        request_params: dict[str, Any] | None,
+    ) -> object:
+        return client.chat.completions.create(
+            model=self.model,
+            messages=list(messages),
+            response_model=response_model,
+            **self._merged_request_params(request_params),
+        )
+
+    async def _create_async_completion(
+        self,
+        *,
+        client: Any,
+        messages: Sequence[dict[str, Any]],
+        response_model: type[BaseModel],
+        request_params: dict[str, Any] | None,
+    ) -> object:
+        return await client.chat.completions.create(
+            model=self.model,
+            messages=list(messages),
+            response_model=response_model,
+            **self._merged_request_params(request_params),
+        )
+
+    @staticmethod
+    def _preflight_messages() -> list[dict[str, str]]:
+        return [
+            {
+                "role": "system",
+                "content": "Return structured output with status set to 'ok'.",
+            },
+            {
+                "role": "user",
+                "content": "Validate this endpoint, model, and response mode.",
+            },
+        ]
+
+    def _preflight_error_message(
+        self,
+        exc: Exception,
+        *,
+        available_models: list[str],
+        model_listing_supported: bool,
+        selected_mode: ProviderModeStrategy | None = None,
+    ) -> str:
+        if self._looks_like_model_error(exc):
+            if model_listing_supported and available_models:
+                return (
+                    f"The endpoint rejected model '{self.model}'. "
+                    f"Choose one of the listed models: {', '.join(available_models)}."
+                )
+            return (
+                f"The endpoint rejected model '{self.model}'. "
+                "Check the configured model name for this provider."
+            )
+        if selected_mode is not None:
+            return (
+                f"The endpoint did not accept provider mode '{selected_mode.value}' for model '{self.model}'. "
+                "Choose a different provider mode for this endpoint."
+            )
+        return (
+            "Unable to validate this provider configuration. "
+            f"{self._exception_summary(exc)}"
+        )
+
+    @staticmethod
+    def _looks_like_model_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        markers = (
+            "model",
+            "not found",
+            "unknown model",
+            "does not exist",
+            "invalid model",
+        )
+        return any(marker in message for marker in markers)
+
+    @staticmethod
+    def _looks_connected(exc: Exception) -> bool:
+        message = str(exc).lower()
+        disconnected_markers = (
+            "connection",
+            "connect",
+            "timed out",
+            "timeout",
+            "name resolution",
+            "dns",
+            "refused",
+            "unreachable",
+        )
+        return not any(marker in message for marker in disconnected_markers)
 
     def _candidate_modes(self) -> list[ProviderModeStrategy]:
         if self.mode_strategy is ProviderModeStrategy.AUTO:

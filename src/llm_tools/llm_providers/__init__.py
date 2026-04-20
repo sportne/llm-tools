@@ -3,9 +3,11 @@
 from llm_tools.llm_providers.openai_compatible import (
     OpenAICompatibleProvider,
     ProviderModeStrategy,
+    ProviderPreflightResult,
 )
 
 __all__ = [
     "OpenAICompatibleProvider",
     "ProviderModeStrategy",
+    "ProviderPreflightResult",
 ]

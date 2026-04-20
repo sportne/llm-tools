@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from llm_tools.llm_providers import ProviderModeStrategy
 from llm_tools.tool_api import SideEffectClass
 from llm_tools.tool_api.redaction import RedactionConfig
 
@@ -16,6 +17,21 @@ class ProviderPreset(str, Enum):  # noqa: UP042
     OPENAI = "openai"
     OLLAMA = "ollama"
     CUSTOM_OPENAI_COMPATIBLE = "custom_openai_compatible"
+
+
+def _populate_provider_mode_default(data: object) -> object:
+    if not isinstance(data, dict):
+        return data
+    payload = dict(data)
+    if "provider_mode_strategy" in payload:
+        return payload
+    provider = payload.get("provider", ProviderPreset.OLLAMA)
+    provider_value = (
+        provider.value if isinstance(provider, ProviderPreset) else str(provider)
+    )
+    if provider_value == ProviderPreset.CUSTOM_OPENAI_COMPATIBLE.value:
+        payload["provider_mode_strategy"] = ProviderModeStrategy.JSON
+    return payload
 
 
 class ChatCredentialPromptMetadata(BaseModel):
@@ -34,12 +50,21 @@ class ChatLLMConfig(BaseModel):
     """Standalone chat runtime configuration."""
 
     provider: ProviderPreset = ProviderPreset.OLLAMA
+    provider_mode_strategy: ProviderModeStrategy = ProviderModeStrategy.AUTO
     model_name: str = "gemma4:26b"
     temperature: float = 0.1
     api_base_url: str | None = "http://127.0.0.1:11434/v1"
     timeout_seconds: float = 60.0
     api_key_env_var: str | None = None
     prompt_for_api_key_if_missing: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_provider_mode_default(
+        cls,
+        data: object,
+    ) -> object:
+        return _populate_provider_mode_default(data)
 
     @field_validator("model_name")
     @classmethod
