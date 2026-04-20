@@ -22,6 +22,9 @@ from llm_tools.apps.assistant_config import (
 )
 from llm_tools.apps.assistant_prompts import build_assistant_system_prompt
 from llm_tools.apps.assistant_runtime import (
+    AssistantToolCapability,
+    AssistantToolCapabilityReason,
+    AssistantToolCapabilityReasonCode,
     build_assistant_available_tool_specs,
     build_assistant_context,
     build_assistant_executor,
@@ -702,21 +705,50 @@ def _approval_resolution_copy(resolution: str) -> str:
 
 def _tool_status_copy(status: str) -> str:
     return {
-        "available": "ready",
-        "disabled": "off",
-        "missing_workspace": "needs workspace",
-        "missing_credentials": "needs credentials",
-        "permission_blocked": "blocked by permissions",
+        "available": "Ready for this session.",
+        "disabled": "Off for this session.",
+        "missing_workspace": "Not ready yet.",
+        "missing_credentials": "Not ready yet.",
+        "permission_blocked": "Not ready yet.",
     }[status]
 
 
-def _tool_capability_caption(item: Any) -> str:
-    status_bits = [_tool_status_copy(item.status)]
-    if item.approval_required:
-        status_bits.append("approval on use")
-    if item.detail:
-        status_bits.append(item.detail)
-    return " | ".join(status_bits)
+def _tool_reason_copy(reason: AssistantToolCapabilityReason) -> str:
+    if reason.code is AssistantToolCapabilityReasonCode.WORKSPACE_REQUIRED:
+        return "Choose a workspace root in Step 2."
+    if reason.code is AssistantToolCapabilityReasonCode.MISSING_CREDENTIALS:
+        if reason.missing_secrets:
+            missing = ", ".join(reason.missing_secrets)
+            return f"Add credentials: {missing}."
+        return "Add the required credentials for this source."
+    if reason.code is AssistantToolCapabilityReasonCode.NETWORK_PERMISSION_BLOCKED:
+        return "Turn on network access in Step 3."
+    if reason.code is AssistantToolCapabilityReasonCode.FILESYSTEM_PERMISSION_BLOCKED:
+        return "Turn on filesystem access in Step 3."
+    if reason.code is AssistantToolCapabilityReasonCode.SUBPROCESS_PERMISSION_BLOCKED:
+        return "Turn on subprocess access in Step 3."
+    if reason.code is AssistantToolCapabilityReasonCode.APPROVAL_REQUIRED:
+        return "This tool pauses for approval before it runs."
+    return reason.message
+
+
+def _tool_reason_copies(item: AssistantToolCapability) -> list[str]:
+    reason_copies: list[str] = []
+    for reason in item.reasons:
+        if item.status == "missing_workspace" and reason.code in {
+            AssistantToolCapabilityReasonCode.FILESYSTEM_PERMISSION_BLOCKED,
+            AssistantToolCapabilityReasonCode.SUBPROCESS_PERMISSION_BLOCKED,
+        }:
+            continue
+        reason_copies.append(_tool_reason_copy(reason))
+    if item.enabled and item.approval_required:
+        reason_copies.append("This tool pauses for approval before it runs.")
+    return reason_copies
+
+
+def _tool_capability_caption(item: AssistantToolCapability) -> str:
+    parts = [_tool_status_copy(item.status), *_tool_reason_copies(item)]
+    return " ".join(parts)
 
 
 def _group_readiness_copy(group_name: str, summary: Any) -> str:

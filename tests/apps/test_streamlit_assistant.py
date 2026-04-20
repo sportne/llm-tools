@@ -1042,6 +1042,34 @@ def test_streamlit_assistant_sidebar_tool_controls_show_guided_readiness_copy(
     )
 
 
+def test_streamlit_assistant_tool_capability_caption_uses_explicit_blockers() -> None:
+    tool_specs = _MODULES.app._all_tool_specs()
+    capabilities = build_tool_capabilities(
+        tool_specs=tool_specs,
+        enabled_tools={"read_file", "search_jira", "run_git_status"},
+        root_path=None,
+        env={},
+        allow_network=False,
+        allow_filesystem=False,
+        allow_subprocess=False,
+        require_approval_for={SideEffectClass.LOCAL_READ},
+    )
+    items = {item.tool_name: item for group in capabilities.values() for item in group}
+
+    assert _MODULES.app._tool_capability_caption(items["read_file"]) == (
+        "Not ready yet. Choose a workspace root in Step 2. "
+        "This tool pauses for approval before it runs."
+    )
+    assert _MODULES.app._tool_capability_caption(items["search_jira"]) == (
+        "Not ready yet. Add credentials: JIRA_API_TOKEN, JIRA_BASE_URL, JIRA_USERNAME. "
+        "Turn on network access in Step 3."
+    )
+    assert _MODULES.app._tool_capability_caption(items["run_git_status"]) == (
+        "Not ready yet. Choose a workspace root in Step 2. "
+        "This tool pauses for approval before it runs."
+    )
+
+
 def test_streamlit_assistant_copy_helpers_cover_status_sources_and_session_meta() -> (
     None
 ):
