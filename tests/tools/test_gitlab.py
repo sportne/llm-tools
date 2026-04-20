@@ -126,6 +126,44 @@ def test_search_gitlab_code_tool_maps_project_results(
     assert result.matches[0].snippet == "needle()"
 
 
+def test_search_gitlab_code_tool_marks_truncated_when_results_exceed_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProject:
+        path_with_namespace = "group/repo"
+
+        def search(
+            self, scope: str, query: str, **kwargs: object
+        ) -> list[dict[str, object]]:
+            del scope, query, kwargs
+            return [
+                {"path": f"src/file-{index}.py", "snippet": "needle()"}
+                for index in range(3)
+            ]
+
+    class FakeProjects:
+        def get(self, project: str) -> FakeProject:
+            assert project == "group/repo"
+            return FakeProject()
+
+    class FakeGitlab:
+        def __init__(self, url: str, *, private_token: str) -> None:
+            del url, private_token
+            self.projects = FakeProjects()
+
+    _install_fake_gitlab_module(monkeypatch, FakeGitlab)
+
+    tool_result = _invoke_tool(
+        "search_gitlab_code",
+        _context(),
+        {"project": "group/repo", "query": "needle", "limit": 2},
+    )
+    result = SearchGitLabCodeTool.output_model.model_validate(tool_result.output)
+
+    assert len(result.matches) == 2
+    assert result.truncated is True
+
+
 def test_read_gitlab_file_tool_reads_text_and_applies_ranges(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -286,6 +324,108 @@ def test_read_gitlab_merge_request_tool_maps_metadata_commits_and_changes(
     assert result.commits[0].title == "feat: add feature"
     assert result.changed_files[0].new_path == "new.py"
     assert result.changed_files[0].renamed_file is True
+
+
+def test_read_gitlab_merge_request_tool_marks_truncated_collections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeMergeRequest:
+        title = "Add feature"
+        description = "Implements the feature"
+        state = "opened"
+        author = {"name": "Alice"}
+        source_branch = "feature"
+        target_branch = "main"
+        web_url = "https://gitlab.example.com/group/repo/-/merge_requests/12"
+
+        def commits(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": f"commit-{index}",
+                    "short_id": f"c{index}",
+                    "title": f"commit {index}",
+                    "author_name": "Alice",
+                }
+                for index in range(3)
+            ]
+
+        def changes(self) -> dict[str, object]:
+            return {
+                "changes": [
+                    {
+                        "old_path": f"old-{index}.py",
+                        "new_path": f"new-{index}.py",
+                        "renamed_file": False,
+                        "diff": "+hello\n",
+                    }
+                    for index in range(3)
+                ]
+            }
+
+    class FakeMergeRequests:
+        def get(self, merge_request_iid: int) -> FakeMergeRequest:
+            assert merge_request_iid == 12
+            return FakeMergeRequest()
+
+    class FakeProject:
+        path_with_namespace = "group/repo"
+        mergerequests = FakeMergeRequests()
+
+    class FakeProjects:
+        def get(self, project: str) -> FakeProject:
+            assert project == "group/repo"
+            return FakeProject()
+
+    class FakeGitlab:
+        def __init__(self, url: str, *, private_token: str) -> None:
+            del url, private_token
+            self.projects = FakeProjects()
+
+    _install_fake_gitlab_module(monkeypatch, FakeGitlab)
+
+    tool_result = _invoke_tool(
+        "read_gitlab_merge_request",
+        _context(),
+        {
+            "project": "group/repo",
+            "merge_request_iid": 12,
+            "commit_limit": 2,
+            "change_limit": 2,
+        },
+    )
+    result = ReadGitLabMergeRequestTool.output_model.model_validate(tool_result.output)
+
+    assert len(result.commits) == 2
+    assert len(result.changed_files) == 2
+    assert result.commits_truncated is True
+    assert result.changed_files_truncated is True
+
+
+def test_gitlab_tools_surface_transient_remote_failures_as_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProjects:
+        def get(self, project: str):
+            del project
+            raise TimeoutError("upstream timed out")
+
+    class FakeGitlab:
+        def __init__(self, url: str, *, private_token: str) -> None:
+            del url, private_token
+            self.projects = FakeProjects()
+
+    _install_fake_gitlab_module(monkeypatch, FakeGitlab)
+
+    result = _execute_tool(
+        "search_gitlab_code",
+        _context(),
+        {"project": "group/repo", "query": "needle"},
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is ErrorCode.EXECUTION_FAILED
+    assert result.error.retryable is True
 
 
 def test_gitlab_tools_require_context_credentials() -> None:

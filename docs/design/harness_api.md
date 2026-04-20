@@ -80,8 +80,9 @@ session execution:
   blocked `ApprovalRequest`, the parsed model response, the base `ToolContext`,
   and the pending invocation index needed to continue the interrupted turn.
 - `HarnessTurn`: one persisted harness turn, including the turn index, durable
-  timestamps, optional `WorkflowTurnResult`, optional `TurnDecision`, and any
-  no-progress signals detected for the turn.
+  timestamps, optional `WorkflowTurnResult`, optional `TurnDecision`, any
+  no-progress signals detected for the turn, turn-local verification snapshots,
+  and minimized approval-audit metadata for resumed approval history.
 - `HarnessSession`: session-level metadata including session id, root task id,
   budget policy, current turn index, start time, and terminal stop metadata.
 - `HarnessState`: top-level persisted envelope containing `schema_version`,
@@ -361,8 +362,8 @@ The default budget policy is explicit and provider-neutral:
 
 ## Turn sequencing and commit points
 
-The durable control loop is intentionally explicit and uses one persisted
-commit point per durable outcome:
+The durable control loop is intentionally explicit and now uses an incomplete
+turn checkpoint plus one persisted commit point per durable outcome:
 
 1. Load or save the current `HarnessState` snapshot.
 2. Classify it through `resume_session(...)`.
@@ -370,20 +371,24 @@ commit point per durable outcome:
    resolution before work can continue.
 4. Before starting a new turn, enforce `BudgetPolicy.max_turns` and
    `BudgetPolicy.max_elapsed_seconds`.
-5. Select task ids deterministically, build a `ToolContext`, and obtain one
-   `ParsedModelResponse` from the driver.
-6. Execute that parsed response through `WorkflowExecutor`.
-7. If the turn ends in `approval_requested`, persist exactly one incomplete tail
+5. Select task ids deterministically, build a `ToolContext`, and persist an
+   incomplete tail `HarnessTurn` before provider or tool execution begins.
+6. Obtain one `ParsedModelResponse` from the driver.
+7. Reject over-budget parsed responses before dispatch when they would exceed
+   `BudgetPolicy.max_tool_invocations`.
+8. Execute the parsed response through `WorkflowExecutor`.
+9. If the turn ends in `approval_requested`, persist exactly one incomplete tail
    `HarnessTurn` plus one matching `PendingApprovalRecord`, then stop.
-8. Otherwise, apply the completed turn, evaluate the post-turn budget check for
-   `max_tool_invocations`, stamp `ended_at`, and persist the completed turn.
-9. Continue only for `TurnDecisionAction.CONTINUE` and
+10. Otherwise, apply the completed turn, stamp `ended_at`, persist any
+    no-progress signals, and save the completed turn.
+11. Continue only for `TurnDecisionAction.CONTINUE` and
    `TurnDecisionAction.SELECT_TASKS`; terminal stops stamp
    `session.ended_at` and `session.stop_reason`.
 
-If the process crashes before the post-turn save, the last durable snapshot
-remains authoritative and the turn is recomputed from that snapshot on resume.
-Approval waits are the only intentionally persisted incomplete turns.
+If the process crashes after the incomplete-turn checkpoint but before the
+completed-turn save, resume classifies the tail turn as `interrupted`. The
+default behavior is fail-closed: operators must explicitly opt in before the
+interrupted tail turn is dropped and replayed.
 
 ## Retry and approval durability rules
 
@@ -397,6 +402,8 @@ Retry and recovery are explicit rather than inferred from UI state:
 - approval denial, expiration, and operator cancel are fail-closed: the
   denied invocation is recorded, but later invocations from that same parsed
   response do not run
+- interrupted non-approval tail turns are not replayed automatically; they must
+  be explicitly acknowledged and dropped before rerun
 - every actual retry attempt increments `HarnessSession.retry_count` and the
   selected tasks' `TaskRecord.retry_count`
 - optimistic-concurrency save conflicts reload the latest snapshot and retry

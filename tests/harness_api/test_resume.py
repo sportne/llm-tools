@@ -170,6 +170,35 @@ def test_resume_flags_partial_incomplete_turns_without_pending_approval() -> Non
     assert resumed.issues[0].code == "missing_pending_approval"
 
 
+def test_resume_classifies_incomplete_non_approval_turns_as_interrupted() -> None:
+    snapshot = _runnable_snapshot().model_copy(
+        update={
+            "state": _runnable_snapshot().state.model_copy(
+                update={
+                    "session": _runnable_snapshot().state.session.model_copy(
+                        update={"current_turn_index": 1}
+                    ),
+                    "turns": [
+                        HarnessTurn(
+                            turn_index=1,
+                            started_at="2026-01-01T00:00:00Z",
+                            selected_task_ids=["task-1"],
+                        )
+                    ],
+                },
+                deep=True,
+            )
+        },
+        deep=True,
+    )
+
+    resumed = resume_session(snapshot)
+
+    assert resumed.disposition is ResumeDisposition.INTERRUPTED
+    assert resumed.incomplete_turn is not None
+    assert resumed.issues[0].code == "interrupted_turn"
+
+
 def test_resume_can_load_from_store() -> None:
     store = InMemoryHarnessStateStore()
     snapshot = store.save_session(_runnable_snapshot().state)

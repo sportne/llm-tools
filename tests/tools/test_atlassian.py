@@ -21,7 +21,8 @@ from llm_tools.tool_api import (
 from llm_tools.tools.atlassian import (
     ReadBitbucketFileTool,
     ReadBitbucketPullRequestTool,
-    ReadConfluenceContentTool,
+    ReadConfluenceAttachmentTool,
+    ReadConfluencePageTool,
     ReadJiraIssueTool,
     SearchBitbucketCodeTool,
     SearchConfluenceTool,
@@ -38,13 +39,15 @@ def _atlassian_runtime() -> ToolRuntime:
     registry.register(ReadBitbucketFileTool())
     registry.register(ReadBitbucketPullRequestTool())
     registry.register(SearchConfluenceTool())
-    registry.register(ReadConfluenceContentTool())
+    registry.register(ReadConfluencePageTool())
+    registry.register(ReadConfluenceAttachmentTool())
     return ToolRuntime(
         registry,
         policy=ToolPolicy(
             allowed_side_effects={
                 SideEffectClass.NONE,
                 SideEffectClass.LOCAL_READ,
+                SideEffectClass.LOCAL_WRITE,
                 SideEffectClass.EXTERNAL_READ,
             },
             allow_network=True,
@@ -180,7 +183,11 @@ def test_read_jira_issue_tool_maps_issue_payload(
     _install_fake_atlassian_module(monkeypatch, jira_cls=FakeJira)
 
     result = ReadJiraIssueTool.output_model.model_validate(
-        _invoke_tool("read_jira_issue", _jira_context(), {"issue_key": "DEMO-2"}).output
+        _invoke_tool(
+            "read_jira_issue",
+            _jira_context(),
+            {"issue_key": "DEMO-2", "requested_fields": ["priority"]},
+        ).output
     )
 
     assert result.key == "DEMO-2"
@@ -188,7 +195,7 @@ def test_read_jira_issue_tool_maps_issue_payload(
     assert result.status == "Done"
     assert result.issue_type == "Bug"
     assert result.assignee == "Bob"
-    assert result.raw_fields["priority"]["name"] == "High"
+    assert result.requested_fields["priority"]["name"] == "High"
 
 
 def test_jira_tools_require_context_env_credentials() -> None:
@@ -265,6 +272,31 @@ def test_search_jira_tool_rejects_unsupported_client(
     assert result.error is not None
     assert result.error.code is ErrorCode.EXECUTION_FAILED
     assert "does not support JQL search" in result.error.details["exception_message"]
+
+
+def test_atlassian_tools_surface_transient_remote_failures_as_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeJira:
+        def __init__(self, **kwargs: str) -> None:
+            del kwargs
+
+        def enhanced_jql(self, jql: str, *, limit: int) -> dict[str, object]:
+            del jql, limit
+            raise TimeoutError("jira timed out")
+
+    _install_fake_atlassian_module(monkeypatch, jira_cls=FakeJira)
+
+    result = _execute_tool(
+        "search_jira",
+        _jira_context(),
+        {"jql": "project = DEMO"},
+    )
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code is ErrorCode.EXECUTION_FAILED
+    assert result.error.retryable is True
 
 
 def test_read_jira_issue_tool_falls_back_to_get_issue(
@@ -566,7 +598,7 @@ def test_search_confluence_tool_maps_results(
     )
 
 
-def test_read_confluence_content_tool_reads_page_with_ranges(
+def test_read_confluence_page_tool_reads_page_with_ranges(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeConfluence:
@@ -590,22 +622,21 @@ def test_read_confluence_content_tool_reads_page_with_ranges(
 
     _install_fake_atlassian_module(monkeypatch, confluence_cls=FakeConfluence)
 
-    result = ReadConfluenceContentTool.output_model.model_validate(
+    result = ReadConfluencePageTool.output_model.model_validate(
         _invoke_tool(
-            "read_confluence_content",
+            "read_confluence_page",
             _confluence_context(),
             {"page_id": "123", "start_char": 6, "end_char": 10},
         ).output
     )
 
-    assert result.mode == "page"
     assert result.title == "Demo page"
     assert result.content == "beta"
     assert result.truncated is True
     assert result.representation == "storage"
 
 
-def test_read_confluence_content_tool_reads_attachment_and_reuses_cache(
+def test_read_confluence_attachment_tool_reads_attachment_and_reuses_cache(
     tmp_path: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -670,22 +701,21 @@ def test_read_confluence_content_tool_reads_attachment_and_reuses_cache(
         lambda: tmp_path / "attachment-cache",
     )
 
-    first = ReadConfluenceContentTool.output_model.model_validate(
+    first = ReadConfluenceAttachmentTool.output_model.model_validate(
         _invoke_tool(
-            "read_confluence_content",
+            "read_confluence_attachment",
             _confluence_context(),
             {"page_id": "123", "attachment_filename": "report.pdf"},
         ).output
     )
-    second = ReadConfluenceContentTool.output_model.model_validate(
+    second = ReadConfluenceAttachmentTool.output_model.model_validate(
         _invoke_tool(
-            "read_confluence_content",
+            "read_confluence_attachment",
             _confluence_context(),
             {"page_id": "123", "attachment_filename": "report.pdf"},
         ).output
     )
 
-    assert first.mode == "attachment"
     assert first.read_kind == "markitdown"
     assert first.content is not None and first.content.startswith("converted:")
     assert second.content == first.content
@@ -693,7 +723,7 @@ def test_read_confluence_content_tool_reads_attachment_and_reuses_cache(
     assert len(convert_calls) == 1
 
 
-def test_read_confluence_content_tool_selects_attachment_by_id(
+def test_read_confluence_attachment_tool_selects_attachment_by_id(
     tmp_path: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -743,27 +773,31 @@ def test_read_confluence_content_tool_selects_attachment_by_id(
         lambda: tmp_path / "attachment-cache",
     )
 
-    result = ReadConfluenceContentTool.output_model.model_validate(
+    result = ReadConfluenceAttachmentTool.output_model.model_validate(
         _invoke_tool(
-            "read_confluence_content",
+            "read_confluence_attachment",
             _confluence_context(),
             {"page_id": "123", "attachment_id": "att-9"},
         ).output
     )
 
-    assert result.mode == "attachment"
     assert result.attachment_id == "att-9"
     assert result.attachment_filename == "note.txt"
     assert result.content == "plain text"
 
 
-def test_read_confluence_content_tool_validates_attachment_selector() -> None:
+def test_read_confluence_attachment_tool_validates_attachment_selector() -> None:
     with pytest.raises(ValueError, match="at most one"):
-        ReadConfluenceContentTool.input_model(
+        ReadConfluenceAttachmentTool.input_model(
             page_id="123",
             attachment_id="att-1",
             attachment_filename="report.pdf",
         )
+
+
+def test_read_confluence_attachment_tool_requires_selector() -> None:
+    with pytest.raises(ValueError, match="provide one"):
+        ReadConfluenceAttachmentTool.input_model(page_id="123")
 
 
 def test_atlassian_helper_value_collection_and_link_fallbacks() -> None:

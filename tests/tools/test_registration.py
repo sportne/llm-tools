@@ -48,7 +48,8 @@ from llm_tools.tools import (
                 "read_bitbucket_file",
                 "read_bitbucket_pull_request",
                 "search_confluence",
-                "read_confluence_content",
+                "read_confluence_attachment",
+                "read_confluence_page",
             },
         ),
         (

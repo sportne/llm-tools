@@ -13,6 +13,7 @@ from urllib.parse import urljoin
 from pydantic import BaseModel, Field, model_validator
 
 from llm_tools.tool_api import (
+    RetryableToolExecutionError,
     SideEffectClass,
     SourceProvenanceRef,
     Tool,
@@ -41,6 +42,9 @@ _CONFLUENCE_ENV_KEYS = (
     "CONFLUENCE_API_TOKEN",
 )
 _INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1F]')
+_REMOTE_TOOL_TIMEOUT_SECONDS = 30
+_REMOTE_COLLECTION_LIMIT = 100
+_RETRYABLE_STATUS_CODES = frozenset({429, 502, 503, 504})
 
 
 def _append_remote_source_provenance(
@@ -87,12 +91,19 @@ def _absolute_url(base_url: str, raw_url: str | None) -> str | None:
     return urljoin(base_url.rstrip("/") + "/", raw_url)
 
 
-def _extract_issue_fields(issue: dict[str, Any]) -> dict[str, Any]:
+def _extract_issue_fields(
+    issue: dict[str, Any],
+    *,
+    requested_fields: list[str] | None = None,
+) -> dict[str, Any]:
     fields = cast(dict[str, Any], issue.get("fields") or {})
     issue_type = fields.get("issuetype") or {}
     status = fields.get("status") or {}
     assignee = fields.get("assignee") or {}
     description = fields.get("description")
+    requested = {
+        name: fields[name] for name in (requested_fields or []) if name in fields
+    }
     return {
         "key": issue.get("key", ""),
         "summary": fields.get("summary"),
@@ -100,8 +111,27 @@ def _extract_issue_fields(issue: dict[str, Any]) -> dict[str, Any]:
         "status": status.get("name"),
         "issue_type": issue_type.get("name"),
         "assignee": assignee.get("displayName"),
-        "raw_fields": fields,
+        "requested_fields": requested,
     }
+
+
+def _normalize_remote_exception(exc: Exception) -> Exception:
+    status_code = cast(
+        int | None,
+        _get_value(
+            exc,
+            "status_code",
+            _get_value(_get_value(exc, "response", {}), "status_code"),
+        ),
+    )
+    exception_type = type(exc).__name__.lower()
+    message = str(exc).lower()
+    if status_code in _RETRYABLE_STATUS_CODES or any(
+        token in exception_type or token in message
+        for token in ("timeout", "timedout", "connection", "temporarily unavailable")
+    ):
+        return RetryableToolExecutionError(str(exc))
+    return exc
 
 
 def _normalize_remote_text(text: str) -> tuple[str | None, int, str | None]:
@@ -408,11 +438,12 @@ class JiraIssueSummary(BaseModel):
 
 class SearchJiraInput(BaseModel):
     jql: str
-    limit: int = Field(default=20, ge=1)
+    limit: int = Field(default=20, ge=1, le=_REMOTE_COLLECTION_LIMIT)
 
 
 class SearchJiraOutput(BaseModel):
     issues: list[JiraIssueSummary] = Field(default_factory=list)
+    truncated: bool = False
 
 
 class SearchJiraTool(Tool[SearchJiraInput, SearchJiraOutput]):
@@ -422,6 +453,7 @@ class SearchJiraTool(Tool[SearchJiraInput, SearchJiraOutput]):
         tags=["atlassian", "jira", "search", "read"],
         side_effects=SideEffectClass.EXTERNAL_READ,
         requires_network=True,
+        timeout_seconds=_REMOTE_TOOL_TIMEOUT_SECONDS,
         required_secrets=list(_JIRA_ENV_KEYS),
     )
     input_model = SearchJiraInput
@@ -431,15 +463,21 @@ class SearchJiraTool(Tool[SearchJiraInput, SearchJiraOutput]):
         self, context: ToolExecutionContext, args: SearchJiraInput
     ) -> SearchJiraOutput:
         client = context.services.require_jira().client
-        if hasattr(client, "enhanced_jql"):
-            payload = client.enhanced_jql(args.jql, limit=args.limit)
-        elif hasattr(client, "jql"):
-            payload = client.jql(args.jql, limit=args.limit)
-        else:
-            raise RuntimeError("Configured Jira client does not support JQL search.")
+        try:
+            if hasattr(client, "enhanced_jql"):
+                payload = client.enhanced_jql(args.jql, limit=args.limit)
+            elif hasattr(client, "jql"):
+                payload = client.jql(args.jql, limit=args.limit)
+            else:
+                raise RuntimeError(
+                    "Configured Jira client does not support JQL search."
+                )
+        except Exception as exc:
+            raise _normalize_remote_exception(exc) from exc
 
+        raw_issues = cast(list[dict[str, Any]], payload.get("issues", []))
         issues = []
-        for issue in cast(list[dict[str, Any]], payload.get("issues", [])):
+        for issue in raw_issues[: args.limit]:
             normalized = _extract_issue_fields(issue)
             issues.append(
                 JiraIssueSummary(
@@ -452,11 +490,20 @@ class SearchJiraTool(Tool[SearchJiraInput, SearchJiraOutput]):
             )
 
         context.log(f"Ran Jira search for JQL '{args.jql}'.")
-        return SearchJiraOutput(issues=issues)
+        return SearchJiraOutput(issues=issues, truncated=len(raw_issues) > args.limit)
 
 
 class ReadJiraIssueInput(BaseModel):
     issue_key: str
+    requested_fields: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_requested_fields(self) -> ReadJiraIssueInput:
+        if len(set(self.requested_fields)) != len(self.requested_fields):
+            raise ValueError("requested_fields must be unique.")
+        if any(field.strip() == "" for field in self.requested_fields):
+            raise ValueError("requested_fields must not contain empty entries.")
+        return self
 
 
 class ReadJiraIssueOutput(BaseModel):
@@ -466,7 +513,7 @@ class ReadJiraIssueOutput(BaseModel):
     status: str | None = None
     issue_type: str | None = None
     assignee: str | None = None
-    raw_fields: dict[str, Any] = Field(default_factory=dict)
+    requested_fields: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReadJiraIssueTool(Tool[ReadJiraIssueInput, ReadJiraIssueOutput]):
@@ -476,6 +523,7 @@ class ReadJiraIssueTool(Tool[ReadJiraIssueInput, ReadJiraIssueOutput]):
         tags=["atlassian", "jira", "read"],
         side_effects=SideEffectClass.EXTERNAL_READ,
         requires_network=True,
+        timeout_seconds=_REMOTE_TOOL_TIMEOUT_SECONDS,
         required_secrets=list(_JIRA_ENV_KEYS),
     )
     input_model = ReadJiraIssueInput
@@ -485,14 +533,22 @@ class ReadJiraIssueTool(Tool[ReadJiraIssueInput, ReadJiraIssueOutput]):
         self, context: ToolExecutionContext, args: ReadJiraIssueInput
     ) -> ReadJiraIssueOutput:
         client = context.services.require_jira().client
-        if hasattr(client, "issue"):
-            issue = client.issue(args.issue_key)
-        elif hasattr(client, "get_issue"):
-            issue = client.get_issue(args.issue_key)
-        else:
-            raise RuntimeError("Configured Jira client does not support issue reads.")
+        try:
+            if hasattr(client, "issue"):
+                issue = client.issue(args.issue_key)
+            elif hasattr(client, "get_issue"):
+                issue = client.get_issue(args.issue_key)
+            else:
+                raise RuntimeError(
+                    "Configured Jira client does not support issue reads."
+                )
+        except Exception as exc:
+            raise _normalize_remote_exception(exc) from exc
 
-        normalized = _extract_issue_fields(cast(dict[str, Any], issue))
+        normalized = _extract_issue_fields(
+            cast(dict[str, Any], issue),
+            requested_fields=args.requested_fields,
+        )
         context.log(f"Read Jira issue '{args.issue_key}'.")
         return ReadJiraIssueOutput(**normalized)
 
@@ -500,7 +556,7 @@ class ReadJiraIssueTool(Tool[ReadJiraIssueInput, ReadJiraIssueOutput]):
 class SearchBitbucketCodeInput(BaseModel):
     project_key: str
     query: str
-    limit: int = Field(default=20, ge=1)
+    limit: int = Field(default=20, ge=1, le=_REMOTE_COLLECTION_LIMIT)
 
 
 class BitbucketCodeMatch(BaseModel):
@@ -514,6 +570,7 @@ class SearchBitbucketCodeOutput(BaseModel):
     project_key: str
     query: str
     matches: list[BitbucketCodeMatch] = Field(default_factory=list)
+    truncated: bool = False
 
 
 class SearchBitbucketCodeTool(
@@ -525,6 +582,7 @@ class SearchBitbucketCodeTool(
         tags=["atlassian", "bitbucket", "search", "read"],
         side_effects=SideEffectClass.EXTERNAL_READ,
         requires_network=True,
+        timeout_seconds=_REMOTE_TOOL_TIMEOUT_SECONDS,
         required_secrets=list(_BITBUCKET_ENV_KEYS),
     )
     input_model = SearchBitbucketCodeInput
@@ -534,9 +592,13 @@ class SearchBitbucketCodeTool(
         self, context: ToolExecutionContext, args: SearchBitbucketCodeInput
     ) -> SearchBitbucketCodeOutput:
         client = context.services.require_bitbucket().client
-        payload = client.search_code(args.project_key, args.query, limit=args.limit)
+        try:
+            payload = client.search_code(args.project_key, args.query, limit=args.limit)
+        except Exception as exc:
+            raise _normalize_remote_exception(exc) from exc
+        raw_matches = _extract_collection(payload)
         matches = []
-        for item in _extract_collection(payload):
+        for item in raw_matches[: args.limit]:
             matches.append(
                 BitbucketCodeMatch(
                     repository_slug=cast(
@@ -571,6 +633,7 @@ class SearchBitbucketCodeTool(
             project_key=args.project_key,
             query=args.query,
             matches=matches,
+            truncated=len(raw_matches) > args.limit,
         )
 
 
@@ -596,6 +659,7 @@ class ReadBitbucketFileTool(Tool[ReadBitbucketFileInput, ReadBitbucketFileOutput
         tags=["atlassian", "bitbucket", "read", "file"],
         side_effects=SideEffectClass.EXTERNAL_READ,
         requires_network=True,
+        timeout_seconds=_REMOTE_TOOL_TIMEOUT_SECONDS,
         required_secrets=list(_BITBUCKET_ENV_KEYS),
     )
     input_model = ReadBitbucketFileInput
@@ -607,12 +671,15 @@ class ReadBitbucketFileTool(Tool[ReadBitbucketFileInput, ReadBitbucketFileOutput
         client = context.services.require_bitbucket().client
         tool_limits = _get_tool_limits(context)
         effective_ref = args.ref or "HEAD"
-        raw_content = client.get_content_of_file(
-            args.project_key,
-            args.repository_slug,
-            args.path,
-            at=effective_ref,
-        )
+        try:
+            raw_content = client.get_content_of_file(
+                args.project_key,
+                args.repository_slug,
+                args.path,
+                at=effective_ref,
+            )
+        except Exception as exc:
+            raise _normalize_remote_exception(exc) from exc
         content, file_size_bytes, error_message = _bitbucket_file_to_text(raw_content)
         requested_path = args.path
         resolved_path = (
@@ -666,6 +733,8 @@ class ReadBitbucketPullRequestInput(BaseModel):
     project_key: str
     repository_slug: str
     pull_request_id: int = Field(ge=1)
+    commit_limit: int = Field(default=20, ge=1, le=_REMOTE_COLLECTION_LIMIT)
+    change_limit: int = Field(default=20, ge=1, le=_REMOTE_COLLECTION_LIMIT)
 
 
 class ReadBitbucketPullRequestOutput(BaseModel):
@@ -680,7 +749,9 @@ class ReadBitbucketPullRequestOutput(BaseModel):
     target_branch: str | None = None
     web_url: str | None = None
     commits: list[BitbucketPullRequestCommit] = Field(default_factory=list)
+    commits_truncated: bool = False
     changed_files: list[BitbucketPullRequestChange] = Field(default_factory=list)
+    changed_files_truncated: bool = False
 
 
 class ReadBitbucketPullRequestTool(
@@ -692,6 +763,7 @@ class ReadBitbucketPullRequestTool(
         tags=["atlassian", "bitbucket", "read", "pull_request"],
         side_effects=SideEffectClass.EXTERNAL_READ,
         requires_network=True,
+        timeout_seconds=_REMOTE_TOOL_TIMEOUT_SECONDS,
         required_secrets=list(_BITBUCKET_ENV_KEYS),
     )
     input_model = ReadBitbucketPullRequestInput
@@ -701,21 +773,26 @@ class ReadBitbucketPullRequestTool(
         self, context: ToolExecutionContext, args: ReadBitbucketPullRequestInput
     ) -> ReadBitbucketPullRequestOutput:
         client = context.services.require_bitbucket().client
-        pull_request = client.get_pull_request(
-            args.project_key,
-            args.repository_slug,
-            args.pull_request_id,
-        )
-        commits_payload = client.get_pull_requests_commits(
-            args.project_key,
-            args.repository_slug,
-            args.pull_request_id,
-        )
-        changes_payload = client.get_pull_requests_changes(
-            args.project_key,
-            args.repository_slug,
-            args.pull_request_id,
-        )
+        try:
+            pull_request = client.get_pull_request(
+                args.project_key,
+                args.repository_slug,
+                args.pull_request_id,
+            )
+            commits_payload = client.get_pull_requests_commits(
+                args.project_key,
+                args.repository_slug,
+                args.pull_request_id,
+            )
+            changes_payload = client.get_pull_requests_changes(
+                args.project_key,
+                args.repository_slug,
+                args.pull_request_id,
+            )
+        except Exception as exc:
+            raise _normalize_remote_exception(exc) from exc
+        raw_commits = _extract_collection(commits_payload)
+        raw_changes = _extract_collection(changes_payload)
         commits = [
             BitbucketPullRequestCommit(
                 id=cast(str | None, _get_value(commit, "id")),
@@ -730,7 +807,7 @@ class ReadBitbucketPullRequestTool(
                     ),
                 ),
             )
-            for commit in _extract_collection(commits_payload)
+            for commit in raw_commits[: args.commit_limit]
         ]
         changed_files = [
             BitbucketPullRequestChange(
@@ -739,7 +816,7 @@ class ReadBitbucketPullRequestTool(
                 change_type=cast(str | None, _get_value(change, "type")),
                 executable=cast(bool | None, _get_value(change, "executable")),
             )
-            for change in _extract_collection(changes_payload)
+            for change in raw_changes[: args.change_limit]
         ]
         context.log(
             "Read Bitbucket pull request "
@@ -769,13 +846,15 @@ class ReadBitbucketPullRequestTool(
             ),
             web_url=_extract_first_link_href(pull_request),
             commits=commits,
+            commits_truncated=len(raw_commits) > args.commit_limit,
             changed_files=changed_files,
+            changed_files_truncated=len(raw_changes) > args.change_limit,
         )
 
 
 class SearchConfluenceInput(BaseModel):
     cql: str
-    limit: int = Field(default=20, ge=1)
+    limit: int = Field(default=20, ge=1, le=_REMOTE_COLLECTION_LIMIT)
 
 
 class ConfluenceSearchMatch(BaseModel):
@@ -790,6 +869,7 @@ class ConfluenceSearchMatch(BaseModel):
 class SearchConfluenceOutput(BaseModel):
     cql: str
     matches: list[ConfluenceSearchMatch] = Field(default_factory=list)
+    truncated: bool = False
 
 
 class SearchConfluenceTool(Tool[SearchConfluenceInput, SearchConfluenceOutput]):
@@ -799,6 +879,7 @@ class SearchConfluenceTool(Tool[SearchConfluenceInput, SearchConfluenceOutput]):
         tags=["atlassian", "confluence", "search", "read"],
         side_effects=SideEffectClass.EXTERNAL_READ,
         requires_network=True,
+        timeout_seconds=_REMOTE_TOOL_TIMEOUT_SECONDS,
         required_secrets=list(_CONFLUENCE_ENV_KEYS),
     )
     input_model = SearchConfluenceInput
@@ -809,9 +890,13 @@ class SearchConfluenceTool(Tool[SearchConfluenceInput, SearchConfluenceOutput]):
     ) -> SearchConfluenceOutput:
         client = context.services.require_confluence().client
         base_url = context.secrets.get_required("CONFLUENCE_BASE_URL")
-        payload = client.cql(args.cql, limit=args.limit, excerpt="highlight")
+        try:
+            payload = client.cql(args.cql, limit=args.limit, excerpt="highlight")
+        except Exception as exc:
+            raise _normalize_remote_exception(exc) from exc
+        raw_matches = _extract_collection(payload)
         matches = []
-        for item in _extract_collection(payload):
+        for item in raw_matches[: args.limit]:
             content = _get_value(item, "content", item)
             links = _get_value(content, "_links", _get_value(item, "_links", {}))
             matches.append(
@@ -842,58 +927,53 @@ class SearchConfluenceTool(Tool[SearchConfluenceInput, SearchConfluenceOutput]):
                 )
             )
         context.log(f"Ran Confluence search for CQL '{args.cql}'.")
-        return SearchConfluenceOutput(cql=args.cql, matches=matches)
+        return SearchConfluenceOutput(
+            cql=args.cql,
+            matches=matches,
+            truncated=len(raw_matches) > args.limit,
+        )
 
 
-class ReadConfluenceContentInput(BaseModel):
+class ReadConfluencePageInput(BaseModel):
     page_id: str
-    attachment_id: str | None = None
-    attachment_filename: str | None = None
     start_char: int | None = Field(default=None, ge=0)
     end_char: int | None = Field(default=None, ge=0)
 
-    @model_validator(mode="after")
-    def validate_attachment_selector(self) -> ReadConfluenceContentInput:
-        if self.attachment_id is not None and self.attachment_filename is not None:
-            raise ValueError(
-                "provide at most one of attachment_id or attachment_filename"
-            )
-        return self
 
-
-class ReadConfluenceContentOutput(FileReadResult):
+class ReadConfluencePageOutput(FileReadResult):
     page_id: str
-    mode: str
     title: str | None = None
     space_key: str | None = None
     web_url: str | None = None
-    attachment_id: str | None = None
-    attachment_filename: str | None = None
     representation: str | None = None
 
 
-class ReadConfluenceContentTool(
-    Tool[ReadConfluenceContentInput, ReadConfluenceContentOutput]
-):
+class ReadConfluencePageTool(Tool[ReadConfluencePageInput, ReadConfluencePageOutput]):
     spec = ToolSpec(
-        name="read_confluence_content",
-        description="Read a Confluence page or one attachment from a page.",
-        tags=["atlassian", "confluence", "read"],
+        name="read_confluence_page",
+        description="Read one Confluence page body.",
+        tags=["atlassian", "confluence", "read", "page"],
         side_effects=SideEffectClass.EXTERNAL_READ,
         requires_network=True,
-        requires_filesystem=True,
+        timeout_seconds=_REMOTE_TOOL_TIMEOUT_SECONDS,
         required_secrets=list(_CONFLUENCE_ENV_KEYS),
     )
-    input_model = ReadConfluenceContentInput
-    output_model = ReadConfluenceContentOutput
+    input_model = ReadConfluencePageInput
+    output_model = ReadConfluencePageOutput
 
     def _invoke_impl(
-        self, context: ToolExecutionContext, args: ReadConfluenceContentInput
-    ) -> ReadConfluenceContentOutput:
+        self, context: ToolExecutionContext, args: ReadConfluencePageInput
+    ) -> ReadConfluencePageOutput:
         client = context.services.require_confluence().client
         base_url = context.secrets.get_required("CONFLUENCE_BASE_URL")
         tool_limits = _get_tool_limits(context)
-        page = client.get_page_by_id(args.page_id, expand="body.storage,space,_links")
+        try:
+            page = client.get_page_by_id(
+                args.page_id,
+                expand="body.storage,space,_links",
+            )
+        except Exception as exc:
+            raise _normalize_remote_exception(exc) from exc
         page_links = _get_value(page, "_links", {})
         page_web_url = _absolute_url(
             base_url,
@@ -904,51 +984,113 @@ class ReadConfluenceContentTool(
         )
         page_title = cast(str | None, _get_value(page, "title"))
         space_key = cast(str | None, _get_value(_get_value(page, "space", {}), "key"))
+        body_content, representation, body_error = _confluence_page_body(page)
+        result = _build_text_read_result(
+            requested_path=f"page:{args.page_id}",
+            resolved_path=page_web_url or f"confluence:page:{args.page_id}",
+            tool_limits=tool_limits,
+            content=body_content if body_error is None else None,
+            file_size_bytes=len(body_content.encode()),
+            status="ok" if body_error is None else "error",
+            read_kind="text",
+            error_message=body_error,
+            start_char=args.start_char,
+            end_char=args.end_char,
+        )
+        page_source_id = page_web_url or f"confluence:page:{args.page_id}"
+        context.log(f"Read Confluence page '{args.page_id}'.")
+        context.add_artifact(page_source_id)
+        _append_remote_source_provenance(
+            context,
+            source_kind="confluence_page",
+            source_id=page_source_id,
+        )
+        return ReadConfluencePageOutput(
+            page_id=args.page_id,
+            title=page_title,
+            space_key=space_key,
+            web_url=page_web_url,
+            representation=representation,
+            **result.model_dump(mode="json"),
+        )
 
-        if args.attachment_id is None and args.attachment_filename is None:
-            body_content, representation, body_error = _confluence_page_body(page)
-            result = _build_text_read_result(
-                requested_path=f"page:{args.page_id}",
-                resolved_path=page_web_url or f"confluence:page:{args.page_id}",
-                tool_limits=tool_limits,
-                content=body_content if body_error is None else None,
-                file_size_bytes=len(body_content.encode()),
-                status="ok" if body_error is None else "error",
-                read_kind="text",
-                error_message=body_error,
-                start_char=args.start_char,
-                end_char=args.end_char,
+
+class ReadConfluenceAttachmentInput(BaseModel):
+    page_id: str
+    attachment_id: str | None = None
+    attachment_filename: str | None = None
+    start_char: int | None = Field(default=None, ge=0)
+    end_char: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_attachment_selector(self) -> ReadConfluenceAttachmentInput:
+        if self.attachment_id is not None and self.attachment_filename is not None:
+            raise ValueError(
+                "provide at most one of attachment_id or attachment_filename"
             )
-            page_source_id = page_web_url or f"confluence:page:{args.page_id}"
-            context.log(f"Read Confluence page '{args.page_id}'.")
-            context.add_artifact(page_source_id)
-            _append_remote_source_provenance(
-                context,
-                source_kind="confluence_page",
-                source_id=page_source_id,
-            )
-            return ReadConfluenceContentOutput(
+        if self.attachment_id is None and self.attachment_filename is None:
+            raise ValueError("provide one of attachment_id or attachment_filename")
+        return self
+
+
+class ReadConfluenceAttachmentOutput(FileReadResult):
+    page_id: str
+    title: str | None = None
+    space_key: str | None = None
+    web_url: str | None = None
+    attachment_id: str | None = None
+    attachment_filename: str | None = None
+
+
+class ReadConfluenceAttachmentTool(
+    Tool[ReadConfluenceAttachmentInput, ReadConfluenceAttachmentOutput]
+):
+    spec = ToolSpec(
+        name="read_confluence_attachment",
+        description="Read one Confluence attachment from a page.",
+        tags=["atlassian", "confluence", "read", "attachment"],
+        side_effects=SideEffectClass.LOCAL_WRITE,
+        requires_network=True,
+        requires_filesystem=True,
+        writes_internal_workspace_cache=True,
+        timeout_seconds=_REMOTE_TOOL_TIMEOUT_SECONDS,
+        required_secrets=list(_CONFLUENCE_ENV_KEYS),
+    )
+    input_model = ReadConfluenceAttachmentInput
+    output_model = ReadConfluenceAttachmentOutput
+
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: ReadConfluenceAttachmentInput
+    ) -> ReadConfluenceAttachmentOutput:
+        client = context.services.require_confluence().client
+        base_url = context.secrets.get_required("CONFLUENCE_BASE_URL")
+        tool_limits = _get_tool_limits(context)
+        try:
+            page = client.get_page_by_id(args.page_id, expand="space,_links")
+            attachment = _resolve_confluence_attachment(
+                client,
                 page_id=args.page_id,
-                mode="page",
-                title=page_title,
-                space_key=space_key,
-                web_url=page_web_url,
-                representation=representation,
-                **result.model_dump(mode="json"),
+                attachment_id=args.attachment_id,
+                attachment_filename=args.attachment_filename,
             )
-
-        attachment = _resolve_confluence_attachment(
-            client,
-            page_id=args.page_id,
-            attachment_id=args.attachment_id,
-            attachment_filename=args.attachment_filename,
+            cached_path = _ensure_cached_confluence_attachment(
+                client,
+                base_url=base_url,
+                page_id=args.page_id,
+                attachment=attachment,
+            )
+        except Exception as exc:
+            raise _normalize_remote_exception(exc) from exc
+        page_links = _get_value(page, "_links", {})
+        page_web_url = _absolute_url(
+            base_url,
+            cast(
+                str | None,
+                _get_value(page_links, "webui", _get_value(page_links, "tinyui")),
+            ),
         )
-        cached_path = _ensure_cached_confluence_attachment(
-            client,
-            base_url=base_url,
-            page_id=args.page_id,
-            attachment=attachment,
-        )
+        page_title = cast(str | None, _get_value(page, "title"))
+        space_key = cast(str | None, _get_value(_get_value(page, "space", {}), "key"))
         attachment_title = cast(str | None, _get_value(attachment, "title"))
         attachment_links = _get_value(attachment, "_links", {})
         attachment_url = _absolute_url(
@@ -979,15 +1121,13 @@ class ReadConfluenceContentTool(
             source_kind="confluence_attachment",
             source_id=attachment_source_id,
         )
-        return ReadConfluenceContentOutput(
+        return ReadConfluenceAttachmentOutput(
             page_id=args.page_id,
-            mode="attachment",
             title=page_title,
             space_key=space_key,
             web_url=page_web_url,
             attachment_id=cast(str | None, _get_value(attachment, "id")),
             attachment_filename=attachment_title,
-            representation=None,
             **result.model_dump(mode="json"),
         )
 
@@ -1000,4 +1140,5 @@ def register_atlassian_tools(registry: ToolRegistry) -> None:
     registry.register(ReadBitbucketFileTool())
     registry.register(ReadBitbucketPullRequestTool())
     registry.register(SearchConfluenceTool())
-    registry.register(ReadConfluenceContentTool())
+    registry.register(ReadConfluencePageTool())
+    registry.register(ReadConfluenceAttachmentTool())

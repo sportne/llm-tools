@@ -173,18 +173,25 @@ behavior, budget enforcement timing, and approval resume privilege boundaries.
 
 #### Status Update (2026-04-19 follow-up)
 
-- `Open`: `stop_reason=completed` can still be persisted while blocked or other
-  non-terminal tasks remain. This needs planner/applier contract changes rather
-  than a replay or persistence-only patch.
-- `Open`: non-approval turns still have at-least-once semantics across
-  crash-before-save recovery. Addressing this requires durable checkpointing or
-  explicit idempotency controls for side effects.
-- `Open`: `max_tool_invocations` is still enforced after a turn completes, so a
-  single turn can overshoot the configured limit.
+- `Addressed`: empty task selections with remaining non-terminal work now stop
+  as `no_progress` instead of `completed`, and persisted turns record stable
+  no-progress signals for blocked-only, repeated-outcome, and exhausted-retry
+  cases.
+- `Addressed`: every turn now checkpoints an incomplete tail turn before
+  provider or tool execution begins, and resume classifies incomplete
+  non-approval turns as `interrupted` rather than silently replaying them.
+- `Addressed`: interrupted non-approval turns now fail closed by default on
+  resume and require an explicit operator opt-in before the incomplete tail turn
+  is dropped and replayed.
+- `Addressed`: `max_tool_invocations` is now enforced before dispatch for both
+  fresh turns and approval resumes, so an over-budget parsed response does not
+  execute any invocation from that turn.
 - `Deferred`: approval-resume environment narrowing is still pending because the
   repository does not yet define a reviewed allowlist or stable approved-env
   snapshot format.
-- `Open`: executor-level no-progress detection is still not implemented.
+- `Addressed`: executor-level no-progress detection is now implemented and
+  covered by negative regressions for blocked-only, repeated-outcome, and
+  exhausted-retry loops.
 
 ### 2026-04-19: `harness_api` persistence, resume, replay, and summary review
 
@@ -311,14 +318,19 @@ invariants.
   replay, inspection, and Streamlit research detail rendering.
 - `Addressed`: architecture guards now detect additional runtime-bypass shapes,
   including indirect `.invoke()` and `.ainvoke()` access patterns.
-- `Open`: higher-layer end-to-end brokered-execution coverage is still
-  incomplete; lower-layer guarantees remain well unit-tested, but the broader
-  provenance-continuity integration checks were not completed in this pass.
+- `Addressed`: direct assistant turns and harness-backed research sessions now
+  have end-to-end brokered-execution regressions that prove runtime-mediated
+  tool execution, provenance continuity into protection review, and purge-safe
+  replay, inspection, and Streamlit detail rendering.
 
 #### Execution Notes
 
 This assessment was a static review of code, tests, and documentation. `pytest`
 could not be run in the reviewed environment because `pytest` was unavailable.
+
+Follow-up validation for the addressed regressions was later run with the shared
+project virtual environment, including app, harness, and architecture-adjacent
+coverage for brokered execution and purge propagation.
 
 ### 2026-04-19: GitLab and Atlassian built-in tool families
 
@@ -385,17 +397,20 @@ Related backlog: Phase 2 in `SEC_TASKS.md`
 
 #### Status Update (2026-04-19 follow-up)
 
-- `Open`: this tool-family review was not remediated in the harness/workflow
-  hardening pass.
-- `Open`: the Confluence attachment-cache side-effect declaration mismatch still
-  needs either a spec change or a behavioral split between page reads and
-  attachment reads.
-- `Open`: pagination and output-bound inconsistencies still require per-tool
-  response-shaping changes and matching negative coverage.
-- `Open`: Jira `raw_fields` exposure still needs an allowlisted default view and
-  explicit opt-in for broader field access.
-- `Open`: per-tool network timeout and retry policy decisions still need to be
-  implemented at the remote tool layer.
-- `Why not addressed here`: these fixes change shipped remote tool contracts,
-  default payload shapes, and connector behavior, so they need a dedicated tool
-  remediation pass rather than a review-log-only update.
+- `Addressed`: Confluence reads are now split between `read_confluence_page`
+  and `read_confluence_attachment`, and attachment fetches declare their cache
+  write side effects through `LOCAL_WRITE`, filesystem requirements, and
+  `writes_internal_workspace_cache=True`.
+- `Addressed`: Jira issue reads now use an allowlisted default view and expose
+  broader field access only through explicit `requested_fields` input and
+  output.
+- `Addressed`: GitLab, Jira, Bitbucket, and Confluence collection-style reads
+  now enforce hard bounds, surface truncation metadata, and bound MR/PR commit
+  and change collections with explicit per-request limits.
+- `Addressed`: Atlassian and GitLab remote tool specs now set per-tool network
+  timeouts, and transient remote failures are surfaced as retryable while
+  permanent client and auth failures remain non-retryable.
+
+Follow-up validation for these remediations was later run with the shared
+project virtual environment, including the GitLab, Atlassian, runtime
+integration, and assistant-config example suites.

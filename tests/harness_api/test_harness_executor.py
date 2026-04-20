@@ -28,6 +28,8 @@ from llm_tools.harness_api import (
     TurnDecisionAction,
     create_root_task,
 )
+from llm_tools.harness_api.models import PendingApprovalRecord
+from llm_tools.harness_api.resume import ResumedHarnessSession
 from llm_tools.llm_adapters import ParsedModelResponse
 from llm_tools.tool_api import (
     ErrorCode,
@@ -689,8 +691,31 @@ def test_harness_executor_retries_persistence_conflicts_without_rerunning_turn(
 
     result = executor.run(_state())
 
-    assert result.snapshot.revision == "4"
-    assert driver.run_calls == 1
+    assert result.snapshot.revision == "5"
+
+
+def test_harness_executor_sync_provider_retry_exhaustion_after_retry(
+    tmp_path: Path,
+    _workflow_executor: WorkflowExecutor,
+) -> None:
+    driver = _StaticDriver(
+        workspace=tmp_path,
+        payloads=[RuntimeError("boom"), RuntimeError("boom")],
+    )
+    executor = HarnessExecutor(
+        store=InMemoryHarnessStateStore(),
+        workflow_executor=_workflow_executor,
+        driver=driver,
+        applier=_RootTaskApplier(),
+        retry_policy=HarnessRetryPolicy(max_provider_retries=1),
+    )
+
+    result = executor.run(_state())
+
+    assert result.snapshot.state.session.stop_reason is HarnessStopReason.NO_PROGRESS
+    assert result.snapshot.state.tasks[0].retry_count == 1
+    assert result.snapshot.state.turns[-1].no_progress_signals
+    assert driver.run_calls == 2
 
 
 def test_harness_executor_run_async_smoke(
@@ -804,8 +829,29 @@ def test_harness_executor_marks_completed_when_no_tasks_selected(
 
     result = executor.run(_state())
 
-    assert result.snapshot.state.session.stop_reason is HarnessStopReason.COMPLETED
-    assert result.snapshot.state.turns == []
+    assert result.snapshot.state.session.stop_reason is HarnessStopReason.NO_PROGRESS
+    assert result.snapshot.state.turns[-1].decision is not None
+    assert (
+        result.snapshot.state.turns[-1].decision.stop_reason
+        is HarnessStopReason.NO_PROGRESS
+    )
+
+
+def test_harness_executor_run_async_marks_no_progress_when_no_tasks_selected(
+    tmp_path: Path,
+    _workflow_executor: WorkflowExecutor,
+) -> None:
+    executor = HarnessExecutor(
+        store=InMemoryHarnessStateStore(),
+        workflow_executor=_workflow_executor,
+        driver=_EmptyDriver(workspace=tmp_path),
+        applier=_RootTaskApplier(),
+    )
+
+    result = asyncio.run(executor.run_async(_state()))
+
+    assert result.snapshot.state.session.stop_reason is HarnessStopReason.NO_PROGRESS
+    assert result.snapshot.state.turns[-1].no_progress_signals
 
 
 def test_harness_executor_respects_elapsed_budget_limit(
@@ -956,6 +1002,178 @@ def test_harness_executor_resume_async_waiting_approval_roundtrip(
     assert resumed.snapshot.state.session.stop_reason is HarnessStopReason.COMPLETED
 
 
+def test_harness_executor_resume_budget_gate_blocks_approval_resume(
+    tmp_path: Path,
+    _workflow_executor: WorkflowExecutor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed_response = ParsedModelResponse(
+        invocations=[
+            {"tool_name": "list_directory", "arguments": {"path": "."}},
+            {"tool_name": "harness_work", "arguments": {"value": "ok"}},
+        ]
+    )
+    approval_request = ApprovalRequest(
+        approval_id="approval-budget-1",
+        invocation_index=1,
+        request=parsed_response.invocations[0],
+        tool_name="list_directory",
+        tool_version="0.1.0",
+        policy_reason="approval required",
+        requested_at="2026-01-01T00:00:00Z",
+        expires_at="2026-01-01T00:05:00Z",
+    )
+    pending_approval = PendingApprovalRecord(
+        approval_request=approval_request,
+        parsed_response=parsed_response,
+        base_context=ToolContext(invocation_id="approval-budget"),
+        pending_index=1,
+    )
+    resume_calls = {"count": 0}
+    monkeypatch.setattr(
+        _workflow_executor,
+        "resume_persisted_approval",
+        lambda *args, **kwargs: resume_calls.update(count=resume_calls["count"] + 1),
+    )
+
+    store = InMemoryHarnessStateStore()
+    executor = HarnessExecutor(
+        store=store,
+        workflow_executor=_workflow_executor,
+        driver=_StaticDriver(workspace=tmp_path),
+        applier=_RootTaskApplier(),
+    )
+    waiting_state = _prior_turn_state(max_tool_invocations=2).model_copy(
+        update={
+            "session": _prior_turn_state(max_tool_invocations=2).session.model_copy(
+                update={"current_turn_index": 2}
+            ),
+            "turns": [
+                *_prior_turn_state(max_tool_invocations=2).turns,
+                HarnessTurn(
+                    turn_index=2,
+                    started_at="2026-01-01T00:01:00Z",
+                    selected_task_ids=["task-1"],
+                    workflow_result=WorkflowTurnResult(
+                        parsed_response=parsed_response,
+                        outcomes=[
+                            WorkflowInvocationOutcome(
+                                invocation_index=1,
+                                request=parsed_response.invocations[0],
+                                status=WorkflowInvocationStatus.APPROVAL_REQUESTED,
+                                approval_request=approval_request,
+                            )
+                        ],
+                    ),
+                ),
+            ],
+            "pending_approvals": [pending_approval],
+        },
+        deep=True,
+    )
+    waiting = store.save_session(waiting_state)
+
+    resumed = executor.resume(
+        waiting.session_id,
+        approval_resolution=ApprovalResolution.APPROVE,
+        now=datetime(2026, 1, 1, 0, 2, tzinfo=UTC),
+    )
+
+    assert resume_calls["count"] == 0
+    assert (
+        resumed.snapshot.state.session.stop_reason is HarnessStopReason.BUDGET_EXHAUSTED
+    )
+
+
+def test_harness_executor_resume_async_budget_gate_blocks_approval_resume(
+    tmp_path: Path,
+    _workflow_executor: WorkflowExecutor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed_response = ParsedModelResponse(
+        invocations=[
+            {"tool_name": "list_directory", "arguments": {"path": "."}},
+            {"tool_name": "harness_work", "arguments": {"value": "ok"}},
+        ]
+    )
+    approval_request = ApprovalRequest(
+        approval_id="approval-budget-async-1",
+        invocation_index=1,
+        request=parsed_response.invocations[0],
+        tool_name="list_directory",
+        tool_version="0.1.0",
+        policy_reason="approval required",
+        requested_at="2026-01-01T00:00:00Z",
+        expires_at="2026-01-01T00:05:00Z",
+    )
+    pending_approval = PendingApprovalRecord(
+        approval_request=approval_request,
+        parsed_response=parsed_response,
+        base_context=ToolContext(invocation_id="approval-budget-async"),
+        pending_index=1,
+    )
+    resume_calls = {"count": 0}
+
+    async def _resume_async(*args, **kwargs):
+        del args, kwargs
+        resume_calls["count"] += 1
+        return _success_workflow_result()
+
+    monkeypatch.setattr(
+        _workflow_executor, "resume_persisted_approval_async", _resume_async
+    )
+
+    store = InMemoryHarnessStateStore()
+    executor = HarnessExecutor(
+        store=store,
+        workflow_executor=_workflow_executor,
+        driver=_StaticDriver(workspace=tmp_path),
+        applier=_RootTaskApplier(),
+    )
+    waiting_state = _prior_turn_state(max_tool_invocations=2).model_copy(
+        update={
+            "session": _prior_turn_state(max_tool_invocations=2).session.model_copy(
+                update={"current_turn_index": 2}
+            ),
+            "turns": [
+                *_prior_turn_state(max_tool_invocations=2).turns,
+                HarnessTurn(
+                    turn_index=2,
+                    started_at="2026-01-01T00:01:00Z",
+                    selected_task_ids=["task-1"],
+                    workflow_result=WorkflowTurnResult(
+                        parsed_response=parsed_response,
+                        outcomes=[
+                            WorkflowInvocationOutcome(
+                                invocation_index=1,
+                                request=parsed_response.invocations[0],
+                                status=WorkflowInvocationStatus.APPROVAL_REQUESTED,
+                                approval_request=approval_request,
+                            )
+                        ],
+                    ),
+                ),
+            ],
+            "pending_approvals": [pending_approval],
+        },
+        deep=True,
+    )
+    waiting = store.save_session(waiting_state)
+
+    resumed = asyncio.run(
+        executor.resume_async(
+            waiting.session_id,
+            approval_resolution=ApprovalResolution.APPROVE,
+            now=datetime(2026, 1, 1, 0, 2, tzinfo=UTC),
+        )
+    )
+
+    assert resume_calls["count"] == 0
+    assert (
+        resumed.snapshot.state.session.stop_reason is HarnessStopReason.BUDGET_EXHAUSTED
+    )
+
+
 def test_harness_executor_resume_async_requires_approval_resolution(
     tmp_path: Path,
     _workflow_executor: WorkflowExecutor,
@@ -1046,9 +1264,226 @@ def test_harness_executor_async_provider_retry_exhaustion(
 
     result = asyncio.run(executor.run_async(_state()))
 
-    assert result.snapshot.state.session.stop_reason is HarnessStopReason.ERROR
+    assert result.snapshot.state.session.stop_reason is HarnessStopReason.NO_PROGRESS
     assert "Provider retry budget exhausted" in (
         result.snapshot.state.tasks[0].status_summary or ""
+    )
+
+
+def test_harness_executor_resume_surfaces_interrupted_turn_until_replay_allowed(
+    tmp_path: Path,
+    _workflow_executor: WorkflowExecutor,
+) -> None:
+    executor = HarnessExecutor(
+        store=InMemoryHarnessStateStore(),
+        workflow_executor=_workflow_executor,
+        driver=_StaticDriver(
+            workspace=tmp_path,
+            payloads=[
+                RuntimeError("boom"),
+                ParsedModelResponse(
+                    invocations=[
+                        {"tool_name": "harness_work", "arguments": {"value": "ok"}}
+                    ]
+                ),
+            ],
+        ),
+        applier=_RootTaskApplier(),
+        retry_policy=HarnessRetryPolicy(max_provider_retries=1),
+    )
+    snapshot = executor.run(
+        _state(),
+        now=datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+    ).snapshot
+    interrupted = snapshot.model_copy(
+        update={
+            "state": snapshot.state.model_copy(
+                update={
+                    "session": snapshot.state.session.model_copy(
+                        update={"ended_at": None, "stop_reason": None}
+                    ),
+                    "turns": [
+                        snapshot.state.turns[-1].model_copy(
+                            update={"decision": None, "ended_at": None}
+                        )
+                    ],
+                },
+                deep=True,
+            )
+        },
+        deep=True,
+    )
+    executor._store.save_session(  # type: ignore[attr-defined]
+        interrupted.state,
+        expected_revision=snapshot.revision,
+        artifacts=interrupted.artifacts,
+    )
+
+    resumed = executor.resume(interrupted.session_id)
+
+    assert resumed.resumed.disposition is ResumeDisposition.INTERRUPTED
+
+    replayed = executor.resume(
+        interrupted.session_id,
+        allow_interrupted_turn_replay=True,
+    )
+
+    assert replayed.snapshot.state.session.stop_reason is HarnessStopReason.COMPLETED
+
+
+def test_harness_executor_drive_replays_interrupted_tail_when_allowed(
+    tmp_path: Path,
+    _workflow_executor: WorkflowExecutor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryHarnessStateStore()
+    executor = HarnessExecutor(
+        store=store,
+        workflow_executor=_workflow_executor,
+        driver=_StaticDriver(workspace=tmp_path),
+        applier=_RootTaskApplier(),
+    )
+    snapshot = store.save_session(_state())
+    resumed_states = iter(
+        [
+            ResumeDisposition.INTERRUPTED,
+            ResumeDisposition.RUNNABLE,
+            ResumeDisposition.TERMINAL,
+        ]
+    )
+    drop_calls = {"count": 0}
+    run_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        "llm_tools.harness_api.executor.resume_session",
+        lambda snapshot, now=None: ResumedHarnessSession(
+            snapshot=snapshot,
+            disposition=next(resumed_states),
+        ),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_drop_interrupted_tail",
+        lambda *, snapshot: (
+            drop_calls.update(count=drop_calls["count"] + 1) or snapshot
+        ),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_run_one_turn",
+        lambda *, snapshot, now: (
+            run_calls.update(count=run_calls["count"] + 1) or (snapshot, False)
+        ),
+    )
+
+    result = executor._drive(
+        snapshot=snapshot,
+        approval_resolution=None,
+        allow_interrupted_turn_replay=True,
+        now=datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+    )
+
+    assert result.snapshot.session_id == snapshot.session_id
+    assert drop_calls["count"] == 1
+    assert run_calls["count"] == 1
+
+
+def test_harness_executor_drive_async_replays_interrupted_tail_when_allowed(
+    tmp_path: Path,
+    _workflow_executor: WorkflowExecutor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryHarnessStateStore()
+    executor = HarnessExecutor(
+        store=store,
+        workflow_executor=_workflow_executor,
+        driver=_StaticDriver(workspace=tmp_path),
+        applier=_RootTaskApplier(),
+    )
+    snapshot = store.save_session(_state())
+    resumed_states = iter(
+        [
+            ResumeDisposition.INTERRUPTED,
+            ResumeDisposition.RUNNABLE,
+            ResumeDisposition.TERMINAL,
+        ]
+    )
+    drop_calls = {"count": 0}
+    run_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        "llm_tools.harness_api.executor.resume_session",
+        lambda snapshot, now=None: ResumedHarnessSession(
+            snapshot=snapshot,
+            disposition=next(resumed_states),
+        ),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_drop_interrupted_tail",
+        lambda *, snapshot: (
+            drop_calls.update(count=drop_calls["count"] + 1) or snapshot
+        ),
+    )
+
+    async def _run_one_turn_async(*, snapshot, now):
+        del now
+        run_calls["count"] += 1
+        return snapshot, False
+
+    monkeypatch.setattr(executor, "_run_one_turn_async", _run_one_turn_async)
+
+    result = asyncio.run(
+        executor._drive_async(
+            snapshot=snapshot,
+            approval_resolution=None,
+            allow_interrupted_turn_replay=True,
+            now=datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+        )
+    )
+
+    assert result.snapshot.session_id == snapshot.session_id
+    assert drop_calls["count"] == 1
+    assert run_calls["count"] == 1
+
+
+def test_harness_executor_pre_dispatch_budget_gate_stops_before_execution(
+    tmp_path: Path,
+    _workflow_executor: WorkflowExecutor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executed = {"count": 0}
+
+    def _execute(
+        parsed_response: ParsedModelResponse, context: ToolContext
+    ) -> WorkflowTurnResult:
+        del parsed_response, context
+        executed["count"] += 1
+        return _success_workflow_result()
+
+    monkeypatch.setattr(_workflow_executor, "execute_parsed_response", _execute)
+    executor = HarnessExecutor(
+        store=InMemoryHarnessStateStore(),
+        workflow_executor=_workflow_executor,
+        driver=_StaticDriver(
+            workspace=tmp_path,
+            payloads=[
+                ParsedModelResponse(
+                    invocations=[
+                        {"tool_name": "harness_work", "arguments": {"value": "1"}},
+                        {"tool_name": "harness_work", "arguments": {"value": "2"}},
+                    ]
+                )
+            ],
+        ),
+        applier=_RootTaskApplier(),
+    )
+
+    result = executor.run(_prior_turn_state(max_tool_invocations=2))
+
+    assert executed["count"] == 0
+    assert (
+        result.snapshot.state.session.stop_reason is HarnessStopReason.BUDGET_EXHAUSTED
     )
 
 
@@ -1221,7 +1656,7 @@ def test_harness_executor_helper_methods_cover_elapsed_budget_and_retryable_path
         decision=TurnDecision(action=TurnDecisionAction.CONTINUE),
         ended_at="2026-01-01T00:00:01Z",
     )
-    base_state = _state(max_turns=10)
+    base_state = _state(max_turns=10, max_tool_invocations=1)
     state = base_state.model_copy(
         update={
             "session": base_state.session.model_copy(update={"current_turn_index": 1}),
@@ -1259,4 +1694,96 @@ def test_harness_executor_helper_methods_cover_elapsed_budget_and_retryable_path
             now=executor._parse_timestamp("2026-01-01T00:00:02Z"),
         )
         is HarnessStopReason.BUDGET_EXHAUSTED
+    )
+
+    approval_request = ApprovalRequest(
+        approval_id="approval-helper-1",
+        invocation_index=2,
+        request={"tool_name": "harness_work", "arguments": {"value": "ok"}},
+        tool_name="harness_work",
+        tool_version="0.1.0",
+        policy_reason="approval required",
+        requested_at="2026-01-01T00:00:00Z",
+        expires_at="2026-01-01T00:05:00Z",
+    )
+    pending_approval = PendingApprovalRecord(
+        approval_request=approval_request,
+        parsed_response=ParsedModelResponse(
+            invocations=[
+                {"tool_name": "harness_work", "arguments": {"value": "1"}},
+                {"tool_name": "harness_work", "arguments": {"value": "2"}},
+            ]
+        ),
+        base_context=ToolContext(invocation_id="approval-helper"),
+        pending_index=2,
+    )
+
+    assert (
+        executor._resume_would_exceed_budget(
+            state=state, pending_approval=pending_approval
+        )
+        is True
+    )
+    assert (
+        executor._exceeds_tool_invocation_budget(state, _success_workflow_result())
+        is True
+    )
+    assert (
+        executor._empty_selection_signals(
+            state=_state(),
+            turn_index=1,
+            now=executor._parse_timestamp("2026-01-01T00:00:01Z"),
+        )[0].summary
+        == "Planner found no actionable tasks while non-terminal work remains."
+    )
+    blocked_state = _state().model_copy(
+        update={
+            "tasks": [
+                _state()
+                .tasks[0]
+                .model_copy(update={"status": TaskLifecycleStatus.BLOCKED})
+            ]
+        },
+        deep=True,
+    )
+    assert (
+        executor._empty_selection_signals(
+            state=blocked_state,
+            turn_index=1,
+            now=executor._parse_timestamp("2026-01-01T00:00:01Z"),
+        )[0].task_id
+        == "task-1"
+    )
+    assert (
+        len(
+            executor._retry_exhaustion_signals(
+                state=_state(),
+                task_ids=["task-1", "missing"],
+                turn_index=1,
+                now=executor._parse_timestamp("2026-01-01T00:00:01Z"),
+            )
+        )
+        == 1
+    )
+    assert (
+        executor._post_turn_no_progress_signals(
+            previous_state=state,
+            updated_state=state.model_copy(
+                update={
+                    "tasks": [
+                        state.tasks[0].model_copy(
+                            update={"status": TaskLifecycleStatus.COMPLETED}
+                        )
+                    ]
+                },
+                deep=True,
+            ),
+            turn=executed_turn,
+            decision=TurnDecision(
+                action=TurnDecisionAction.CONTINUE,
+                selected_task_ids=["task-1"],
+            ),
+            now=executor._parse_timestamp("2026-01-01T00:00:02Z"),
+        )
+        == []
     )

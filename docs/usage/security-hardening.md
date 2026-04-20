@@ -98,3 +98,32 @@ environment state, or other unredacted payloads by default.
 Malformed file-backed harness session records should be isolated as corruption
 outcomes so list and load flows can skip or surface them without trusting the
 damaged file's cached artifacts.
+
+Harness turns now checkpoint an incomplete tail record before provider or tool
+execution begins. Resume classifies those partial non-approval turns as
+`interrupted` and fails closed by default; callers must opt in before the tail
+turn is dropped and replayed. Empty task selections with remaining
+non-terminal work now stop as `no_progress`, and tool-invocation budgets are
+checked before dispatch so an over-budget parsed response does not partially
+execute.
+
+Protection-triggered purge is broader than final-answer replacement. Persisted
+tool-result payloads, logs, artifacts, and execution-record outputs are scrubbed
+from stored harness turns so replay, raw inspection payloads, and Streamlit
+research detail views do not re-render the protected material.
+
+## Remote Enterprise Tools
+
+Confluence reads are split intentionally:
+
+- `read_confluence_page` is a pure remote page read with no filesystem write.
+- `read_confluence_attachment` downloads attachment bytes into the internal
+  cache and therefore requires filesystem permission plus `LOCAL_WRITE`.
+
+Jira issue reads no longer expose the full remote `fields` map by default.
+Use `requested_fields` when a caller needs additional fields beyond the
+allowlisted summary view. GitLab, Jira, Bitbucket, and Confluence collection
+reads now apply hard limits and surface truncation metadata instead of
+returning unbounded result sets, and the shipped remote tool specs set
+explicit per-tool timeouts with retryability only for transient upstream
+failures.

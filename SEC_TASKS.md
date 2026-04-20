@@ -156,6 +156,10 @@ trust boundaries.
   safety updates are merged.
 - [x] Review log: GitLab and Atlassian tool-family security review documented
   in `SECURITY_REVIEWS.md` on 2026-04-19.
+- [x] Landed hardening: GitLab and Atlassian tool contracts now use explicit
+  Confluence page vs attachment reads, allowlisted Jira issue views, bounded
+  collection outputs with truncation metadata, and per-tool timeout and
+  retryability behavior.
 
 ### [~] Phase 3: Model mediation path (`llm_adapters`, `llm_providers`, `workflow_api`)
 
@@ -206,19 +210,19 @@ verification as a security-critical control plane.
 - [x] Medium: harness_api - minimize persisted trace payloads and adjacent
   derived observability artifacts so raw request arguments are not retained by
   default.
-- [ ] Medium: harness_api - prevent `completed` terminalization when the planner
+- [x] Medium: harness_api - prevent `completed` terminalization when the planner
   returns no actionable tasks but blocked or otherwise non-terminal tasks still
   exist.
-- [ ] Medium: harness_api - add durable checkpointing or idempotency safeguards
+- [x] Medium: harness_api - add durable checkpointing or idempotency safeguards
   so side-effectful work is not replayed after crash-before-save recovery.
-- [ ] Medium: harness_api - enforce `max_tool_invocations` before or during
+- [x] Medium: harness_api - enforce `max_tool_invocations` before or during
   dispatch so a single turn cannot overshoot the configured tool budget.
 - [-] Medium: harness_api - constrain approval resume environment rehydration to
   a reviewed allowlist or stable approved snapshot instead of the full current
   process environment.
 - [x] Low: harness_api - isolate malformed file-backed session artifacts into
   typed corruption handling so list/load flows skip or surface them cleanly.
-- [ ] Low: harness_api - implement executor-level no-progress detection and add
+- [x] Low: harness_api - implement executor-level no-progress detection and add
   negative tests for repeated non-progress loops and blocked-only sessions.
 
 ### [~] Phase 5: User-facing surfaces (`apps`)
@@ -255,7 +259,7 @@ Review artifact:
   secret-handling mistakes, and unsafe copy-paste defaults.
 - [x] Cross-check architecture tests and existing security-relevant tests
   against the actual threat model to identify blind spots.
-- [ ] Assess cross-layer invariants: lower layers must not import higher
+- [x] Assess cross-layer invariants: lower layers must not import higher
   layers, tools must stay runtime-mediated, approval semantics must stay
   consistent, and redaction and protection expectations must remain aligned end
   to end.

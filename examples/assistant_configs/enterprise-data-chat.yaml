@@ -30,7 +30,8 @@ policy:
     - search_jira
     - read_jira_issue
     - search_confluence
-    - read_confluence_content
+    - read_confluence_page
+    - read_confluence_attachment
     - search_bitbucket_code
     - read_bitbucket_file
     - read_bitbucket_pull_request

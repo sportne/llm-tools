@@ -41,9 +41,17 @@ from llm_tools.harness_api import (
     HarnessSessionInspectRequest,
     HarnessSessionRunRequest,
     HarnessSessionService,
+    HarnessStopReason,
+    HarnessTurn,
     InMemoryHarnessStateStore,
     ScriptedParsedResponseProvider,
 )
+from llm_tools.harness_api.models import (
+    TaskLifecycleStatus,
+    TurnDecision,
+    TurnDecisionAction,
+)
+from llm_tools.harness_api.tasks import complete_task, start_task
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import SideEffectClass, ToolContext
 from llm_tools.workflow_api import (
@@ -59,6 +67,9 @@ from llm_tools.workflow_api import (
     ChatWorkflowResultEvent,
     ChatWorkflowStatusEvent,
     ChatWorkflowTurnResult,
+    PromptProtectionDecision,
+    ProtectionAction,
+    ResponseProtectionDecision,
 )
 
 _MODULES = import_streamlit_assistant_modules()
@@ -75,6 +86,27 @@ class _FakeProvider:
     def run(self, **kwargs: object) -> ParsedModelResponse:
         del kwargs
         return self._responses.pop(0)
+
+
+class _RecordingProtectionController:
+    def __init__(
+        self,
+        *,
+        prompt_decision: PromptProtectionDecision,
+        response_decision: ResponseProtectionDecision,
+    ) -> None:
+        self.prompt_decision = prompt_decision
+        self.response_decision = response_decision
+        self.prompt_calls: list[dict[str, object]] = []
+        self.response_calls: list[dict[str, object]] = []
+
+    def assess_prompt(self, **kwargs) -> PromptProtectionDecision:
+        self.prompt_calls.append(dict(kwargs))
+        return self.prompt_decision
+
+    def review_response(self, **kwargs) -> ResponseProtectionDecision:
+        self.response_calls.append(dict(kwargs))
+        return self.response_decision
 
 
 class _FakeBlock:
@@ -597,6 +629,76 @@ def test_process_streamlit_assistant_turn_supports_direct_answers() -> None:
     assert outcome.session_state.turns
     assert outcome.transcript_entries[-1].final_response is not None
     assert outcome.transcript_entries[-1].final_response.answer == "Plain answer"
+
+
+def test_process_streamlit_assistant_turn_brokered_tool_provenance_reaches_protection_review(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    secret_text = "TOP SECRET TOKEN"  # noqa: S105
+    (tmp_path / "secret.txt").write_text(secret_text, encoding="utf-8")
+    protection_controller = _RecordingProtectionController(
+        prompt_decision=PromptProtectionDecision(action=ProtectionAction.ALLOW),
+        response_decision=ResponseProtectionDecision(
+            action=ProtectionAction.SANITIZE,
+            sanitized_payload={
+                "answer": "Safe replacement",
+                "citations": [],
+                "confidence": 0.4,
+                "uncertainty": [],
+                "missing_information": [],
+                "follow_up_suggestions": [],
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        _MODULES.app,
+        "build_protection_controller",
+        lambda **kwargs: protection_controller,
+    )
+
+    outcome = process_streamlit_assistant_turn(
+        root_path=tmp_path,
+        config=StreamlitAssistantConfig(),
+        runtime_config=_MODULES.models.StreamlitRuntimeConfig(
+            root_path=str(tmp_path),
+            enabled_tools=["read_file"],
+            allow_filesystem=True,
+        ),
+        provider=_FakeProvider(
+            [
+                ParsedModelResponse(
+                    invocations=[
+                        {"tool_name": "read_file", "arguments": {"path": "secret.txt"}}
+                    ]
+                ),
+                ParsedModelResponse(
+                    final_response={
+                        "answer": secret_text,
+                        "citations": [],
+                        "confidence": 0.9,
+                        "uncertainty": [],
+                        "missing_information": [],
+                        "follow_up_suggestions": [],
+                    }
+                ),
+            ]
+        ),
+        session_state=ChatSessionState(),
+        user_message="Read the secret file.",
+    )
+
+    turn = outcome.session_state.turns[-1]
+    assert turn.tool_results[0].metadata["execution_record"]["tool_name"] == "read_file"
+    assert (
+        protection_controller.response_calls[0]["provenance"]
+        .sources[0]
+        .metadata["path"]
+        == "secret.txt"
+    )
+    assert outcome.transcript_entries[-1].final_response is not None
+    assert outcome.transcript_entries[-1].final_response.answer == "Safe replacement"
+    assert secret_text not in outcome.transcript_entries[-1].text
 
 
 def test_research_controller_can_launch_list_and_stop_sessions() -> None:
@@ -1737,6 +1839,148 @@ def test_streamlit_assistant_research_detail_does_not_render_purged_secret(
     )
     assert sensitive_text not in rendered
     assert safe_message in rendered
+
+
+def test_streamlit_assistant_research_detail_brokered_execution_preserves_provenance_and_purge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    secret_text = "TOP SECRET TOKEN"  # noqa: S105
+    safe_message = "Safe replacement"
+    (tmp_path / "secret.txt").write_text(secret_text, encoding="utf-8")
+    protection_controller = _RecordingProtectionController(
+        prompt_decision=PromptProtectionDecision(action=ProtectionAction.ALLOW),
+        response_decision=ResponseProtectionDecision(
+            action=ProtectionAction.SANITIZE,
+            sanitized_payload=safe_message,
+            should_purge=True,
+        ),
+    )
+
+    class _ContinueUntilFinalResponseApplier:
+        def apply_turn(self, *, state, turn: HarnessTurn):
+            workflow_result = turn.workflow_result
+            assert workflow_result is not None
+            updated_state = state
+            for task_id in turn.selected_task_ids:
+                task = next(
+                    task for task in updated_state.tasks if task.task_id == task_id
+                )
+                if task.status is TaskLifecycleStatus.PENDING:
+                    updated_state = start_task(
+                        updated_state,
+                        task_id=task_id,
+                        started_at=turn.started_at,
+                    )
+
+            if workflow_result.parsed_response.final_response is None:
+                return updated_state, TurnDecision(
+                    action=TurnDecisionAction.CONTINUE,
+                    selected_task_ids=list(turn.selected_task_ids),
+                    summary="Continue researching.",
+                )
+
+            for task_id in turn.selected_task_ids:
+                task = next(
+                    task for task in updated_state.tasks if task.task_id == task_id
+                )
+                if task.status is TaskLifecycleStatus.IN_PROGRESS:
+                    updated_state = complete_task(
+                        updated_state,
+                        task_id=task_id,
+                        finished_at=turn.started_at,
+                    )
+            return updated_state, TurnDecision(
+                action=TurnDecisionAction.STOP,
+                selected_task_ids=list(turn.selected_task_ids),
+                stop_reason=HarnessStopReason.COMPLETED,
+                summary="Research complete.",
+            )
+
+    store = InMemoryHarnessStateStore()
+    _, workflow_executor = build_chat_executor()
+    service = HarnessSessionService(
+        store=store,
+        workflow_executor=workflow_executor,
+        provider=AssistantHarnessTurnProvider(
+            provider=_FakeProvider(
+                [
+                    ParsedModelResponse(
+                        invocations=[
+                            {
+                                "tool_name": "read_file",
+                                "arguments": {"path": "secret.txt"},
+                            }
+                        ]
+                    ),
+                    ParsedModelResponse(final_response=secret_text),
+                ]
+            ),
+            temperature=0.1,
+            system_prompt="research-system",
+            protection_controller=protection_controller,
+        ),
+        applier=_ContinueUntilFinalResponseApplier(),
+        workspace=str(tmp_path),
+    )
+    created = service.create_session(
+        HarnessSessionCreateRequest(
+            title="Brokered purge",
+            intent="Read and summarize protected research.",
+            budget_policy=BudgetPolicy(max_turns=4),
+            session_id="research-brokered-purge",
+        )
+    )
+    service.run_session(HarnessSessionRunRequest(session_id=created.session_id))
+    inspection = service.inspect_session(
+        HarnessSessionInspectRequest(
+            session_id=created.session_id,
+            include_replay=True,
+        )
+    )
+
+    assert (
+        protection_controller.response_calls[0]["provenance"]
+        .sources[0]
+        .metadata["path"]
+        == "secret.txt"
+    )
+
+    fake_st = _FakeStreamlit()
+    fake_st.session_state[_MODULES.app._SELECTED_RESEARCH_SESSION_SLOT] = (
+        created.session_id
+    )
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+
+    class _FakeController:
+        def inspect(self, session_id: str) -> object:
+            assert session_id == created.session_id
+            return inspection
+
+    monkeypatch.setattr(
+        _MODULES.app, "_build_research_controller", lambda **kwargs: _FakeController()
+    )
+    app_state = _make_app_state(root_path=str(tmp_path))
+    active = app_state.sessions[app_state.active_session_id]
+
+    _MODULES.app._render_research_session_details(
+        app_state,
+        config=StreamlitAssistantConfig(),
+        runtime=active.runtime,
+        active=active,
+    )
+
+    rendered = "\n".join(
+        [
+            *fake_st.markdown_messages,
+            *fake_st.caption_messages,
+            *fake_st.warning_messages,
+            *fake_st.error_messages,
+        ]
+    )
+    assert inspection.summary.stop_reason is HarnessStopReason.COMPLETED
+    assert safe_message in rendered
+    assert secret_text not in rendered
 
 
 def test_streamlit_assistant_research_detail_resolves_approval_and_appends_summary(

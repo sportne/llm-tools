@@ -3,7 +3,8 @@
 from llm_tools.tools.atlassian.tools import (
     ReadBitbucketFileTool,
     ReadBitbucketPullRequestTool,
-    ReadConfluenceContentTool,
+    ReadConfluenceAttachmentTool,
+    ReadConfluencePageTool,
     ReadJiraIssueTool,
     SearchBitbucketCodeTool,
     SearchConfluenceTool,
@@ -14,7 +15,8 @@ from llm_tools.tools.atlassian.tools import (
 __all__ = [
     "ReadBitbucketFileTool",
     "ReadBitbucketPullRequestTool",
-    "ReadConfluenceContentTool",
+    "ReadConfluenceAttachmentTool",
+    "ReadConfluencePageTool",
     "ReadJiraIssueTool",
     "SearchBitbucketCodeTool",
     "SearchConfluenceTool",

@@ -10,6 +10,7 @@ from typing import Any, cast
 from pydantic import BaseModel, Field
 
 from llm_tools.tool_api import (
+    RetryableToolExecutionError,
     SideEffectClass,
     SourceProvenanceRef,
     Tool,
@@ -26,6 +27,9 @@ from llm_tools.tools.filesystem._content import (
 from llm_tools.tools.filesystem.models import FileReadResult, ToolLimits
 
 _GITLAB_ENV_KEYS = ("GITLAB_BASE_URL", "GITLAB_API_TOKEN")
+_REMOTE_TOOL_TIMEOUT_SECONDS = 30
+_REMOTE_COLLECTION_LIMIT = 100
+_RETRYABLE_STATUS_CODES = frozenset({429, 502, 503, 504})
 
 
 def _append_remote_source_provenance(
@@ -59,7 +63,10 @@ def _get_gitlab_project(client: Any, project: str) -> Any:
     projects = getattr(client, "projects", None)
     if projects is None or not hasattr(projects, "get"):
         raise RuntimeError("Configured GitLab client does not support project reads.")
-    return projects.get(project)
+    try:
+        return projects.get(project)
+    except Exception as exc:
+        raise _normalize_remote_exception(exc) from exc
 
 
 def _search_project_code(
@@ -86,14 +93,21 @@ def _search_project_code(
             raise RuntimeError(
                 "Configured GitLab project does not support code search."
             ) from exc
-    return list(cast(list[Any], results))[:limit]
+        except Exception as exc:
+            raise _normalize_remote_exception(exc) from exc
+    except Exception as exc:
+        raise _normalize_remote_exception(exc) from exc
+    return list(cast(list[Any], results))
 
 
 def _get_project_file(project: Any, file_path: str, *, ref: str) -> Any:
     files = getattr(project, "files", None)
     if files is None or not hasattr(files, "get"):
         raise RuntimeError("Configured GitLab project does not support file reads.")
-    return files.get(file_path=file_path, ref=ref)
+    try:
+        return files.get(file_path=file_path, ref=ref)
+    except Exception as exc:
+        raise _normalize_remote_exception(exc) from exc
 
 
 def _get_merge_request(project: Any, merge_request_iid: int) -> Any:
@@ -102,17 +116,23 @@ def _get_merge_request(project: Any, merge_request_iid: int) -> Any:
         raise RuntimeError(
             "Configured GitLab project does not support merge request reads."
         )
-    return merge_requests.get(merge_request_iid)
+    try:
+        return merge_requests.get(merge_request_iid)
+    except Exception as exc:
+        raise _normalize_remote_exception(exc) from exc
 
 
 def _get_merge_request_commits(merge_request: Any) -> list[Any]:
     commits = getattr(merge_request, "commits", None)
     if commits is None:
         return []
-    if callable(commits):
-        return list(cast(list[Any], commits()))
-    if hasattr(commits, "list"):
-        return list(cast(list[Any], commits.list()))
+    try:
+        if callable(commits):
+            return list(cast(list[Any], commits()))
+        if hasattr(commits, "list"):
+            return list(cast(list[Any], commits.list()))
+    except Exception as exc:
+        raise _normalize_remote_exception(exc) from exc
     return []
 
 
@@ -120,14 +140,36 @@ def _get_merge_request_changes(merge_request: Any) -> list[Any]:
     changes = getattr(merge_request, "changes", None)
     if changes is None:
         return []
-    if callable(changes):
-        payload = changes()
-        if isinstance(payload, dict):
-            return list(cast(list[Any], payload.get("changes", [])))
-        return []
+    try:
+        if callable(changes):
+            payload = changes()
+            if isinstance(payload, dict):
+                return list(cast(list[Any], payload.get("changes", [])))
+            return []
+    except Exception as exc:
+        raise _normalize_remote_exception(exc) from exc
     if isinstance(changes, dict):
         return list(cast(list[Any], changes.get("changes", [])))
     return []
+
+
+def _normalize_remote_exception(exc: Exception) -> Exception:
+    status_code = cast(
+        int | None,
+        _get_value(
+            exc,
+            "status_code",
+            _get_value(_get_value(exc, "response", {}), "status_code"),
+        ),
+    )
+    exception_type = type(exc).__name__.lower()
+    message = str(exc).lower()
+    if status_code in _RETRYABLE_STATUS_CODES or any(
+        token in exception_type or token in message
+        for token in ("timeout", "timedout", "connection", "temporarily unavailable")
+    ):
+        return RetryableToolExecutionError(str(exc))
+    return exc
 
 
 def _decode_gitlab_file_content(file_obj: Any) -> tuple[str | None, int, str | None]:
@@ -198,6 +240,7 @@ class SearchGitLabCodeOutput(BaseModel):
     query: str
     ref: str | None = None
     matches: list[GitLabCodeSearchMatch] = Field(default_factory=list)
+    truncated: bool = False
 
 
 class SearchGitLabCodeTool(Tool[SearchGitLabCodeInput, SearchGitLabCodeOutput]):
@@ -207,6 +250,7 @@ class SearchGitLabCodeTool(Tool[SearchGitLabCodeInput, SearchGitLabCodeOutput]):
         tags=["gitlab", "search", "read", "code"],
         side_effects=SideEffectClass.EXTERNAL_READ,
         requires_network=True,
+        timeout_seconds=_REMOTE_TOOL_TIMEOUT_SECONDS,
         required_secrets=list(_GITLAB_ENV_KEYS),
     )
     input_model = SearchGitLabCodeInput
@@ -218,6 +262,12 @@ class SearchGitLabCodeTool(Tool[SearchGitLabCodeInput, SearchGitLabCodeOutput]):
         client = context.services.require_gitlab().client
         project = _get_gitlab_project(client, args.project)
         project_name = _normalize_project_name(project, args.project)
+        raw_matches = _search_project_code(
+            project,
+            args.query,
+            ref=args.ref,
+            limit=args.limit,
+        )
         matches = [
             GitLabCodeSearchMatch(
                 project=project_name,
@@ -245,12 +295,7 @@ class SearchGitLabCodeTool(Tool[SearchGitLabCodeInput, SearchGitLabCodeOutput]):
                     _get_value(raw, "data", _get_value(raw, "snippet")),
                 ),
             )
-            for raw in _search_project_code(
-                project,
-                args.query,
-                ref=args.ref,
-                limit=args.limit,
-            )
+            for raw in raw_matches[: args.limit]
         ]
         context.log(
             f"Ran GitLab code search for '{args.query}' in project '{args.project}'."
@@ -260,6 +305,7 @@ class SearchGitLabCodeTool(Tool[SearchGitLabCodeInput, SearchGitLabCodeOutput]):
             query=args.query,
             ref=args.ref,
             matches=matches,
+            truncated=len(raw_matches) > args.limit,
         )
 
 
@@ -283,6 +329,7 @@ class ReadGitLabFileTool(Tool[ReadGitLabFileInput, ReadGitLabFileOutput]):
         tags=["gitlab", "read", "file"],
         side_effects=SideEffectClass.EXTERNAL_READ,
         requires_network=True,
+        timeout_seconds=_REMOTE_TOOL_TIMEOUT_SECONDS,
         required_secrets=list(_GITLAB_ENV_KEYS),
     )
     input_model = ReadGitLabFileInput
@@ -382,6 +429,8 @@ class ReadGitLabFileTool(Tool[ReadGitLabFileInput, ReadGitLabFileOutput]):
 class ReadGitLabMergeRequestInput(BaseModel):
     project: str
     merge_request_iid: int = Field(ge=1)
+    commit_limit: int = Field(default=20, ge=1, le=_REMOTE_COLLECTION_LIMIT)
+    change_limit: int = Field(default=20, ge=1, le=_REMOTE_COLLECTION_LIMIT)
 
 
 class GitLabMergeRequestCommit(BaseModel):
@@ -411,7 +460,9 @@ class ReadGitLabMergeRequestOutput(BaseModel):
     target_branch: str | None = None
     web_url: str | None = None
     commits: list[GitLabMergeRequestCommit] = Field(default_factory=list)
+    commits_truncated: bool = False
     changed_files: list[GitLabMergeRequestChange] = Field(default_factory=list)
+    changed_files_truncated: bool = False
 
 
 class ReadGitLabMergeRequestTool(
@@ -423,6 +474,7 @@ class ReadGitLabMergeRequestTool(
         tags=["gitlab", "read", "merge_request"],
         side_effects=SideEffectClass.EXTERNAL_READ,
         requires_network=True,
+        timeout_seconds=_REMOTE_TOOL_TIMEOUT_SECONDS,
         required_secrets=list(_GITLAB_ENV_KEYS),
     )
     input_model = ReadGitLabMergeRequestInput
@@ -435,6 +487,8 @@ class ReadGitLabMergeRequestTool(
         project = _get_gitlab_project(client, args.project)
         project_name = _normalize_project_name(project, args.project)
         merge_request = _get_merge_request(project, args.merge_request_iid)
+        raw_commits = _get_merge_request_commits(merge_request)
+        raw_changes = _get_merge_request_changes(merge_request)
 
         commits = [
             GitLabMergeRequestCommit(
@@ -446,7 +500,7 @@ class ReadGitLabMergeRequestTool(
                 ),
                 author_name=cast(str | None, _get_value(commit, "author_name")),
             )
-            for commit in _get_merge_request_commits(merge_request)
+            for commit in raw_commits[: args.commit_limit]
         ]
         changed_files = [
             GitLabMergeRequestChange(
@@ -458,7 +512,7 @@ class ReadGitLabMergeRequestTool(
                 diff_excerpt=(cast(str | None, _get_value(change, "diff")) or "")[:400]
                 or None,
             )
-            for change in _get_merge_request_changes(merge_request)
+            for change in raw_changes[: args.change_limit]
         ]
 
         context.log(
@@ -486,7 +540,9 @@ class ReadGitLabMergeRequestTool(
             target_branch=cast(str | None, _get_value(merge_request, "target_branch")),
             web_url=cast(str | None, _get_value(merge_request, "web_url")),
             commits=commits,
+            commits_truncated=len(raw_commits) > args.commit_limit,
             changed_files=changed_files,
+            changed_files_truncated=len(raw_changes) > args.change_limit,
         )
 
 

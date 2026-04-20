@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from llm_tools.harness_api.models import HarnessState
-from llm_tools.workflow_api import WorkflowTurnResult
+from llm_tools.tool_api import ToolResult
+from llm_tools.workflow_api import WorkflowInvocationOutcome, WorkflowTurnResult
 
 DEFAULT_PURGED_RESPONSE = "[WITHHELD BY PROTECTION]"
 
@@ -15,20 +16,34 @@ def scrub_state_for_protection(
     *,
     safe_message: Any | None = None,
 ) -> HarnessState:
-    """Replace the tail turn final response with a safe placeholder before save."""
+    """Scrub persisted workflow payloads before saving a protected session."""
     if not state.turns:
         return state
-    tail_turn = state.turns[-1]
-    if tail_turn.workflow_result is None:
+    changed = False
+    scrubbed_turns = []
+    for index, turn in enumerate(state.turns):
+        workflow_result = turn.workflow_result
+        if workflow_result is None:
+            scrubbed_turns.append(turn)
+            continue
+        changed = True
+        scrubbed_turns.append(
+            turn.model_copy(
+                update={
+                    "workflow_result": scrub_workflow_result(
+                        workflow_result,
+                        safe_message=(
+                            safe_message if index == len(state.turns) - 1 else None
+                        ),
+                    )
+                }
+            )
+        )
+    if not changed:
         return state
-    scrubbed_result = scrub_workflow_result(
-        tail_turn.workflow_result,
-        safe_message=safe_message,
-    )
-    scrubbed_turn = tail_turn.model_copy(update={"workflow_result": scrubbed_result})
     return state.model_copy(
         update={
-            "turns": [*state.turns[:-1], scrubbed_turn],
+            "turns": scrubbed_turns,
             "pending_approvals": [],
         },
         deep=True,
@@ -40,15 +55,60 @@ def scrub_workflow_result(
     *,
     safe_message: Any | None = None,
 ) -> WorkflowTurnResult:
-    """Return a workflow result whose final response no longer carries raw text."""
+    """Return a workflow result with scrubbed tool payloads and final response."""
     parsed_response = workflow_result.parsed_response
-    if parsed_response.final_response is None:
+    if parsed_response.final_response is None and not any(
+        outcome.tool_result is not None for outcome in workflow_result.outcomes
+    ):
         return workflow_result
-    replacement = safe_message if safe_message is not None else DEFAULT_PURGED_RESPONSE
-    scrubbed_response = parsed_response.model_copy(
-        update={"final_response": replacement}
+    scrubbed_response = parsed_response
+    if parsed_response.final_response is not None:
+        replacement = (
+            safe_message if safe_message is not None else DEFAULT_PURGED_RESPONSE
+        )
+        scrubbed_response = parsed_response.model_copy(
+            update={"final_response": replacement}
+        )
+    scrubbed_outcomes = [
+        _scrub_workflow_outcome(outcome) for outcome in workflow_result.outcomes
+    ]
+    return workflow_result.model_copy(
+        update={
+            "parsed_response": scrubbed_response,
+            "outcomes": scrubbed_outcomes,
+        }
     )
-    return workflow_result.model_copy(update={"parsed_response": scrubbed_response})
+
+
+def _scrub_workflow_outcome(
+    outcome: WorkflowInvocationOutcome,
+) -> WorkflowInvocationOutcome:
+    if outcome.tool_result is None:
+        return outcome
+    return outcome.model_copy(
+        update={"tool_result": _scrub_tool_result(outcome.tool_result)}
+    )
+
+
+def _scrub_tool_result(tool_result: ToolResult) -> ToolResult:
+    metadata = dict(tool_result.metadata)
+    execution_record = metadata.get("execution_record")
+    if isinstance(execution_record, dict):
+        scrubbed_record = dict(execution_record)
+        scrubbed_record.pop("validated_output", None)
+        scrubbed_record.pop("redacted_output", None)
+        scrubbed_record["logs"] = []
+        scrubbed_record["artifacts"] = []
+        metadata["execution_record"] = scrubbed_record
+    return tool_result.model_copy(
+        update={
+            "output": None,
+            "logs": [],
+            "artifacts": [],
+            "metadata": metadata,
+        },
+        deep=True,
+    )
 
 
 __all__ = [

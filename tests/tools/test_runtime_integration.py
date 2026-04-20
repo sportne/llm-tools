@@ -367,6 +367,7 @@ def test_runtime_executes_bitbucket_builtins_with_mocked_client(
                 "snippet": "needle()",
             }
         ],
+        "truncated": False,
     }
 
 
@@ -406,6 +407,7 @@ def test_runtime_executes_confluence_builtins_with_mocked_client(
             allowed_side_effects={
                 SideEffectClass.NONE,
                 SideEffectClass.LOCAL_READ,
+                SideEffectClass.LOCAL_WRITE,
                 SideEffectClass.EXTERNAL_READ,
             },
             allow_filesystem=True,
@@ -422,7 +424,7 @@ def test_runtime_executes_confluence_builtins_with_mocked_client(
 
     result = runtime.execute(
         ToolInvocationRequest(
-            tool_name="read_confluence_content",
+            tool_name="read_confluence_page",
             arguments={"page_id": "123"},
         ),
         context,
@@ -431,12 +433,9 @@ def test_runtime_executes_confluence_builtins_with_mocked_client(
     assert result.ok is True
     assert result.output == {
         "page_id": "123",
-        "mode": "page",
         "title": "Demo page",
         "space_key": "ENG",
         "web_url": "https://confluence.example.com/spaces/ENG/pages/123",
-        "attachment_id": None,
-        "attachment_filename": None,
         "representation": "storage",
         "requested_path": "page:123",
         "resolved_path": "https://confluence.example.com/spaces/ENG/pages/123",
@@ -472,7 +471,7 @@ def test_runtime_denies_confluence_attachment_read_when_filesystem_is_disabled()
 
     result = runtime.execute(
         ToolInvocationRequest(
-            tool_name="read_confluence_content",
+            tool_name="read_confluence_attachment",
             arguments={"page_id": "123", "attachment_filename": "report.pdf"},
         ),
         ToolContext(

@@ -228,6 +228,7 @@ class ToolRuntime:
                 self._make_error(
                     code=ErrorCode.TIMEOUT,
                     message=f"Tool '{state.tool_name}' execution timed out.",
+                    retryable=tool.spec.requires_network,
                     details={
                         "tool_name": state.tool_name,
                         "timeout_seconds": tool.spec.timeout_seconds,
@@ -400,6 +401,7 @@ class ToolRuntime:
                 self._make_error(
                     code=ErrorCode.TIMEOUT,
                     message=f"Tool '{state.tool_name}' execution timed out.",
+                    retryable=tool.spec.requires_network,
                     details={
                         "tool_name": state.tool_name,
                         "timeout_seconds": tool.spec.timeout_seconds,
@@ -816,11 +818,13 @@ class ToolRuntime:
         *,
         code: ErrorCode,
         message: str,
+        retryable: bool = False,
         details: dict[str, Any] | None = None,
     ) -> ToolError:
         return ToolError(
             code=code,
             message=message,
+            retryable=retryable,
             details=details or {},
         )
 
@@ -841,6 +845,7 @@ class ToolRuntime:
         return self._make_error(
             code=ErrorCode.EXECUTION_FAILED,
             message=f"Tool '{state.tool_name}' execution failed.",
+            retryable=bool(getattr(exc, "retryable", False)),
             details=details,
         )
 

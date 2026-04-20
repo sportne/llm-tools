@@ -36,6 +36,7 @@ class ResumeDisposition(str, Enum):  # noqa: UP042
     RUNNABLE = "runnable"
     WAITING_FOR_APPROVAL = "waiting_for_approval"
     APPROVAL_EXPIRED = "approval_expired"
+    INTERRUPTED = "interrupted"
     TERMINAL = "terminal"
     INCOMPATIBLE_SCHEMA = "incompatible_schema"
     CORRUPT = "corrupt"
@@ -156,6 +157,45 @@ def resume_session(
             snapshot=snapshot,
             disposition=ResumeDisposition.RUNNABLE,
             active_tasks=active_tasks,
+        )
+
+    if not state.pending_approvals:
+        workflow_result = incomplete_turn.workflow_result
+        if (
+            workflow_result is not None
+            and workflow_result.outcomes
+            and workflow_result.outcomes[-1].status
+            is WorkflowInvocationStatus.APPROVAL_REQUESTED
+        ):
+            return ResumedHarnessSession(
+                snapshot=snapshot,
+                disposition=ResumeDisposition.CORRUPT,
+                active_tasks=active_tasks,
+                incomplete_turn=incomplete_turn,
+                issues=[
+                    ResumeIssue(
+                        code="missing_pending_approval",
+                        message=(
+                            "Incomplete turns ending in approval_requested must "
+                            "persist a matching pending approval."
+                        ),
+                    )
+                ],
+            )
+        return ResumedHarnessSession(
+            snapshot=snapshot,
+            disposition=ResumeDisposition.INTERRUPTED,
+            active_tasks=active_tasks,
+            incomplete_turn=incomplete_turn,
+            issues=[
+                ResumeIssue(
+                    code="interrupted_turn",
+                    message=(
+                        "Incomplete non-approval turn detected. Operator review is "
+                        "required before replaying the interrupted turn."
+                    ),
+                )
+            ],
         )
 
     if len(state.pending_approvals) != 1:

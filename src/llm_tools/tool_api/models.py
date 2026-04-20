@@ -106,6 +106,14 @@ class ToolInvocationRequest(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
 
 
+class RetryableToolExecutionError(RuntimeError):
+    """Execution failure that should be surfaced as retryable."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.retryable = True
+
+
 class ToolError(BaseModel):
     """Normalized error payload returned across the runtime boundary."""
 

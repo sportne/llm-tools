@@ -74,6 +74,7 @@ class HarnessSessionRunRequest(BaseModel):
 
     session_id: str = Field(min_length=1)
     expected_revision: str | None = None
+    allow_interrupted_turn_replay: bool = False
 
 
 class HarnessSessionResumeRequest(BaseModel):
@@ -81,6 +82,7 @@ class HarnessSessionResumeRequest(BaseModel):
 
     session_id: str = Field(min_length=1)
     approval_resolution: ApprovalResolution | None = None
+    allow_interrupted_turn_replay: bool = False
 
 
 class HarnessSessionStopRequest(BaseModel):
@@ -469,6 +471,7 @@ class HarnessSessionService:
         return self._executor.run(
             snapshot.state,
             expected_revision=request.expected_revision or snapshot.revision,
+            allow_interrupted_turn_replay=request.allow_interrupted_turn_replay,
         )
 
     async def run_session_async(
@@ -482,6 +485,7 @@ class HarnessSessionService:
         return await self._executor.run_async(
             snapshot.state,
             expected_revision=request.expected_revision or snapshot.revision,
+            allow_interrupted_turn_replay=request.allow_interrupted_turn_replay,
         )
 
     def resume_session(
@@ -492,6 +496,7 @@ class HarnessSessionService:
         return self._executor.resume(
             request.session_id,
             approval_resolution=request.approval_resolution,
+            allow_interrupted_turn_replay=request.allow_interrupted_turn_replay,
         )
 
     async def resume_session_async(
@@ -502,6 +507,7 @@ class HarnessSessionService:
         return await self._executor.resume_async(
             request.session_id,
             approval_resolution=request.approval_resolution,
+            allow_interrupted_turn_replay=request.allow_interrupted_turn_replay,
         )
 
     def stop_session(
