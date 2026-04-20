@@ -1,4 +1,4 @@
-"""Public session service models and orchestration helpers."""
+"""Harness session service models and orchestration."""
 
 from __future__ import annotations
 
@@ -49,6 +49,8 @@ from llm_tools.workflow_api import WorkflowExecutor
 
 
 class HarnessSessionCreateRequest(BaseModel):
+    """Create a new persisted root-task harness session."""
+
     title: str = Field(min_length=1)
     intent: str = Field(min_length=1)
     budget_policy: BudgetPolicy
@@ -58,31 +60,45 @@ class HarnessSessionCreateRequest(BaseModel):
 
 
 class HarnessSessionRunRequest(BaseModel):
+    """Run a persisted harness session to its next durable stop."""
+
     session_id: str = Field(min_length=1)
     expected_revision: str | None = None
+    allow_interrupted_turn_replay: bool = False
 
 
 class HarnessSessionResumeRequest(BaseModel):
+    """Resume a persisted harness session, optionally resolving approval."""
+
     session_id: str = Field(min_length=1)
     approval_resolution: ApprovalResolution | None = None
+    allow_interrupted_turn_replay: bool = False
 
 
 class HarnessSessionStopRequest(BaseModel):
+    """Stop a persisted harness session without further execution."""
+
     session_id: str = Field(min_length=1)
     stop_reason: HarnessStopReason = HarnessStopReason.CANCELED
 
 
 class HarnessSessionInspectRequest(BaseModel):
+    """Inspect one persisted harness session."""
+
     session_id: str = Field(min_length=1)
     include_replay: bool = False
 
 
 class HarnessSessionListRequest(BaseModel):
+    """List recent persisted harness sessions."""
+
     limit: int | None = Field(default=None, ge=1)
     include_replay: bool = False
 
 
 class HarnessSessionInspection(BaseModel):
+    """Typed inspection payload for one stored harness session."""
+
     snapshot: StoredHarnessState
     resumed: ResumedHarnessSession
     summary: HarnessSessionSummary
@@ -90,12 +106,16 @@ class HarnessSessionInspection(BaseModel):
 
 
 class HarnessSessionListItem(BaseModel):
+    """One recent persisted harness session."""
+
     snapshot: StoredHarnessState
     summary: HarnessSessionSummary
     replay: HarnessReplayResult | None = None
 
 
 class HarnessSessionListResult(BaseModel):
+    """Recent stored harness sessions in newest-first order."""
+
     sessions: list[HarnessSessionListItem] = Field(default_factory=list)
 
 
@@ -137,8 +157,10 @@ class HarnessSessionService:
         )
 
     def create_session(
-        self, request: HarnessSessionCreateRequest
+        self,
+        request: HarnessSessionCreateRequest,
     ) -> StoredHarnessState:
+        """Create and persist a new root-task harness session."""
         state = create_root_task(
             schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
             session_id=request.session_id or f"session-{uuid4().hex}",
@@ -153,45 +175,61 @@ class HarnessSessionService:
             artifacts=build_stored_artifacts(state=state),
         )
 
-    def run_session(self, request: HarnessSessionRunRequest) -> HarnessExecutionResult:
+    def run_session(
+        self,
+        request: HarnessSessionRunRequest,
+    ) -> HarnessExecutionResult:
+        """Run a stored harness session until its next durable stop."""
         snapshot = self._store.load_session(request.session_id)
         if snapshot is None:
             raise ValueError(f"Unknown session id: {request.session_id}")
         return self._executor.run(
             snapshot.state,
             expected_revision=request.expected_revision or snapshot.revision,
+            allow_interrupted_turn_replay=request.allow_interrupted_turn_replay,
         )
 
     async def run_session_async(
-        self, request: HarnessSessionRunRequest
+        self,
+        request: HarnessSessionRunRequest,
     ) -> HarnessExecutionResult:
+        """Asynchronously run a stored harness session."""
         snapshot = self._store.load_session(request.session_id)
         if snapshot is None:
             raise ValueError(f"Unknown session id: {request.session_id}")
         return await self._executor.run_async(
             snapshot.state,
             expected_revision=request.expected_revision or snapshot.revision,
+            allow_interrupted_turn_replay=request.allow_interrupted_turn_replay,
         )
 
     def resume_session(
-        self, request: HarnessSessionResumeRequest
+        self,
+        request: HarnessSessionResumeRequest,
     ) -> HarnessExecutionResult:
+        """Resume a stored harness session."""
         return self._executor.resume(
             request.session_id,
             approval_resolution=request.approval_resolution,
+            allow_interrupted_turn_replay=request.allow_interrupted_turn_replay,
         )
 
     async def resume_session_async(
-        self, request: HarnessSessionResumeRequest
+        self,
+        request: HarnessSessionResumeRequest,
     ) -> HarnessExecutionResult:
+        """Asynchronously resume a stored harness session."""
         return await self._executor.resume_async(
             request.session_id,
             approval_resolution=request.approval_resolution,
+            allow_interrupted_turn_replay=request.allow_interrupted_turn_replay,
         )
 
     def stop_session(
-        self, request: HarnessSessionStopRequest
+        self,
+        request: HarnessSessionStopRequest,
     ) -> HarnessSessionInspection:
+        """Stop a stored harness session without further execution."""
         snapshot = self._required_snapshot(request.session_id)
         state = snapshot.state.model_copy(deep=True)
         now = _timestamp(datetime.now(UTC))
@@ -238,16 +276,20 @@ class HarnessSessionService:
         return self._inspect_snapshot(saved, include_replay=False)
 
     def inspect_session(
-        self, request: HarnessSessionInspectRequest
+        self,
+        request: HarnessSessionInspectRequest,
     ) -> HarnessSessionInspection:
+        """Inspect a stored harness session."""
         return self._inspect_snapshot(
             self._required_snapshot(request.session_id),
             include_replay=request.include_replay,
         )
 
     def list_sessions(
-        self, request: HarnessSessionListRequest
+        self,
+        request: HarnessSessionListRequest,
     ) -> HarnessSessionListResult:
+        """List recent stored harness sessions."""
         items = []
         for snapshot in self._store.list_sessions(limit=request.limit):
             normalized = _normalized_snapshot(snapshot)

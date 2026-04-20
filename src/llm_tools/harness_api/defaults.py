@@ -1,4 +1,4 @@
-"""Default harness session driver, provider, and applier implementations."""
+"""Default harness driver and applier implementations."""
 
 from __future__ import annotations
 
@@ -9,9 +9,7 @@ from llm_tools.harness_api.context import (
     DefaultHarnessContextBuilder,
     HarnessContextBuilder,
 )
-from llm_tools.harness_api.executor import (
-    HarnessRetryPolicy,
-)
+from llm_tools.harness_api.executor_approvals import HarnessRetryPolicy
 from llm_tools.harness_api.models import (
     HarnessState,
     HarnessStopReason,
@@ -29,7 +27,8 @@ from llm_tools.harness_api.tasks import (
 )
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import ToolContext
-from llm_tools.workflow_api.executor import PreparedModelInteraction, WorkflowExecutor
+from llm_tools.workflow_api import WorkflowExecutor
+from llm_tools.workflow_api.executor import PreparedModelInteraction
 
 
 @runtime_checkable
@@ -118,7 +117,6 @@ class DefaultHarnessTurnDriver:
         self._adapter = ActionEnvelopeAdapter()
         self._last_selection: list[str] = []
         self._last_state: HarnessState | None = None
-        self._retry_policy = retry_policy
 
     def select_task_ids(self, *, state: HarnessState) -> list[str]:
         selection = self._planner.select_tasks(state=state)
