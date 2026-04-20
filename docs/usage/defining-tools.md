@@ -7,20 +7,19 @@ Every concrete tool must define:
 - `spec`: canonical metadata as a `ToolSpec`
 - `input_model`: a Pydantic model for validated input
 - `output_model`: a Pydantic model for validated output
-- at least one execution method:
-  - `invoke(context, args) -> output_model`
-  - `ainvoke(context, args) -> output_model`
+- at least one implementation method:
+  - `_invoke_impl(context, args) -> output_model`
+  - `_ainvoke_impl(context, args) -> output_model`
 
-`invoke()` and `ainvoke()` should return the declared output model, not a raw
-dict. The runtime validates both input payloads and returned output models at
-the execution boundary.
+The public `invoke()` / `ainvoke()` wrappers are runtime-owned entry points.
+Calling them directly without a runtime-issued execution permit raises.
 
 ## Minimal Example
 
 ```python
 from pydantic import BaseModel
 
-from llm_tools.tool_api import Tool, ToolContext, ToolSpec
+from llm_tools.tool_api import Tool, ToolExecutionContext, ToolSpec
 
 
 class EchoInput(BaseModel):
@@ -40,7 +39,9 @@ class EchoTool(Tool[EchoInput, EchoOutput]):
     input_model = EchoInput
     output_model = EchoOutput
 
-    def invoke(self, context: ToolContext, args: EchoInput) -> EchoOutput:
+    def _invoke_impl(
+        self, context: ToolExecutionContext, args: EchoInput
+    ) -> EchoOutput:
         return EchoOutput(echoed=f"{context.invocation_id}:{args.value}")
 ```
 
@@ -48,35 +49,20 @@ class EchoTool(Tool[EchoInput, EchoOutput]):
 
 `ToolSpec` is the canonical metadata source. It is where you declare:
 
-- tool name and description
+- stable tool name and description
 - tags
-- side effects
-- risk level
+- side effects and risk level
 - capability requirements such as filesystem, network, or subprocess access
 - required secrets
+- whether the tool writes internal workspace cache data
 
-Provider-facing schemas are generated from this canonical metadata plus the
-input model. They are not the source of truth.
+Provider-facing schemas are generated from `ToolSpec` plus the input model.
 
 ## Best Practices
 
 - keep tools small and focused
-- make `spec.name` stable and explicit
-- use input and output models that are easy to validate and serialize
-- append meaningful runtime logs/artifacts to `context.logs` and
-  `context.artifacts` when the tool performs interesting work
-- raise normal Python exceptions from tool code and let `ToolRuntime` normalize
-  them into `ToolResult`
-
-## Next Steps
-
-After defining a tool, you usually:
-
-1. register it in a `ToolRegistry`
-2. execute it through `ToolRuntime`
-3. optionally expose it through an adapter or `WorkflowExecutor`
-
-See:
-
-- [Registry and Runtime](registry-and-runtime.md)
-- [Adapters](adapters.md)
+- keep `spec.name` stable
+- return the declared output model, not a raw dict
+- use `ToolExecutionContext` for runtime logs, artifacts, and source provenance
+- raise normal Python exceptions from tool code and let `ToolRuntime`
+  normalize them into `ToolResult`

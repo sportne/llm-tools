@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
+
+from pydantic import BaseModel
 
 from llm_tools.tool_api.errors import DuplicateToolError, ToolNotRegisteredError
 from llm_tools.tool_api.models import SideEffectClass, ToolSpec
 from llm_tools.tool_api.tool import Tool
+
+
+@dataclass(frozen=True, slots=True)
+class RegisteredToolBinding:
+    """Public read-only contract for one registered tool."""
+
+    spec: ToolSpec
+    input_model: type[BaseModel]
+    output_model: type[BaseModel]
 
 
 class ToolRegistry:
@@ -30,6 +42,17 @@ class ToolRegistry:
     def list_tools(self) -> list[ToolSpec]:
         """Return registered tool specs in registration order."""
         return [tool.spec for tool in self._tools.values()]
+
+    def list_bindings(self) -> list[RegisteredToolBinding]:
+        """Return public registered tool contracts in registration order."""
+        return [
+            RegisteredToolBinding(
+                spec=tool.spec,
+                input_model=tool.input_model,
+                output_model=tool.output_model,
+            )
+            for tool in self._tools.values()
+        ]
 
     def filter_tools(
         self,

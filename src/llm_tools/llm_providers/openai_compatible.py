@@ -116,6 +116,20 @@ class OpenAICompatibleProvider:
             async_client=async_client,
         )
 
+    def run_structured(
+        self,
+        *,
+        messages: Sequence[dict[str, Any]],
+        response_model: type[BaseModel],
+        request_params: dict[str, Any] | None = None,
+    ) -> object:
+        """Run one structured model call without adapter-level normalization."""
+        return self._run_with_fallback(
+            messages=messages,
+            response_model=response_model,
+            request_params=request_params,
+        )
+
     def run(
         self,
         *,
@@ -125,7 +139,7 @@ class OpenAICompatibleProvider:
         request_params: dict[str, Any] | None = None,
     ) -> ParsedModelResponse:
         """Run one model turn and normalize it through the action adapter."""
-        payload = self._run_with_fallback(
+        payload = self.run_structured(
             messages=messages,
             response_model=response_model,
             request_params=request_params,
@@ -145,6 +159,20 @@ class OpenAICompatibleProvider:
         }
         return sorted(model_ids)
 
+    async def run_structured_async(
+        self,
+        *,
+        messages: Sequence[dict[str, Any]],
+        response_model: type[BaseModel],
+        request_params: dict[str, Any] | None = None,
+    ) -> object:
+        """Run one structured model call asynchronously without adapter parsing."""
+        return await self._run_with_fallback_async(
+            messages=messages,
+            response_model=response_model,
+            request_params=request_params,
+        )
+
     async def run_async(
         self,
         *,
@@ -154,7 +182,7 @@ class OpenAICompatibleProvider:
         request_params: dict[str, Any] | None = None,
     ) -> ParsedModelResponse:
         """Run one model turn asynchronously through Instructor."""
-        payload = await self._run_with_fallback_async(
+        payload = await self.run_structured_async(
             messages=messages,
             response_model=response_model,
             request_params=request_params,

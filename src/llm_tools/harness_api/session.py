@@ -55,7 +55,8 @@ from llm_tools.harness_api.tasks import (
 )
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import ToolContext
-from llm_tools.workflow_api import PreparedModelInteraction, WorkflowExecutor
+from llm_tools.workflow_api import WorkflowExecutor
+from llm_tools.workflow_api.executor import PreparedModelInteraction
 
 
 class HarnessSessionCreateRequest(BaseModel):
@@ -631,3 +632,21 @@ def _normalized_snapshot(snapshot: StoredHarnessState) -> StoredHarnessState:
 
 def _timestamp(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+__all__ = [
+    "DefaultHarnessTurnDriver",
+    "HarnessModelTurnProvider",
+    "HarnessSessionCreateRequest",
+    "HarnessSessionInspectRequest",
+    "HarnessSessionInspection",
+    "HarnessSessionListItem",
+    "HarnessSessionListRequest",
+    "HarnessSessionListResult",
+    "HarnessSessionResumeRequest",
+    "HarnessSessionRunRequest",
+    "HarnessSessionService",
+    "HarnessSessionStopRequest",
+    "MinimalHarnessTurnApplier",
+    "ScriptedParsedResponseProvider",
+]

@@ -44,4 +44,5 @@ coverage.json
 # Project-local scratch files
 .llm-tools/
 .llm-tools-harness/
+.llm_tools/
 .DS_Store

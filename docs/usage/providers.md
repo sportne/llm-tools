@@ -1,18 +1,19 @@
 # Providers
 
-`llm_tools.llm_providers` contains model-call clients that use the OpenAI
-Python SDK against OpenAI-compatible endpoints.
+`llm_tools.llm_providers` contains model-call clients that use the OpenAI Python
+SDK against OpenAI-compatible endpoints.
 
 The provider layer is separate from `llm_tools.llm_adapters`:
 
 - adapters describe how to expose tools and parse model output
-- providers handle request construction and response extraction
+- providers handle transport, Instructor mode selection, and structured-call
+  retries across compatible modes
 
 ## OpenAI-Compatible Provider
 
 `OpenAICompatibleProvider` is the canonical provider client.
 
-It accepts:
+Constructor inputs include:
 
 - `model`
 - `api_key`
@@ -20,42 +21,43 @@ It accepts:
 - `mode_strategy`
 - optional `default_request_params`
 
-It uses the OpenAI Python SDK for transport and Instructor for structured
-response parsing. Treat `base_url` as a trust boundary: prompts, structured
-responses, and credentials are sent to that endpoint. Prefer HTTPS for remote
-providers; plaintext HTTP is only appropriate for local loopback-style setups
-such as Ollama on `localhost`.
+Convenience constructors:
+
+- `OpenAICompatibleProvider.for_openai(...)`
+- `OpenAICompatibleProvider.for_ollama(...)`
+
+Treat `base_url` as a trust boundary. Prompts, structured responses, and
+credentials are sent to that endpoint.
 
 ## Public Methods
 
-The provider now exposes one sync and one async call surface:
+The provider currently exposes:
 
 - `run(...) -> ParsedModelResponse`
 - `run_async(...) -> ParsedModelResponse`
+- `run_structured(...) -> object`
+- `run_structured_async(...) -> object`
+- `list_available_models() -> list[str]`
 
-Both methods accept:
+`run(...)` and `run_async(...)` normalize model output through an
+`ActionEnvelopeAdapter`.
 
-- `adapter: ActionEnvelopeAdapter`
-- `messages: Sequence[dict[str, Any]]`
-- `response_model: type[BaseModel]`
-- optional `request_params`
-
-`response_model` should come from
-`WorkflowExecutor.prepare_model_interaction(...)`.
+`run_structured(...)` and `run_structured_async(...)` return the structured
+payload directly without adapter-level normalization. They are the supported
+surface for callers that need one structured call but not a full workflow turn.
 
 ## Strategy Modes
 
 `mode_strategy` controls Instructor mode selection:
 
-- `auto` (default): tries `TOOLS`, then `JSON`, then `MD_JSON` only for
-  structured-output compatibility failures
+- `auto` (default): try `TOOLS`, then `JSON`, then `MD_JSON` for structured
+  compatibility fallbacks
 - `tools`
 - `json`
 - `md_json`
 
-`auto` is a compatibility fallback, not a general retry policy. Authentication,
-transport, timeout, and other unexpected provider failures are surfaced
-immediately instead of being replayed across modes.
+`auto` is a compatibility fallback, not a general retry policy. Unexpected
+transport or authentication failures are surfaced immediately.
 
 ## Example
 
@@ -78,15 +80,4 @@ parsed = provider.run(
     response_model=prepared.response_model,
 )
 turn_result = executor.execute_parsed_response(parsed, context)
-```
-
-Async usage:
-
-```python
-parsed = await provider.run_async(
-    adapter=adapter,
-    messages=[{"role": "user", "content": "Read README.md"}],
-    response_model=prepared.response_model,
-)
-turn_result = await executor.execute_parsed_response_async(parsed, context)
 ```

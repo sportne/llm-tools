@@ -5,10 +5,32 @@ from __future__ import annotations
 from typing import Any
 
 from llm_tools.harness_api.models import HarnessState
-from llm_tools.tool_api import ToolResult
-from llm_tools.workflow_api import WorkflowInvocationOutcome, WorkflowTurnResult
+from llm_tools.tool_api import ProtectionProvenanceSnapshot, ToolResult
+from llm_tools.workflow_api import (
+    WorkflowInvocationOutcome,
+    WorkflowTurnResult,
+    collect_provenance_from_tool_results,
+)
 
 DEFAULT_PURGED_RESPONSE = "[WITHHELD BY PROTECTION]"
+
+
+def collect_state_provenance(
+    state: HarnessState | object,
+) -> ProtectionProvenanceSnapshot:
+    """Collect tool-result provenance from a harness state snapshot."""
+    if not isinstance(state, HarnessState):
+        return ProtectionProvenanceSnapshot()
+
+    tool_results: list[ToolResult] = []
+    for turn in state.turns:
+        workflow_result = turn.workflow_result
+        if workflow_result is None:
+            continue
+        for outcome in workflow_result.outcomes:
+            if outcome.tool_result is not None:
+                tool_results.append(outcome.tool_result)
+    return collect_provenance_from_tool_results(tool_results)
 
 
 def scrub_state_for_protection(
@@ -112,6 +134,7 @@ def _scrub_tool_result(tool_result: ToolResult) -> ToolResult:
 
 
 __all__ = [
+    "collect_state_provenance",
     "DEFAULT_PURGED_RESPONSE",
     "scrub_state_for_protection",
     "scrub_workflow_result",
