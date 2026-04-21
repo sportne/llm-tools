@@ -212,7 +212,6 @@ def test_jira_tools_require_context_env_credentials() -> None:
         result.error.details["policy_decision"]["metadata"]["missing_secrets"]
     ) == {
         "JIRA_BASE_URL",
-        "JIRA_USERNAME",
         "JIRA_API_TOKEN",
     }
 

@@ -6,48 +6,48 @@ toolbarMode = "minimal"
 
 [theme]
 base = "dark"
-primaryColor = "#60a5fa"
-backgroundColor = "#0f172a"
-secondaryBackgroundColor = "#111827"
-textColor = "#e2e8f0"
-borderColor = "#334155"
+primaryColor = "#5e93ff"
+backgroundColor = "#060b14"
+secondaryBackgroundColor = "#0e1626"
+textColor = "#edf4ff"
+borderColor = "#22324f"
 baseRadius = "0.75rem"
 buttonRadius = "0.75rem"
 showWidgetBorder = true
 showSidebarBorder = true
 
 [theme.sidebar]
-primaryColor = "#60a5fa"
-backgroundColor = "#020617"
-secondaryBackgroundColor = "#111827"
-textColor = "#e2e8f0"
-borderColor = "#334155"
+primaryColor = "#5e93ff"
+backgroundColor = "#050a13"
+secondaryBackgroundColor = "#0e1626"
+textColor = "#edf4ff"
+borderColor = "#22324f"
 showWidgetBorder = true
 
 [theme.dark]
-primaryColor = "#60a5fa"
-backgroundColor = "#0f172a"
-secondaryBackgroundColor = "#111827"
-textColor = "#e2e8f0"
-borderColor = "#334155"
+primaryColor = "#5e93ff"
+backgroundColor = "#060b14"
+secondaryBackgroundColor = "#0e1626"
+textColor = "#edf4ff"
+borderColor = "#22324f"
 
 [theme.dark.sidebar]
-primaryColor = "#60a5fa"
-backgroundColor = "#020617"
-secondaryBackgroundColor = "#111827"
-textColor = "#e2e8f0"
-borderColor = "#334155"
+primaryColor = "#5e93ff"
+backgroundColor = "#050a13"
+secondaryBackgroundColor = "#0e1626"
+textColor = "#edf4ff"
+borderColor = "#22324f"
 
 [theme.light]
-primaryColor = "#1d4ed8"
-backgroundColor = "#f3f6fb"
+primaryColor = "#245dff"
+backgroundColor = "#edf3fb"
 secondaryBackgroundColor = "#ffffff"
-textColor = "#0f172a"
-borderColor = "#cbd5e1"
+textColor = "#10203b"
+borderColor = "#c9d6ea"
 
 [theme.light.sidebar]
-primaryColor = "#1d4ed8"
-backgroundColor = "#e8edf5"
+primaryColor = "#245dff"
+backgroundColor = "#e5edf8"
 secondaryBackgroundColor = "#ffffff"
-textColor = "#0f172a"
-borderColor = "#cbd5e1"
+textColor = "#10203b"
+borderColor = "#c9d6ea"

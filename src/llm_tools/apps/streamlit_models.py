@@ -6,11 +6,14 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from llm_tools.apps.assistant_config import AssistantResearchConfig
 from llm_tools.apps.chat_config import ProviderPreset
 from llm_tools.llm_providers import ProviderModeStrategy
 from llm_tools.tool_api import SideEffectClass
+from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import (
     ChatFinalResponse,
+    ChatSessionConfig,
     ChatSessionState,
     ChatTokenUsage,
     ProtectionConfig,
@@ -49,13 +52,21 @@ class StreamlitRuntimeConfig(BaseModel):
     provider_mode_strategy: ProviderModeStrategy = ProviderModeStrategy.AUTO
     model_name: str = "gemma4:26b"
     api_base_url: str | None = "http://127.0.0.1:11434/v1"
+    temperature: float = 0.1
+    timeout_seconds: float = 60.0
     root_path: str | None = None
+    default_workspace_root: str | None = None
     enabled_tools: list[str] = Field(default_factory=list)
     require_approval_for: set[SideEffectClass] = Field(default_factory=set)
-    allow_network: bool = False
+    allow_network: bool = True
     allow_filesystem: bool = True
-    allow_subprocess: bool = False
+    allow_subprocess: bool = True
     inspector_open: bool = False
+    show_token_usage: bool = True
+    show_footer_help: bool = True
+    session_config: ChatSessionConfig = Field(default_factory=ChatSessionConfig)
+    tool_limits: ToolLimits = Field(default_factory=ToolLimits)
+    research: AssistantResearchConfig = Field(default_factory=AssistantResearchConfig)
     protection: ProtectionConfig = Field(default_factory=ProtectionConfig)
 
     @field_validator("model_name")
@@ -79,6 +90,16 @@ class StreamlitRuntimeConfig(BaseModel):
     @field_validator("root_path")
     @classmethod
     def validate_root_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        return cleaned
+
+    @field_validator("default_workspace_root")
+    @classmethod
+    def validate_default_workspace_root(cls, value: str | None) -> str | None:
         if value is None:
             return None
         cleaned = value.strip()
@@ -134,6 +155,7 @@ class StreamlitPreferences(BaseModel):
     """Persisted app-wide UI preferences and recents."""
 
     theme_mode: Literal["dark", "light"] = "dark"
+    appearance_mode_explicit: bool = False
     settings_panel_open: bool = True
     recent_roots: list[str] = Field(default_factory=list)
     recent_models: dict[str, list[str]] = Field(default_factory=dict)

@@ -38,6 +38,7 @@ from llm_tools.apps.assistant_runtime import (
     build_tool_group_capability_summaries,
     resolve_assistant_default_enabled_tools,
 )
+from llm_tools.apps.chat_config import ProviderPreset
 from llm_tools.apps.chat_presentation import format_citation, pretty_json
 from llm_tools.apps.chat_runtime import create_provider
 from llm_tools.apps.protection_runtime import (
@@ -76,7 +77,11 @@ from llm_tools.harness_api.context import (
     DefaultHarnessContextBuilder,
     TurnContextBundle,
 )
-from llm_tools.llm_providers import OpenAICompatibleProvider, ProviderPreflightResult
+from llm_tools.llm_providers import (
+    OpenAICompatibleProvider,
+    ProviderModeStrategy,
+    ProviderPreflightResult,
+)
 from llm_tools.tool_api import SideEffectClass, ToolSpec
 from llm_tools.workflow_api import (
     ChatSessionState,
@@ -100,29 +105,44 @@ _APP_STATE_SLOT = "llm_tools_streamlit_assistant_app_state"
 _ACTIVE_TURN_STATE_SLOT = "llm_tools_streamlit_assistant_active_turn"
 _SELECTED_RESEARCH_SESSION_SLOT = "llm_tools_streamlit_assistant_research_selection"
 _SECRET_CACHE_STATE_SLOT = "llm_tools_streamlit_assistant_secret_cache"  # noqa: S105
+_SESSION_ENV_STATE_SLOT = "llm_tools_streamlit_assistant_session_env"
 _CONNECTION_CHECK_STATE_SLOT = "llm_tools_streamlit_assistant_connection_check"
 _EXPORTED_CONFIG_STATE_SLOT = "llm_tools_streamlit_assistant_exported_config"
 _STREAMLIT_BROWSER_USAGE_STATS_FLAG = "--browser.gatherUsageStats=false"
 _STREAMLIT_TOOLBAR_MODE_FLAG = "--client.toolbarMode=minimal"
 _POLL_INTERVAL_SECONDS = 1.0
-_DEFAULT_THEME_MODE: Literal["dark", "light"] = "light"
+_DEFAULT_THEME_MODE: Literal["dark", "light"] = "dark"
 _STORAGE_ENV_VAR = "LLM_TOOLS_STREAMLIT_ASSISTANT_STATE_DIR"
 _SESSION_STORAGE_DIR_NAME = "sessions"
 
-_REMOTE_CREDENTIAL_FIELDS: dict[str, tuple[str, ...]] = {
-    "GitLab": ("GITLAB_BASE_URL", "GITLAB_API_TOKEN"),
-    "Jira": ("JIRA_BASE_URL", "JIRA_USERNAME", "JIRA_API_TOKEN"),
-    "Confluence": (
-        "CONFLUENCE_BASE_URL",
-        "CONFLUENCE_USERNAME",
-        "CONFLUENCE_API_TOKEN",
-    ),
-    "Bitbucket": (
-        "BITBUCKET_BASE_URL",
-        "BITBUCKET_USERNAME",
-        "BITBUCKET_API_TOKEN",
-    ),
+_REMOTE_SOURCE_SETTINGS: dict[str, dict[str, object]] = {
+    "GitLab": {
+        "url_field": "GITLAB_BASE_URL",
+        "secret_fields": ("GITLAB_API_TOKEN",),
+    },
+    "Jira": {
+        "url_field": "JIRA_BASE_URL",
+        "secret_fields": ("JIRA_API_TOKEN",),
+    },
+    "Confluence": {
+        "url_field": "CONFLUENCE_BASE_URL",
+        "secret_fields": ("CONFLUENCE_API_TOKEN",),
+    },
+    "Bitbucket": {
+        "url_field": "BITBUCKET_BASE_URL",
+        "secret_fields": ("BITBUCKET_API_TOKEN",),
+    },
 }
+_SOURCE_GROUP_ORDER = (
+    "Local Files",
+    "Git",
+    "GitLab",
+    "Jira",
+    "Confluence",
+    "Bitbucket",
+    "Text",
+    "Other",
+)
 
 
 @dataclass(slots=True)
@@ -327,6 +347,15 @@ def _secret_cache() -> dict[str, str]:
     return cache
 
 
+def _session_env_cache() -> dict[str, str]:
+    st = _streamlit_module()
+    cache = st.session_state.setdefault(_SESSION_ENV_STATE_SLOT, {})
+    if not isinstance(cache, dict):
+        cache = {}
+        st.session_state[_SESSION_ENV_STATE_SLOT] = cache
+    return cache
+
+
 def _get_secret_value(name: str) -> str | None:
     cached_value = str(_secret_cache().get(name, "")).strip()
     if cached_value:
@@ -344,10 +373,31 @@ def _set_secret_value(name: str, value: str) -> None:
         cache.pop(name, None)
 
 
+def _get_session_env_value(name: str) -> str | None:
+    cached_value = str(_session_env_cache().get(name, "")).strip()
+    if cached_value:
+        return cached_value
+    env_value = os.getenv(name)
+    return env_value or None
+
+
+def _set_session_env_value(name: str, value: str) -> None:
+    cleaned = value.strip()
+    cache = _session_env_cache()
+    if cleaned:
+        cache[name] = cleaned
+    else:
+        cache.pop(name, None)
+
+
 def _remote_env_overrides() -> dict[str, str]:
     overrides: dict[str, str] = {}
-    for fields in _REMOTE_CREDENTIAL_FIELDS.values():
-        for field_name in fields:
+    for settings in _REMOTE_SOURCE_SETTINGS.values():
+        url_field = cast(str, settings["url_field"])
+        url_value = str(_session_env_cache().get(url_field, "")).strip()
+        if url_value:
+            overrides[url_field] = url_value
+        for field_name in cast(tuple[str, ...], settings["secret_fields"]):
             value = str(_secret_cache().get(field_name, "")).strip()
             if value:
                 overrides[field_name] = value
@@ -381,7 +431,6 @@ def _provider_signature(
     return (
         runtime.provider.value,
         runtime.provider_mode_strategy.value,
-        runtime.model_name,
         runtime.api_base_url or "",
         api_key_fingerprint,
     )
@@ -439,26 +488,44 @@ def _validate_model_connection(
         api_key=api_key,
         model_name=runtime.model_name,
     )
+    seed_models: list[str] = []
+    if hasattr(provider, "list_available_models"):
+        with suppress(Exception):
+            raw_models = provider.list_available_models()
+            if isinstance(raw_models, list):
+                seed_models = [item for item in raw_models if isinstance(item, str)]
+    if seed_models and hasattr(provider, "model"):
+        provider.model = (
+            runtime.model_name if runtime.model_name in seed_models else seed_models[0]
+        )
     if not hasattr(provider, "preflight"):
         report = ProviderPreflightResult(
             ok=True,
             connection_succeeded=True,
             model_accepted=True,
             selected_mode_supported=True,
-            model_listing_supported=False,
+            model_listing_supported=bool(seed_models),
+            available_models=seed_models,
             resolved_mode=(
                 None
                 if runtime.provider_mode_strategy.value == "auto"
                 else runtime.provider_mode_strategy
             ),
             actionable_message=(
-                "Model connection is ready for this session. "
+                "Provider connection is ready for this session. "
                 "Provider preflight is unavailable for this provider instance."
             ),
         )
+        if (
+            report.available_models
+            and runtime.model_name not in report.available_models
+        ):
+            runtime.model_name = report.available_models[0]
         _store_connection_report(session_id, signature=signature, report=report)
         return report
     report = provider.preflight(request_params={"temperature": 0.0})
+    if report.available_models and runtime.model_name not in report.available_models:
+        runtime.model_name = report.available_models[0]
     _store_connection_report(session_id, signature=signature, report=report)
     return report
 
@@ -492,7 +559,7 @@ def _protection_next_steps(report: ProtectionCorpusLoadReport) -> str:
         return "Protection corpus is usable, but some configured paths need attention."
     return (
         "Protection is enabled but not ready yet. Add at least one readable document "
-        "file or directory in Step 6."
+        "file or directory in the Advanced section."
     )
 
 
@@ -514,6 +581,8 @@ def _execution_blocker(
     )
     if not report.ok:
         return report.actionable_message
+    if report.available_models and runtime.model_name not in report.available_models:
+        runtime.model_name = report.available_models[0]
     if runtime.protection.enabled:
         protection_report = _protection_report(runtime.protection)
         if protection_report.usable_document_count == 0:
@@ -537,17 +606,21 @@ def _execution_blocker(
         )
         if any(summary.missing_credentials_tools for summary in summaries.values()):
             return (
-                "Research is not ready yet. Add credentials for the enabled remote "
-                "sources in Step 2."
+                "Research is not ready yet. Add the required URLs and credentials for the enabled remote "
+                "sources in the Sources section."
             )
     return None
 
 
-def _runtime_to_export_config(
+def _effective_assistant_config(
     *,
     config: StreamlitAssistantConfig,
     runtime: StreamlitRuntimeConfig,
 ) -> StreamlitAssistantConfig:
+    workspace_default_root = runtime.default_workspace_root
+    if workspace_default_root is None:
+        workspace_default_root = config.workspace.default_root
+    research_update = runtime.research.model_dump(mode="python", exclude_unset=True)
     return config.model_copy(
         deep=True,
         update={
@@ -557,8 +630,12 @@ def _runtime_to_export_config(
                     "provider_mode_strategy": runtime.provider_mode_strategy,
                     "model_name": runtime.model_name,
                     "api_base_url": runtime.api_base_url,
+                    "temperature": runtime.temperature,
+                    "timeout_seconds": runtime.timeout_seconds,
                 }
             ),
+            "session": runtime.session_config.model_copy(deep=True),
+            "tool_limits": runtime.tool_limits.model_copy(deep=True),
             "policy": config.policy.model_copy(
                 update={
                     "enabled_tools": list(runtime.enabled_tools),
@@ -566,14 +643,27 @@ def _runtime_to_export_config(
                 }
             ),
             "workspace": config.workspace.model_copy(
-                update={"default_root": config.workspace.default_root}
+                update={"default_root": workspace_default_root}
             ),
             "ui": config.ui.model_copy(
-                update={"inspector_open_by_default": runtime.inspector_open}
+                update={
+                    "show_token_usage": runtime.show_token_usage,
+                    "show_footer_help": runtime.show_footer_help,
+                    "inspector_open_by_default": runtime.inspector_open,
+                }
             ),
             "protection": runtime.protection.model_copy(deep=True),
+            "research": config.research.model_copy(update=research_update),
         },
     )
+
+
+def _runtime_to_export_config(
+    *,
+    config: StreamlitAssistantConfig,
+    runtime: StreamlitRuntimeConfig,
+) -> StreamlitAssistantConfig:
+    return _effective_assistant_config(config=config, runtime=runtime)
 
 
 def _rendered_exported_config(
@@ -748,7 +838,7 @@ def _streamlit_module() -> Any:  # pragma: no cover
 def _page_config() -> dict[str, object]:  # pragma: no cover
     return {
         "page_title": "llm-tools assistant",
-        "page_icon": "AI",
+        "page_icon": "💬",
         "layout": "wide",
         "initial_sidebar_state": "expanded",
         "menu_items": {"Get help": None, "Report a bug": None, "About": None},
@@ -843,13 +933,21 @@ def _default_runtime_config(
         provider_mode_strategy=config.llm.provider_mode_strategy,
         model_name=config.llm.model_name,
         api_base_url=config.llm.api_base_url,
+        temperature=config.llm.temperature,
+        timeout_seconds=config.llm.timeout_seconds,
         root_path=str(root_path) if root_path is not None else None,
+        default_workspace_root=config.workspace.default_root,
         enabled_tools=sorted(resolve_assistant_default_enabled_tools(config)),
         require_approval_for=default_approvals,
-        allow_network=False,
-        allow_filesystem=False,
-        allow_subprocess=False,
+        allow_network=True,
+        allow_filesystem=True,
+        allow_subprocess=True,
         inspector_open=config.ui.inspector_open_by_default,
+        show_token_usage=config.ui.show_token_usage,
+        show_footer_help=config.ui.show_footer_help,
+        session_config=config.session.model_copy(deep=True),
+        tool_limits=config.tool_limits.model_copy(deep=True),
+        research=config.research.model_copy(deep=True),
         protection=config.protection.model_copy(deep=True),
     )
 
@@ -885,6 +983,11 @@ def _load_workspace_state(
         startup_notices.append(f"Unable to load preferences: {exc}")
     if preferences is None:
         preferences = StreamlitPreferences(theme_mode=_DEFAULT_THEME_MODE)
+    elif (
+        not preferences.appearance_mode_explicit
+        and preferences.theme_mode != _DEFAULT_THEME_MODE
+    ):
+        preferences.theme_mode = _DEFAULT_THEME_MODE
     try:
         index = _read_model_file(_index_path(), StreamlitSessionIndex)
     except Exception as exc:
@@ -1107,18 +1210,18 @@ def _tool_status_copy(status: str) -> str:
 
 def _tool_reason_copy(reason: AssistantToolCapabilityReason) -> str:
     if reason.code is AssistantToolCapabilityReasonCode.WORKSPACE_REQUIRED:
-        return "Choose a workspace root in Step 3."
+        return "Choose a workspace root in the Workspace section."
     if reason.code is AssistantToolCapabilityReasonCode.MISSING_CREDENTIALS:
         if reason.missing_secrets:
             missing = ", ".join(reason.missing_secrets)
             return f"Add credentials: {missing}."
         return "Add the required credentials for this source."
     if reason.code is AssistantToolCapabilityReasonCode.NETWORK_PERMISSION_BLOCKED:
-        return "Turn on network access in Step 4."
+        return "Turn on network access in the Advanced section."
     if reason.code is AssistantToolCapabilityReasonCode.FILESYSTEM_PERMISSION_BLOCKED:
-        return "Turn on filesystem access in Step 4."
+        return "Turn on filesystem access in the Advanced section."
     if reason.code is AssistantToolCapabilityReasonCode.SUBPROCESS_PERMISSION_BLOCKED:
-        return "Turn on subprocess access in Step 4."
+        return "Turn on subprocess access in the Advanced section."
     if reason.code is AssistantToolCapabilityReasonCode.APPROVAL_REQUIRED:
         return "This tool pauses for approval before it runs."
     return reason.message
@@ -1176,20 +1279,20 @@ def _source_setup_next_steps_copy(
     summaries: dict[str, Any],
 ) -> str:
     if not any(summary.enabled_tools for summary in summaries.values()):
-        return "Next: turn on only the sources you need in Step 4."
+        return "Next: turn on the source families you need in the Sources section."
 
     next_steps: list[str] = []
     if any(summary.missing_workspace_tools for summary in summaries.values()):
         next_steps.append(
-            "Next: choose a workspace root in Step 3 for local file and git sources."
+            "Next: choose a workspace root in the Workspace section for local file and git sources."
         )
     if any(summary.missing_credentials_tools for summary in summaries.values()):
         next_steps.append(
-            "Next: provide the required service credentials in Step 2 for the enabled remote sources."
+            "Next: add the required URLs and credentials in the Sources section for the enabled remote sources."
         )
     if any(summary.permission_blocked_tools for summary in summaries.values()):
         next_steps.append(
-            "Next: turn on the required session permissions in Step 4 for the sources you enabled."
+            "Next: turn on the required session permissions in the Advanced section for the sources you enabled."
         )
     if not next_steps:
         next_steps.append("Enabled sources are ready for this session.")
@@ -1262,14 +1365,7 @@ def _llm_config_for_runtime(
     config: StreamlitAssistantConfig,
     runtime: StreamlitRuntimeConfig,
 ) -> Any:
-    return config.llm.model_copy(
-        update={
-            "provider": runtime.provider,
-            "provider_mode_strategy": runtime.provider_mode_strategy,
-            "model_name": runtime.model_name,
-            "api_base_url": runtime.api_base_url,
-        }
-    )
+    return _effective_assistant_config(config=config, runtime=runtime).llm
 
 
 def _create_provider_for_runtime(
@@ -1335,6 +1431,7 @@ def _build_assistant_runner(
     user_message: str,
     env_overrides: dict[str, str] | None = None,
 ) -> ChatSessionTurnRunner:
+    effective_config = _effective_assistant_config(config=config, runtime=runtime)
     tool_specs = _all_tool_specs()
     root = Path(runtime.root_path) if runtime.root_path is not None else None
     enabled_tools = set(runtime.enabled_tools)
@@ -1346,7 +1443,7 @@ def _build_assistant_runner(
         allow_network=runtime.allow_network,
         allow_filesystem=runtime.allow_filesystem and root is not None,
         allow_subprocess=runtime.allow_subprocess and root is not None,
-        redaction_config=config.policy.redaction,
+        redaction_config=effective_config.policy.redaction,
     )
     registry, executor = build_assistant_executor(policy=policy)
     exposed_tool_names = _exposed_tool_names_for_runtime(
@@ -1375,20 +1472,20 @@ def _build_assistant_runner(
         provider=provider,
         system_prompt=build_assistant_system_prompt(
             tool_registry=registry,
-            tool_limits=config.tool_limits,
+            tool_limits=effective_config.tool_limits,
             enabled_tool_names=exposed_tool_names,
             workspace_enabled=root is not None,
         ),
         base_context=build_assistant_context(
             root_path=root,
-            config=config,
+            config=effective_config,
             app_name=f"streamlit-assistant-{session_id}",
             env_overrides=env_overrides,
         ),
-        session_config=config.session,
-        tool_limits=config.tool_limits,
-        redaction_config=config.policy.redaction,
-        temperature=config.llm.temperature,
+        session_config=effective_config.session,
+        tool_limits=effective_config.tool_limits,
+        redaction_config=effective_config.policy.redaction,
+        temperature=effective_config.llm.temperature,
         protection_controller=protection_controller,
     )
 
@@ -1921,42 +2018,458 @@ def process_streamlit_assistant_turn(
 def _render_theme(preferences: StreamlitPreferences) -> None:  # pragma: no cover
     st = _streamlit_module()
     dark = preferences.theme_mode == "dark"
-    accent = "#0f766e" if not dark else "#99f6e4"
-    background = "#eef6f5" if not dark else "#071413"
-    surface = "#ffffff" if not dark else "#0d1f1e"
-    border = "#c6dfdc" if not dark else "#29504d"
-    text = "#10201f" if not dark else "#ddf3ef"
-    muted = "#506a67" if not dark else "#8db3ae"
+    if dark:
+        palette = {
+            "background": "#060b14",
+            "background_depth": "#0b1220",
+            "sidebar": "#050a13",
+            "surface": "#0e1626",
+            "elevated": "#152033",
+            "border": "#22324f",
+            "text": "#edf4ff",
+            "muted": "#8ea3c4",
+            "accent": "#5e93ff",
+            "accent_soft": "rgba(94, 147, 255, 0.16)",
+            "success": "#35c48e",
+            "warning": "#f0ba57",
+            "error": "#ef7185",
+            "shadow": "rgba(2, 7, 18, 0.56)",
+        }
+    else:
+        palette = {
+            "background": "#edf3fb",
+            "background_depth": "#dfeaf7",
+            "sidebar": "#e5edf8",
+            "surface": "#ffffff",
+            "elevated": "#f7faff",
+            "border": "#c9d6ea",
+            "text": "#10203b",
+            "muted": "#5c6f8c",
+            "accent": "#245dff",
+            "accent_soft": "rgba(36, 93, 255, 0.12)",
+            "success": "#198754",
+            "warning": "#b7791f",
+            "error": "#c24153",
+            "shadow": "rgba(15, 32, 59, 0.12)",
+        }
     st.markdown(
         f"""
 <style>
 :root {{
-  --assistant-bg: {background};
-  --assistant-surface: {surface};
-  --assistant-border: {border};
-  --assistant-text: {text};
-  --assistant-muted: {muted};
-  --assistant-accent: {accent};
+  --assistant-bg: {palette["background"]};
+  --assistant-bg-depth: {palette["background_depth"]};
+  --assistant-sidebar: {palette["sidebar"]};
+  --assistant-surface: {palette["surface"]};
+  --assistant-elevated: {palette["elevated"]};
+  --assistant-border: {palette["border"]};
+  --assistant-text: {palette["text"]};
+  --assistant-muted: {palette["muted"]};
+  --assistant-accent: {palette["accent"]};
+  --assistant-accent-soft: {palette["accent_soft"]};
+  --assistant-success: {palette["success"]};
+  --assistant-warning: {palette["warning"]};
+  --assistant-error: {palette["error"]};
+  --assistant-shadow: {palette["shadow"]};
 }}
 .stApp, [data-testid="stAppViewContainer"] {{
-  background: radial-gradient(circle at top left, color-mix(in srgb, var(--assistant-accent) 12%, transparent), transparent 32%), var(--assistant-bg);
+  background:
+    radial-gradient(circle at top left, var(--assistant-accent-soft), transparent 34%),
+    linear-gradient(180deg, var(--assistant-bg-depth) 0%, var(--assistant-bg) 34%, var(--assistant-bg) 100%);
   color: var(--assistant-text);
+}}
+[data-testid="stAppViewContainer"] > .main {{
+  background: transparent;
+}}
+header[data-testid="stHeader"],
+.stAppHeader {{
+  height: 2.35rem;
+  min-height: 2.35rem;
+  background: color-mix(in srgb, var(--assistant-bg-depth) 92%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--assistant-border) 72%, transparent);
+  backdrop-filter: blur(12px);
+}}
+header[data-testid="stHeader"] > div,
+.stAppHeader > div,
+.stAppToolbar {{
+  min-height: 2.35rem;
+  height: 2.35rem;
+  padding-top: 0.15rem;
+  padding-bottom: 0.15rem;
+}}
+.stAppToolbar {{
+  align-items: center;
+}}
+header[data-testid="stHeader"] button,
+.stAppHeader button,
+[data-testid="stSidebar"] > div:first-child > div:first-child button {{
+  background: color-mix(in srgb, var(--assistant-surface) 88%, transparent) !important;
+  border: 1px solid color-mix(in srgb, var(--assistant-border) 86%, transparent) !important;
+  color: color-mix(in srgb, var(--assistant-accent) 68%, var(--assistant-text)) !important;
+  box-shadow: 0 10px 18px -18px var(--assistant-shadow);
+}}
+header[data-testid="stHeader"] button:hover,
+.stAppHeader button:hover,
+[data-testid="stSidebar"] > div:first-child > div:first-child button:hover {{
+  border-color: color-mix(in srgb, var(--assistant-accent) 48%, var(--assistant-border)) !important;
+  color: var(--assistant-accent) !important;
+}}
+header[data-testid="stHeader"] button span,
+header[data-testid="stHeader"] button svg,
+.stAppHeader button span,
+.stAppHeader button svg,
+[data-testid="stSidebar"] > div:first-child > div:first-child button span,
+[data-testid="stSidebar"] > div:first-child > div:first-child button svg {{
+  color: inherit !important;
+  fill: currentColor !important;
+  stroke: currentColor !important;
+  opacity: 1 !important;
+}}
+[data-testid="stToolbar"] {{
+  min-height: 0;
 }}
 [data-testid="stSidebar"] > div:first-child {{
-  background: color-mix(in srgb, var(--assistant-surface) 96%, transparent);
+  background:
+    radial-gradient(circle at top left, var(--assistant-accent-soft), transparent 28%),
+    linear-gradient(180deg, var(--assistant-sidebar) 0%, var(--assistant-bg) 100%);
+  border-right: 1px solid var(--assistant-border);
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.02), 18px 0 40px -34px var(--assistant-shadow);
 }}
-.stApp [data-testid="stChatMessage"], .assistant-panel {{
-  background: var(--assistant-surface);
-  border: 1px solid var(--assistant-border);
-  border-radius: 1rem;
+[data-testid="stSidebarResizer"] {{
+  position: relative;
+  background: transparent !important;
+}}
+[data-testid="stSidebarResizer"]::before {{
+  content: "";
+  position: absolute;
+  inset: 0.35rem 0.1rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--assistant-border) 72%, transparent);
+}}
+[data-testid="stSidebarResizer"]:hover::before,
+[data-testid="stSidebarResizer"]:active::before {{
+  background: color-mix(in srgb, var(--assistant-accent) 72%, transparent);
+}}
+[data-testid="stSidebarResizer"] * {{
+  background: transparent !important;
+  color: var(--assistant-border) !important;
+}}
+[data-testid="stSidebar"] .block-container,
+[data-testid="stAppViewContainer"] .block-container {{
+  padding-top: 1.25rem;
+}}
+[data-testid="stAppViewContainer"] .main .block-container {{
+  padding-top: 1.7rem;
+}}
+[data-testid="stSidebar"] .block-container {{
+  padding-right: 1rem;
+}}
+.stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6 {{
+  color: var(--assistant-text);
+  letter-spacing: -0.01em;
+}}
+[data-testid="stSidebar"] h2 {{
+  font-size: 1rem;
+  margin-top: 0.25rem;
+}}
+[data-testid="stSidebar"] h3 {{
+  font-size: 0.84rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--assistant-muted);
+}}
+.stApp p, .stApp li, .stApp label, .stApp div[data-testid="stMarkdownContainer"] {{
   color: var(--assistant-text);
 }}
-.assistant-panel {{ padding: 0.85rem 1rem; margin-bottom: 0.9rem; }}
-.assistant-chip {{ display:inline-block; margin:0.12rem 0.35rem 0.12rem 0; padding:0.18rem 0.55rem; border-radius:999px; border:1px solid var(--assistant-border); }}
+.stApp [data-testid="stCaptionContainer"],
+.stApp [data-testid="stCaptionContainer"] p,
+.stApp .stCaption,
+.assistant-muted {{
+  color: var(--assistant-muted) !important;
+}}
+.stApp a {{
+  color: var(--assistant-accent);
+}}
+.stApp [data-testid="stChatMessage"],
+.assistant-panel,
+.stApp [data-testid="stAlertContainer"] > div,
+.stApp [data-testid="stExpander"] {{
+  background: linear-gradient(180deg, var(--assistant-elevated) 0%, var(--assistant-surface) 100%);
+  border: 1px solid var(--assistant-border);
+  border-radius: 1rem;
+  box-shadow: 0 18px 40px -26px var(--assistant-shadow);
+  color: var(--assistant-text);
+}}
+[data-testid="stSidebar"] [data-testid="stAlertContainer"] > div {{
+  background: linear-gradient(180deg, color-mix(in srgb, var(--assistant-elevated) 98%, black 2%), var(--assistant-surface));
+}}
+.stApp [data-testid="stChatMessage"] {{
+  padding: 0.95rem 1rem;
+  margin-bottom: 0.9rem;
+}}
+.assistant-panel {{
+  padding: 1rem 1.1rem;
+  margin-bottom: 1rem;
+}}
+.assistant-summary-panel {{
+  margin-top: 0.8rem;
+}}
+.assistant-source-status {{
+  margin: -0.2rem 0 0.7rem;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}}
+.assistant-source-status--available {{
+  color: color-mix(in srgb, var(--assistant-success) 72%, var(--assistant-text));
+}}
+.assistant-source-status--disabled {{
+  color: var(--assistant-muted);
+}}
+.assistant-source-status--warning {{
+  color: color-mix(in srgb, var(--assistant-warning) 78%, var(--assistant-text));
+}}
+.assistant-source-status--blocked {{
+  color: color-mix(in srgb, var(--assistant-error) 82%, var(--assistant-text));
+}}
+.assistant-panel__title {{
+  margin-bottom: 0.55rem;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--assistant-muted);
+}}
+.assistant-panel__headline {{
+  margin-bottom: 0.35rem;
+  font-size: 1.15rem;
+  font-weight: 650;
+  color: var(--assistant-text);
+}}
+.assistant-empty-state {{
+  background:
+    linear-gradient(180deg, var(--assistant-elevated) 0%, var(--assistant-surface) 72%),
+    radial-gradient(circle at top right, var(--assistant-accent-soft), transparent 50%);
+}}
+.assistant-chip {{
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin: 0.14rem 0.42rem 0.14rem 0;
+  padding: 0.24rem 0.62rem;
+  border-radius: 999px;
+  border: 1px solid var(--assistant-border);
+  background: var(--assistant-elevated);
+  color: var(--assistant-text);
+  font-size: 0.79rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}}
+.assistant-chip--ready {{
+  border-color: color-mix(in srgb, var(--assistant-success) 42%, var(--assistant-border));
+  background: color-mix(in srgb, var(--assistant-success) 16%, var(--assistant-elevated));
+}}
+.assistant-chip--warning {{
+  border-color: color-mix(in srgb, var(--assistant-warning) 44%, var(--assistant-border));
+  background: color-mix(in srgb, var(--assistant-warning) 16%, var(--assistant-elevated));
+}}
+.assistant-chip--blocked {{
+  border-color: color-mix(in srgb, var(--assistant-error) 44%, var(--assistant-border));
+  background: color-mix(in srgb, var(--assistant-error) 14%, var(--assistant-elevated));
+}}
+.assistant-chip--approval {{
+  border-color: color-mix(in srgb, var(--assistant-accent) 46%, var(--assistant-border));
+  background: color-mix(in srgb, var(--assistant-accent) 16%, var(--assistant-elevated));
+}}
+.stApp .stButton > button,
+.stApp .stDownloadButton > button {{
+  border-radius: 0.85rem;
+  border: 1px solid color-mix(in srgb, var(--assistant-accent) 34%, var(--assistant-border));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--assistant-elevated) 96%, white 4%), var(--assistant-surface));
+  color: var(--assistant-text);
+  font-weight: 650;
+  box-shadow: 0 12px 22px -18px var(--assistant-shadow);
+  transition: transform 140ms ease, box-shadow 140ms ease, filter 140ms ease, border-color 140ms ease;
+}}
+.stApp .stButton > button:hover,
+.stApp .stDownloadButton > button:hover {{
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--assistant-accent) 52%, var(--assistant-border));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--assistant-accent-soft) 55%, var(--assistant-elevated)), var(--assistant-surface));
+  box-shadow: 0 18px 30px -22px var(--assistant-shadow);
+}}
+[data-testid="stSidebar"] .stButton > button {{
+  background: linear-gradient(180deg, color-mix(in srgb, var(--assistant-elevated) 98%, black 2%), var(--assistant-surface));
+}}
+.stApp .stButton > button:focus,
+.stApp .stDownloadButton > button:focus,
+.stApp input:focus,
+.stApp textarea:focus,
+.stApp [data-baseweb="select"] input:focus {{
+  outline: none;
+  box-shadow: 0 0 0 0.18rem var(--assistant-accent-soft) !important;
+}}
+.stApp input,
+.stApp textarea,
+.stApp [data-baseweb="input"] > div,
+.stApp [data-baseweb="base-input"] > div,
+.stApp [data-baseweb="select"] > div {{
+  background: var(--assistant-elevated) !important;
+  color: var(--assistant-text) !important;
+  border-color: var(--assistant-border) !important;
+}}
+.stApp textarea::placeholder,
+.stApp input::placeholder {{
+  color: color-mix(in srgb, var(--assistant-muted) 86%, transparent) !important;
+}}
+.stApp [data-baseweb="tag"] {{
+  background: var(--assistant-elevated) !important;
+  color: var(--assistant-text) !important;
+}}
+.stApp hr {{
+  border-color: var(--assistant-border);
+}}
 </style>
+<script>
+(() => {{
+  const assistantDialogTitle = "Connection to llm-tools assistant lost";
+  const assistantDialogBody = "Reconnect to the llm-tools assistant by refreshing this page or restarting the assistant service if it stopped.";
+
+  const updateReconnectDialog = () => {{
+    const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
+    for (const dialog of dialogs) {{
+      const title = dialog.querySelector('h1, h2, [data-testid="stMarkdownContainer"] h1, [data-testid="stMarkdownContainer"] h2');
+      if (!title || !/connection error/i.test(title.textContent || "")) {{
+        continue;
+      }}
+      title.textContent = assistantDialogTitle;
+      const paragraphs = Array.from(dialog.querySelectorAll('p'));
+      for (const paragraph of paragraphs) {{
+        const text = (paragraph.textContent || "").trim();
+        if (/streamlit/i.test(text) || /restart it in your terminal/i.test(text)) {{
+          paragraph.textContent = assistantDialogBody;
+        }}
+      }}
+      for (const codeBlock of dialog.querySelectorAll('pre, code')) {{
+        const text = (codeBlock.textContent || "").trim();
+        if (/streamlit run/i.test(text) || /yourscript[.]py/i.test(text)) {{
+          const container = codeBlock.closest('pre') || codeBlock;
+          if (container instanceof HTMLElement) {{
+            container.style.display = 'none';
+          }}
+        }}
+      }}
+    }}
+  }};
+
+  updateReconnectDialog();
+  const observer = new MutationObserver(() => updateReconnectDialog());
+  observer.observe(document.body, {{ childList: true, subtree: true }});
+}})();
+</script>
 """,
         unsafe_allow_html=True,
     )
+    with suppress(Exception):
+        st.iframe(
+            """
+<script>
+(() => {
+  const parentDocument = window.parent?.document;
+  if (!parentDocument) {
+    return;
+  }
+
+  const assistantDialogTitle = "Connection to llm-tools assistant lost";
+  const assistantDialogBody = "Reconnect to the llm-tools assistant by refreshing this page or restarting the assistant service if it stopped.";
+  const styleId = "llm-tools-connection-override-style";
+
+  const installStyle = () => {
+    if (parentDocument.getElementById(styleId)) {
+      return;
+    }
+    const style = parentDocument.createElement("style");
+    style.id = styleId;
+    style.textContent = `
+      [data-testid="stConnectionStatus"] {
+        display: none !important;
+      }
+    `;
+    parentDocument.head.appendChild(style);
+  };
+
+  const replaceLeafText = (root, pattern, replacement) => {
+    const candidates = Array.from(root.querySelectorAll("p, div, span, code, pre"));
+    for (const candidate of candidates) {
+      if (!(candidate instanceof HTMLElement)) {
+        continue;
+      }
+      if (candidate.children.length > 0 && candidate.tagName !== "PRE") {
+        continue;
+      }
+      const text = (candidate.textContent || "").trim();
+      if (!text || !pattern.test(text)) {
+        continue;
+      }
+      candidate.textContent = replacement;
+      return true;
+    }
+    return false;
+  };
+
+  const hideLeaf = (root, pattern) => {
+    const candidates = Array.from(root.querySelectorAll("pre, code, p, div, span"));
+    for (const candidate of candidates) {
+      if (!(candidate instanceof HTMLElement)) {
+        continue;
+      }
+      const text = (candidate.textContent || "").trim();
+      if (!text || !pattern.test(text)) {
+        continue;
+      }
+      candidate.style.display = "none";
+    }
+  };
+
+  const updateReconnectDialog = () => {
+    installStyle();
+    const dialogs = Array.from(parentDocument.querySelectorAll('[role="dialog"]'));
+    for (const dialog of dialogs) {
+      if (!(dialog instanceof HTMLElement)) {
+        continue;
+      }
+      const dialogText = (dialog.textContent || "").trim();
+      if (
+        !/connection error/i.test(dialogText)
+        && !/streamlit still running/i.test(dialogText)
+        && !/streamlit server is not responding/i.test(dialogText)
+      ) {
+        continue;
+      }
+
+      const title = dialog.querySelector("h1, h2, h3, [data-testid='stMarkdownContainer'] h1, [data-testid='stMarkdownContainer'] h2");
+      if (title instanceof HTMLElement) {
+        title.textContent = assistantDialogTitle;
+      }
+
+      replaceLeafText(
+        dialog,
+        /is streamlit still running|if you accidentally stopped streamlit|streamlit server is not responding|are you connected to the internet/i,
+        assistantDialogBody,
+      );
+      hideLeaf(dialog, /streamlit run +yourscript[.]py/i);
+    }
+  };
+
+  updateReconnectDialog();
+  const observer = new MutationObserver(() => updateReconnectDialog());
+  observer.observe(parentDocument.body, { childList: true, subtree: true });
+  window.addEventListener("beforeunload", () => observer.disconnect(), { once: true });
+})();
+</script>
+            """,
+            height=0,
+            width=0,
+        )
 
 
 def _render_fatal_error(exc: Exception) -> None:  # pragma: no cover
@@ -2006,18 +2519,32 @@ def _render_transcript_entry(
         st.markdown(entry.text)
 
 
+def _chip_class_for_token(token: str) -> str:
+    lowered = token.lower()
+    if "ready" in lowered:
+        return "assistant-chip--ready"
+    if "blocked" in lowered:
+        return "assistant-chip--blocked"
+    if "approval" in lowered:
+        return "assistant-chip--approval"
+    if "need" in lowered or "missing" in lowered:
+        return "assistant-chip--warning"
+    return ""
+
+
 def _render_summary_chips(
     record: StreamlitPersistedSessionRecord,
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
     root_text = record.runtime.root_path or "chat only"
     readiness = "".join(
-        f"<span class='assistant-chip'>{token}</span>"
+        f"<span class='assistant-chip {_chip_class_for_token(token)}'>{token}</span>"
         for token in _source_readiness_tokens(record.runtime)
     )
     st.markdown(
-        "<div class='assistant-panel'>"
-        "<div><strong>Assistant session</strong></div>"
+        "<div class='assistant-panel assistant-summary-panel'>"
+        "<div class='assistant-panel__title'>Current Session</div>"
+        "<div class='assistant-panel__headline'>Assistant setup at a glance</div>"
         f"<span class='assistant-chip'>model: {record.runtime.model_name}</span>"
         f"<span class='assistant-chip'>provider: {record.runtime.provider.value}</span>"
         f"<span class='assistant-chip'>workspace: {root_text}</span>"
@@ -2032,7 +2559,12 @@ def _render_empty_state(
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
     root_text = record.runtime.root_path or "No workspace selected"
-    st.markdown("### Start with a normal question")
+    st.markdown(
+        "<div class='assistant-panel assistant-empty-state'>"
+        "<div class='assistant-panel__title'>Start Here</div>"
+        "<div class='assistant-panel__headline'>Start with a normal question</div>",
+        unsafe_allow_html=True,
+    )
     st.caption(f"Workspace: {root_text}")
     st.markdown(
         "This assistant can answer directly without tools. Turn on local or connected sources in the sidebar only when you want it to pull from workspace or external systems."
@@ -2040,6 +2572,7 @@ def _render_empty_state(
     st.markdown(
         "Use the research panel for durable multi-turn work when you need something longer-running than a normal assistant reply."
     )
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _visible_transcript_entries(
@@ -2053,10 +2586,11 @@ def _build_research_controller(
     config: StreamlitAssistantConfig,
     runtime: StreamlitRuntimeConfig,
 ) -> AssistantResearchSessionController:
+    effective_config = _effective_assistant_config(config=config, runtime=runtime)
     budget_policy = BudgetPolicy(
-        max_turns=config.research.default_max_turns,
-        max_tool_invocations=config.research.default_max_tool_invocations,
-        max_elapsed_seconds=config.research.default_max_elapsed_seconds,
+        max_turns=effective_config.research.default_max_turns,
+        max_tool_invocations=effective_config.research.default_max_tool_invocations,
+        max_elapsed_seconds=effective_config.research.default_max_elapsed_seconds,
     )
 
     def _service_factory() -> HarnessSessionService:
@@ -2073,7 +2607,7 @@ def _build_research_controller(
             allow_network=runtime.allow_network,
             allow_filesystem=runtime.allow_filesystem and root is not None,
             allow_subprocess=runtime.allow_subprocess and root is not None,
-            redaction_config=config.policy.redaction,
+            redaction_config=effective_config.policy.redaction,
         )
         registry, workflow_executor = build_assistant_executor(policy=policy)
         exposed_tool_names = _exposed_tool_names_for_runtime(
@@ -2083,9 +2617,7 @@ def _build_research_controller(
             env=_runtime_env(),
         )
         harness_provider = build_live_harness_provider(
-            config=config.model_copy(
-                update={"protection": runtime.protection}, deep=True
-            ),
+            config=effective_config,
             provider_config=llm_config,
             model_name=runtime.model_name,
             api_key=api_key,
@@ -2099,7 +2631,7 @@ def _build_research_controller(
             allow_subprocess=runtime.allow_subprocess and root is not None,
         )
         return HarnessSessionService(
-            store=FileHarnessStateStore(_research_store_dir(config)),
+            store=FileHarnessStateStore(_research_store_dir(effective_config)),
             workflow_executor=workflow_executor,
             provider=harness_provider,
             context_builder=AssistantHarnessContextBuilder(
@@ -2111,9 +2643,48 @@ def _build_research_controller(
     return AssistantResearchSessionController(
         service_factory=_service_factory,
         budget_policy=budget_policy,
-        include_replay_by_default=config.research.include_replay_by_default,
-        list_limit=config.research.max_recent_sessions,
+        include_replay_by_default=effective_config.research.include_replay_by_default,
+        list_limit=effective_config.research.max_recent_sessions,
     )
+
+
+def _sync_theme_preference_from_widget_state(
+    preferences: StreamlitPreferences,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    key = "assistant-theme-mode"
+    raw_value = st.session_state.get(key)
+    if isinstance(raw_value, bool):
+        selected: Literal["dark", "light"] = "dark" if raw_value else "light"
+    elif raw_value in {"dark", "light"}:
+        selected = cast(Literal["dark", "light"], raw_value)
+    else:
+        st.session_state[key] = preferences.theme_mode == "dark"
+        return
+    if selected != preferences.theme_mode:
+        preferences.theme_mode = selected
+        preferences.appearance_mode_explicit = True
+
+
+def _render_sidebar_appearance_controls(
+    preferences: StreamlitPreferences,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    st.caption(
+        "Dark mode is the product default. Flip this switch to use the darker presentation immediately."
+    )
+    toggle_key = "assistant-theme-mode"
+    if toggle_key in st.session_state:
+        st.toggle(
+            "Dark mode",
+            key=toggle_key,
+        )
+    else:
+        st.toggle(
+            "Dark mode",
+            value=preferences.theme_mode == "dark",
+            key=toggle_key,
+        )
 
 
 def _render_sidebar_session_controls(
@@ -2124,7 +2695,6 @@ def _render_sidebar_session_controls(
     runtime: StreamlitRuntimeConfig,
 ) -> bool:  # pragma: no cover
     st = _streamlit_module()
-    st.markdown("## Assistant sessions")
     st.caption(
         "New sessions reuse the current model, permissions, and enabled sources."
     )
@@ -2167,28 +2737,84 @@ def _render_sidebar_session_controls(
                 is_active=is_active,
             )
         )
-    st.markdown("---")
     return False
 
 
-def _render_sidebar_runtime_settings(
+def _provider_type_label(runtime: StreamlitRuntimeConfig) -> str:
+    return (
+        "Ollama" if runtime.provider is ProviderPreset.OLLAMA else "OpenAI Compatible"
+    )
+
+
+def _apply_provider_type_choice(
+    runtime: StreamlitRuntimeConfig,
+    *,
+    choice: str,
+) -> None:
+    if choice == "Ollama":
+        runtime.provider = ProviderPreset.OLLAMA
+        runtime.provider_mode_strategy = ProviderModeStrategy.AUTO
+        runtime.api_base_url = "http://127.0.0.1:11434/v1"
+        return
+    if runtime.provider is ProviderPreset.OLLAMA:
+        runtime.provider = ProviderPreset.CUSTOM_OPENAI_COMPATIBLE
+        runtime.provider_mode_strategy = ProviderModeStrategy.JSON
+        runtime.api_base_url = None
+
+
+def _connection_report_for_runtime(
+    *,
+    session_id: str,
+    llm_config: Any,
+    runtime: StreamlitRuntimeConfig,
+) -> ProviderPreflightResult | None:
+    return _stored_connection_report(
+        session_id,
+        signature=_provider_signature(
+            runtime=runtime,
+            api_key=_current_api_key(llm_config),
+        ),
+    )
+
+
+def _provider_connection_status_copy(
+    report: ProviderPreflightResult,
+) -> tuple[str, bool]:
+    if not report.ok:
+        return report.actionable_message, True
+    if report.available_models:
+        return (
+            "Provider connection is ready. "
+            f"Retrieved {len(report.available_models)} model(s) for this session.",
+            False,
+        )
+    if report.model_listing_supported:
+        return (
+            "Provider connection is ready, but this endpoint returned no models.",
+            True,
+        )
+    return (
+        "Provider connection is ready, but this endpoint did not expose a model list.",
+        True,
+    )
+
+
+def _render_sidebar_provider_connection_controls(
     runtime: StreamlitRuntimeConfig,
     *,
     config: StreamlitAssistantConfig,
     session_id: str,
 ) -> Any:  # pragma: no cover
     st = _streamlit_module()
-    st.markdown("### 1. Connect model")
     st.caption(
-        "Start here. Pick the endpoint, response mode, and model you want the assistant to use for this session."
+        "Start here. Choose the provider type, endpoint, credentials, and response mode for this session."
     )
-    provider_options = [preset.value for preset in type(runtime.provider)]
-    provider_value = st.selectbox(
-        "Provider",
-        options=provider_options,
-        index=provider_options.index(runtime.provider.value),
+    provider_choice = st.selectbox(
+        "Provider Type",
+        options=["Ollama", "OpenAI Compatible"],
+        index=0 if _provider_type_label(runtime) == "Ollama" else 1,
     )
-    runtime.provider = type(runtime.provider)(provider_value)
+    _apply_provider_type_choice(runtime, choice=str(provider_choice))
     mode_options = [mode.value for mode in type(runtime.provider_mode_strategy)]
     mode_value = st.selectbox(
         "Provider mode",
@@ -2196,11 +2822,9 @@ def _render_sidebar_runtime_settings(
         index=mode_options.index(runtime.provider_mode_strategy.value),
     )
     runtime.provider_mode_strategy = type(runtime.provider_mode_strategy)(mode_value)
-    runtime.model_name = (
-        st.text_input("Model", value=runtime.model_name).strip() or runtime.model_name
-    )
     runtime.api_base_url = (
-        st.text_input("API base URL", value=runtime.api_base_url or "").strip() or None
+        st.text_input("Provider Base URL", value=runtime.api_base_url or "").strip()
+        or None
     )
 
     llm_config = _llm_config_for_runtime(config, runtime)
@@ -2219,109 +2843,335 @@ def _render_sidebar_runtime_settings(
                 f"This provider needs {env_var}. Use an environment variable or enter a session-only key here before you validate or run a turn."
             )
         else:
-            st.caption("Model credentials are available for this session.")
+            st.caption("Provider credentials are available for this session.")
     else:
         st.caption("This provider does not require an API key for the current session.")
 
-    if st.button("Validate model connection", key=f"validate-connection:{session_id}"):
+    report = _connection_report_for_runtime(
+        session_id=session_id,
+        llm_config=llm_config,
+        runtime=runtime,
+    )
+    if st.button(
+        "Validate provider connection",
+        key=f"validate-connection:{session_id}",
+    ):
         report = _validate_model_connection(
             session_id=session_id,
             llm_config=llm_config,
             runtime=runtime,
         )
-        if report.ok:
-            st.caption(report.actionable_message)
-        else:
-            st.warning(report.actionable_message)
-    else:
-        cached_report = _stored_connection_report(
-            session_id,
-            signature=_provider_signature(
-                runtime=runtime,
-                api_key=_current_api_key(llm_config),
-            ),
+    if report is None:
+        st.caption(
+            "Validate the current provider settings before you choose a model or run chat or research."
         )
-        if cached_report is None:
-            st.caption(
-                "Validate the current model settings before you run chat or research."
-            )
-        elif cached_report.ok:
-            st.caption(cached_report.actionable_message)
+    else:
+        status_copy, is_warning = _provider_connection_status_copy(report)
+        if is_warning:
+            st.warning(status_copy)
         else:
-            st.warning(cached_report.actionable_message)
+            st.caption(status_copy)
+    return llm_config
 
-    st.markdown("### 2. Remote credentials")
+
+def _render_sidebar_model_selection_controls(
+    runtime: StreamlitRuntimeConfig,
+    *,
+    llm_config: Any,
+    session_id: str,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
     st.caption(
-        "Add session-only credentials for the connected sources you want to use. These values are kept in memory only and are never written to session storage or exported YAML."
+        "Choose a model after the provider connection succeeds and returns the available model list."
     )
-    for group_name, field_names in _REMOTE_CREDENTIAL_FIELDS.items():
-        st.markdown(f"**{group_name}**")
-        for field_name in field_names:
-            secret = st.text_input(
-                field_name,
-                value=str(_secret_cache().get(field_name, "")),
-                key=f"remote-secret:{field_name}",
-                type="password",
-                placeholder="Optional session-only credential",
-            ).strip()
-            _set_secret_value(field_name, secret)
+    report = _connection_report_for_runtime(
+        session_id=session_id,
+        llm_config=llm_config,
+        runtime=runtime,
+    )
+    options = [runtime.model_name]
+    disabled = True
+    if report is None:
+        st.caption("Validate the provider connection first.")
+    elif not report.ok:
+        st.warning(report.actionable_message)
+    elif report.available_models:
+        options = report.available_models
+        disabled = False
+    elif report.model_listing_supported:
+        st.warning(
+            "Provider validation succeeded, but the endpoint returned no models to choose from."
+        )
+    else:
+        st.warning(
+            "Provider validation succeeded, but this endpoint did not expose a model list."
+        )
+    selected = st.selectbox(
+        "Model",
+        options=options,
+        index=options.index(runtime.model_name) if runtime.model_name in options else 0,
+        disabled=disabled,
+    )
+    if not disabled:
+        runtime.model_name = str(selected)
 
-    st.markdown("### 3. Choose workspace")
-    current_root = st.text_input(
-        "Workspace root",
-        value=runtime.root_path or "",
+
+def _remote_source_url_field(group_name: str) -> str | None:
+    settings = _REMOTE_SOURCE_SETTINGS.get(group_name)
+    if settings is None:
+        return None
+    return cast(str, settings["url_field"])
+
+
+def _remote_source_secret_fields(group_name: str) -> tuple[str, ...]:
+    settings = _REMOTE_SOURCE_SETTINGS.get(group_name)
+    if settings is None:
+        return ()
+    return cast(tuple[str, ...], settings["secret_fields"])
+
+
+def _tool_display_name(tool_name: str) -> str:
+    overrides = {
+        "read_gitlab_file": "Read files",
+        "read_gitlab_merge_request": "Read merge requests",
+        "search_gitlab_code": "Search code",
+        "read_jira_issue": "Read issues",
+        "search_jira": "Search issues",
+        "read_confluence_page": "Read pages",
+        "read_confluence_attachment": "Read attachments",
+        "search_confluence": "Search pages",
+        "read_bitbucket_file": "Read files",
+        "read_bitbucket_pull_request": "Read pull requests",
+        "search_bitbucket_code": "Search code",
+        "read_file": "Read files",
+        "list_directory": "List directories",
+        "find_files": "Find files",
+        "search_text": "Search text",
+        "read_git_diff": "Read diffs",
+        "read_git_file": "Read tracked files",
+        "show_git_status": "Show status",
+    }
+    if tool_name in overrides:
+        return overrides[tool_name]
+    return tool_name.replace("_", " ").title()
+
+
+def _source_status_class(item: AssistantToolCapability) -> str:
+    return {
+        "available": "assistant-source-status--available",
+        "disabled": "assistant-source-status--disabled",
+        "missing_workspace": "assistant-source-status--warning",
+        "missing_credentials": "assistant-source-status--warning",
+        "permission_blocked": "assistant-source-status--blocked",
+    }[item.status]
+
+
+def _render_source_tool_status(
+    item: AssistantToolCapability,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    st.markdown(
+        "<div class='assistant-source-status "
+        + _source_status_class(item)
+        + "'>"
+        + _tool_capability_caption(item)
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _pick_local_path(
+    *,
+    directory: bool,
+    multiple: bool = False,
+    allowed_suffixes: set[str] | None = None,
+) -> list[str] | None:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        try:
+            if directory:
+                selected = filedialog.askdirectory(mustexist=True)
+                values = [selected] if selected else []
+            elif multiple:
+                values = list(filedialog.askopenfilenames())
+            else:
+                selected = filedialog.askopenfilename()
+                values = [selected] if selected else []
+        finally:
+            root.destroy()
+    except Exception as exc:  # pragma: no cover - UI integration fallback
+        _streamlit_module().warning(
+            f"Local path picker unavailable in this environment: {type(exc).__name__}: {exc}"
+        )
+        return None
+    if allowed_suffixes is not None:
+        normalized = {suffix.lower() for suffix in allowed_suffixes}
+        invalid = [
+            value for value in values if Path(value).suffix.lower() not in normalized
+        ]
+        if invalid:
+            joined = ", ".join(sorted(normalized))
+            _streamlit_module().warning(
+                f"Selected file must use one of these extensions: {joined}."
+            )
+            return None
+    cleaned = [str(Path(value).expanduser()) for value in values if str(value).strip()]
+    return cleaned or None
+
+
+def _render_directory_path_input(
+    *,
+    label: str,
+    value: str | None,
+    placeholder: str,
+    browse_key: str,
+) -> str | None:  # pragma: no cover
+    st = _streamlit_module()
+    selected_value = value or ""
+    row = st.columns([5, 1])
+    if row[1].button("Browse", key=browse_key, use_container_width=True):
+        picked = _pick_local_path(directory=True)
+        if picked:
+            selected_value = picked[0]
+    current_value = (
+        row[0].text_input(label, value=selected_value, placeholder=placeholder).strip()
+    )
+    return current_value or None
+
+
+def _render_file_path_input(
+    *,
+    label: str,
+    value: str | None,
+    placeholder: str,
+    browse_key: str,
+    allowed_suffixes: set[str] | None = None,
+) -> str | None:  # pragma: no cover
+    st = _streamlit_module()
+    selected_value = value or ""
+    row = st.columns([5, 1])
+    if row[1].button("Browse", key=browse_key, use_container_width=True):
+        picked = _pick_local_path(
+            directory=False,
+            allowed_suffixes=allowed_suffixes,
+        )
+        if picked:
+            selected_value = picked[0]
+    current_value = (
+        row[0].text_input(label, value=selected_value, placeholder=placeholder).strip()
+    )
+    return current_value or None
+
+
+def _source_group_tool_names() -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    capability_groups = build_tool_capabilities(
+        tool_specs=_all_tool_specs(),
+        enabled_tools=set(),
+        root_path=None,
+        env={},
+        allow_network=True,
+        allow_filesystem=True,
+        allow_subprocess=True,
+        require_approval_for=set(),
+    )
+    for group_name, items in capability_groups.items():
+        grouped[group_name] = [item.tool_name for item in items]
+    return grouped
+
+
+def _capability_groups_for_runtime(
+    runtime: StreamlitRuntimeConfig,
+) -> dict[str, list[AssistantToolCapability]]:
+    return build_tool_capabilities(
+        tool_specs=_all_tool_specs(),
+        enabled_tools=set(runtime.enabled_tools),
+        root_path=runtime.root_path,
+        env=_runtime_env(),
+        allow_network=runtime.allow_network,
+        allow_filesystem=runtime.allow_filesystem and runtime.root_path is not None,
+        allow_subprocess=runtime.allow_subprocess and runtime.root_path is not None,
+        require_approval_for=set(runtime.require_approval_for),
+    )
+
+
+def _render_remote_source_fields(group_name: str) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    url_field = _remote_source_url_field(group_name)
+    if url_field is not None:
+        url_value = st.text_input(
+            f"{group_name} URL",
+            value=str(_get_session_env_value(url_field) or ""),
+            placeholder=f"https://{group_name.lower()}.example.com",
+            key=f"remote-url:{url_field}",
+        ).strip()
+        _set_session_env_value(url_field, url_value)
+    for field_name in _remote_source_secret_fields(group_name):
+        label = f"{group_name} token"
+        secret = st.text_input(
+            label,
+            value=str(_secret_cache().get(field_name, "")),
+            key=f"remote-secret:{field_name}",
+            type="password",
+            placeholder="Session-only secret",
+        ).strip()
+        _set_secret_value(field_name, secret)
+
+
+def _render_sidebar_workspace_controls(
+    runtime: StreamlitRuntimeConfig,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    runtime.root_path = _render_directory_path_input(
+        label="Workspace root",
+        value=runtime.root_path,
         placeholder="Optional local directory",
-    ).strip()
-    if current_root:
-        candidate = Path(current_root).expanduser()
+        browse_key="browse-workspace-root",
+    )
+    if runtime.root_path:
+        candidate = Path(runtime.root_path).expanduser()
         if candidate.exists() and candidate.is_dir():
             runtime.root_path = str(candidate.resolve())
         else:
             st.caption("Workspace root must point to an existing directory.")
-    else:
-        runtime.root_path = None
-        runtime.allow_filesystem = False
-        runtime.allow_subprocess = False
+            runtime.root_path = None
     if runtime.root_path is None:
         st.caption(
-            "Chat-only works now. Add a workspace root when you want local files or git."
+            "Chat-only works now. Add a workspace root when you want local files or git. Filesystem and subprocess permissions stay configured in Advanced, but they do not apply until a workspace is selected."
         )
     else:
         st.caption(
-            "Workspace selected. Local tools are scoped now, and you can allow filesystem or subprocess access in Step 4."
+            "Workspace selected. Local tools are scoped now, and the Advanced access settings apply inside this root."
         )
-    return llm_config
 
 
 def _render_sidebar_permission_controls(
     runtime: StreamlitRuntimeConfig,
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
-    st.markdown("### 4. Allow access")
     st.caption(
-        "Turn on only what you need: network unlocks connected sources, filesystem unlocks local reads, and subprocess unlocks local command tools."
+        "Network, filesystem, and subprocess access are on by default. Turn them off here when a session should be more constrained."
     )
     runtime.allow_network = st.checkbox("Network access", value=runtime.allow_network)
     runtime.allow_filesystem = st.checkbox(
         "Filesystem access",
         value=runtime.allow_filesystem,
-        disabled=runtime.root_path is None,
     )
     runtime.allow_subprocess = st.checkbox(
         "Subprocess access",
         value=runtime.allow_subprocess,
-        disabled=runtime.root_path is None,
     )
     if runtime.root_path is None:
         st.caption(
-            "Select a workspace in Step 3 before filesystem or subprocess access becomes available."
-        )
-    else:
-        st.caption(
-            "Filesystem and subprocess access stay off until you enable them here, even after a workspace is selected."
+            "Filesystem and subprocess permissions only become effective after you choose a workspace root."
         )
 
-    st.markdown("### Approval gates")
+    st.markdown("**Approval gates**")
     st.caption(
         "Use approval gates when you want the assistant to pause before reads or writes that matter for this session."
     )
@@ -2338,57 +3188,98 @@ def _render_sidebar_permission_controls(
             runtime.require_approval_for.discard(side_effect)
 
 
-def _render_sidebar_tool_controls(
+def _render_sidebar_source_controls(
     runtime: StreamlitRuntimeConfig,
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
-    st.markdown("### 5. Choose sources")
     st.caption(
-        "Turn on the sources you want after Steps 1-4 are configured. Each source shows what is ready and what is still missing."
+        "Turn on a source family first. Once it is on, the URL, credentials, and individual source options for that family become available below it."
     )
-    capability_groups = build_tool_capabilities(
-        tool_specs=_all_tool_specs(),
-        enabled_tools=set(runtime.enabled_tools),
-        root_path=runtime.root_path,
-        env=_runtime_env(),
-        allow_network=runtime.allow_network,
-        allow_filesystem=runtime.allow_filesystem and runtime.root_path is not None,
-        allow_subprocess=runtime.allow_subprocess and runtime.root_path is not None,
-        require_approval_for=set(runtime.require_approval_for),
-    )
-    summaries = build_tool_group_capability_summaries(capability_groups)
-    st.markdown("**Current source readiness**")
-    st.caption(_source_setup_summary_copy(summaries))
-    st.caption(_source_setup_next_steps_copy(runtime, summaries))
-
+    grouped_tool_names = _source_group_tool_names()
     enabled = set(runtime.enabled_tools)
-    for group_name, items in capability_groups.items():
-        st.markdown(f"**{group_name}**")
-        summary = summaries[group_name]
-        st.caption(_group_readiness_copy(group_name, summary))
-        for item in items:
-            checked = st.checkbox(
-                item.tool_name,
-                value=item.tool_name in enabled,
-                key=f"tool:{runtime.provider.value}:{item.tool_name}",
+    ordered_groups = [
+        group_name
+        for group_name in _SOURCE_GROUP_ORDER
+        if group_name in grouped_tool_names
+    ] + [
+        group_name
+        for group_name in grouped_tool_names
+        if group_name not in _SOURCE_GROUP_ORDER
+    ]
+
+    for group_name in ordered_groups:
+        tool_names = grouped_tool_names[group_name]
+        currently_enabled = any(tool_name in enabled for tool_name in tool_names)
+        with st.expander(group_name, expanded=currently_enabled):
+            group_enabled = st.checkbox(
+                f"Enable {group_name}",
+                value=currently_enabled,
+                key=f"source-group:{group_name}",
             )
-            if checked:
-                enabled.add(item.tool_name)
-            else:
-                enabled.discard(item.tool_name)
-            st.caption(_tool_capability_caption(item))
+            if (
+                group_enabled
+                and not currently_enabled
+                and not any(tool_name in enabled for tool_name in tool_names)
+            ):
+                enabled.update(tool_names)
+            if not group_enabled:
+                enabled.difference_update(tool_names)
+                st.caption(f"{group_name} is off for this session.")
+                continue
+
+            runtime.enabled_tools = sorted(enabled)
+            if group_name in _REMOTE_SOURCE_SETTINGS:
+                _render_remote_source_fields(group_name)
+
+            capability_groups = _capability_groups_for_runtime(runtime)
+            summaries = build_tool_group_capability_summaries(capability_groups)
+            items = capability_groups.get(group_name, [])
+            summary = summaries[group_name]
+            st.caption(_group_readiness_copy(group_name, summary))
+            for item in items:
+                checked = st.checkbox(
+                    _tool_display_name(item.tool_name),
+                    value=item.tool_name in enabled,
+                    key=f"tool:{runtime.provider.value}:{group_name}:{item.tool_name}",
+                )
+                if checked:
+                    enabled.add(item.tool_name)
+                else:
+                    enabled.discard(item.tool_name)
+                runtime.enabled_tools = sorted(enabled)
+                current_items = {
+                    current_item.tool_name: current_item
+                    for current_item in _capability_groups_for_runtime(runtime).get(
+                        group_name, []
+                    )
+                }
+                current_item = current_items.get(item.tool_name, item)
+                _render_source_tool_status(current_item)
+
     runtime.enabled_tools = sorted(enabled)
-    runtime.inspector_open = st.checkbox(
-        "Show inspector details",
-        value=runtime.inspector_open,
+    final_capability_groups = _capability_groups_for_runtime(runtime)
+    final_summaries = build_tool_group_capability_summaries(final_capability_groups)
+    st.markdown("**Current source readiness**")
+    st.caption(_source_setup_summary_copy(final_summaries))
+    st.caption(_source_setup_next_steps_copy(runtime, final_summaries))
+
+
+def _render_sidebar_remote_credentials_controls() -> None:  # pragma: no cover
+    _streamlit_module().caption(
+        "Remote credentials are configured inside each enabled source family in the Sources section."
     )
+
+
+def _render_sidebar_tool_controls(
+    runtime: StreamlitRuntimeConfig,
+) -> None:  # pragma: no cover
+    _render_sidebar_source_controls(runtime)
 
 
 def _render_sidebar_protection_controls(
     runtime: StreamlitRuntimeConfig,
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
-    st.markdown("### 6. Protection")
     runtime.protection.enabled = st.checkbox(
         "Enable proprietary protection",
         value=runtime.protection.enabled,
@@ -2396,29 +3287,262 @@ def _render_sidebar_protection_controls(
     if not runtime.protection.enabled:
         st.caption("Protection is off for this session.")
         return
+
+    protection_paths = list(runtime.protection.document_paths)
+    add_file_col, add_dir_col = st.columns(2)
+    if add_file_col.button(
+        "Add file",
+        key="protection-add-file",
+        use_container_width=True,
+    ):
+        picked = _pick_local_path(directory=False, multiple=True)
+        if picked:
+            protection_paths = _dedupe_preserve([*protection_paths, *picked])
+    if add_dir_col.button(
+        "Add directory",
+        key="protection-add-directory",
+        use_container_width=True,
+    ):
+        picked = _pick_local_path(directory=True)
+        if picked:
+            protection_paths = _dedupe_preserve([*protection_paths, *picked])
     raw_paths = st.text_area(
         "Protection corpus paths",
-        value="\n".join(runtime.protection.document_paths),
+        value="\n".join(protection_paths),
         placeholder="One file or directory path per line",
         key="assistant-protection-paths",
     )
     runtime.protection.document_paths = [
         entry.strip() for entry in raw_paths.splitlines() if entry.strip()
     ]
-    runtime.protection.corrections_path = (
-        st.text_input(
-            "Protection corrections path",
-            value=runtime.protection.corrections_path or "",
-            placeholder="Optional JSON or YAML corrections file",
-        ).strip()
-        or None
+    corrections_path = _render_file_path_input(
+        label="Protection corrections path",
+        value=runtime.protection.corrections_path,
+        placeholder="Optional JSON or YAML corrections file",
+        browse_key="browse-protection-corrections",
+        allowed_suffixes={".json", ".yaml", ".yml"},
     )
+    if corrections_path is not None and Path(corrections_path).suffix.lower() not in {
+        ".json",
+        ".yaml",
+        ".yml",
+    }:
+        st.warning("Protection corrections path must be a JSON or YAML file.")
+        runtime.protection.corrections_path = None
+    else:
+        runtime.protection.corrections_path = corrections_path
     report = _protection_report(runtime.protection)
     st.caption(_protection_next_steps(report))
     if report.usable_document_count:
         st.caption(f"Loaded protection documents: {report.usable_document_count}")
     for issue in report.issues[:10]:
         st.caption(f"{issue.path}: {issue.message}")
+
+
+def _render_sidebar_advanced_controls(
+    runtime: StreamlitRuntimeConfig,
+) -> None:  # pragma: no cover
+    st = _streamlit_module()
+    st.caption(
+        "Advanced settings hold session permissions, protection, exported defaults, and the operational limits that end up in generated YAML."
+    )
+    with st.expander("Access and approvals", expanded=False):
+        _render_sidebar_permission_controls(runtime)
+    with st.expander("Protection", expanded=False):
+        _render_sidebar_protection_controls(runtime)
+    with st.expander("Model behavior", expanded=False):
+        runtime.temperature = float(
+            st.number_input(
+                "Temperature",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(runtime.temperature),
+                step=0.1,
+            )
+        )
+        runtime.timeout_seconds = float(
+            st.number_input(
+                "Provider timeout seconds",
+                min_value=1.0,
+                value=float(runtime.timeout_seconds),
+                step=1.0,
+            )
+        )
+    with st.expander("Session limits", expanded=False):
+        runtime.session_config.max_context_tokens = int(
+            st.number_input(
+                "Max context tokens",
+                min_value=1,
+                value=int(runtime.session_config.max_context_tokens),
+                step=1,
+            )
+        )
+        runtime.session_config.max_tool_round_trips = int(
+            st.number_input(
+                "Max tool round trips",
+                min_value=1,
+                value=int(runtime.session_config.max_tool_round_trips),
+                step=1,
+            )
+        )
+        runtime.session_config.max_tool_calls_per_round = int(
+            st.number_input(
+                "Max tool calls per round",
+                min_value=1,
+                value=int(runtime.session_config.max_tool_calls_per_round),
+                step=1,
+            )
+        )
+        runtime.session_config.max_total_tool_calls_per_turn = int(
+            st.number_input(
+                "Max total tool calls per turn",
+                min_value=1,
+                value=int(runtime.session_config.max_total_tool_calls_per_turn),
+                step=1,
+            )
+        )
+    with st.expander("Tool limits", expanded=False):
+        runtime.tool_limits.max_entries_per_call = int(
+            st.number_input(
+                "Max entries per call",
+                min_value=1,
+                value=int(runtime.tool_limits.max_entries_per_call),
+                step=1,
+            )
+        )
+        runtime.tool_limits.max_recursive_depth = int(
+            st.number_input(
+                "Max recursive depth",
+                min_value=1,
+                value=int(runtime.tool_limits.max_recursive_depth),
+                step=1,
+            )
+        )
+        runtime.tool_limits.max_files_scanned = int(
+            st.number_input(
+                "Max files scanned",
+                min_value=1,
+                value=int(runtime.tool_limits.max_files_scanned),
+                step=1,
+            )
+        )
+        runtime.tool_limits.max_search_matches = int(
+            st.number_input(
+                "Max search matches",
+                min_value=1,
+                value=int(runtime.tool_limits.max_search_matches),
+                step=1,
+            )
+        )
+        runtime.tool_limits.max_read_lines = int(
+            st.number_input(
+                "Max read lines",
+                min_value=1,
+                value=int(runtime.tool_limits.max_read_lines),
+                step=1,
+            )
+        )
+        runtime.tool_limits.max_read_input_bytes = int(
+            st.number_input(
+                "Max read input bytes",
+                min_value=1,
+                value=int(runtime.tool_limits.max_read_input_bytes),
+                step=1,
+            )
+        )
+        runtime.tool_limits.max_file_size_characters = int(
+            st.number_input(
+                "Max file size characters",
+                min_value=1,
+                value=int(runtime.tool_limits.max_file_size_characters),
+                step=1,
+            )
+        )
+        raw_max_read_file_chars = st.number_input(
+            "Max read file characters (0 uses no override)",
+            min_value=0,
+            value=int(runtime.tool_limits.max_read_file_chars or 0),
+            step=1,
+        )
+        runtime.tool_limits.max_read_file_chars = (
+            int(raw_max_read_file_chars) if int(raw_max_read_file_chars) > 0 else None
+        )
+        runtime.tool_limits.max_tool_result_chars = int(
+            st.number_input(
+                "Max tool result characters",
+                min_value=1,
+                value=int(runtime.tool_limits.max_tool_result_chars),
+                step=1,
+            )
+        )
+    with st.expander("Research defaults", expanded=False):
+        runtime.research.enabled = st.checkbox(
+            "Enable research tasks",
+            value=runtime.research.enabled,
+        )
+        runtime.research.store_dir = _render_directory_path_input(
+            label="Research store directory",
+            value=runtime.research.store_dir,
+            placeholder="Optional research session directory",
+            browse_key="browse-research-store",
+        )
+        runtime.research.max_recent_sessions = int(
+            st.number_input(
+                "Recent research sessions to show",
+                min_value=1,
+                value=int(runtime.research.max_recent_sessions),
+                step=1,
+            )
+        )
+        runtime.research.default_max_turns = int(
+            st.number_input(
+                "Default research max turns",
+                min_value=1,
+                value=int(runtime.research.default_max_turns),
+                step=1,
+            )
+        )
+        raw_max_invocations = st.number_input(
+            "Default research max tool invocations (0 uses no limit)",
+            min_value=0,
+            value=int(runtime.research.default_max_tool_invocations or 0),
+            step=1,
+        )
+        runtime.research.default_max_tool_invocations = (
+            int(raw_max_invocations) if int(raw_max_invocations) > 0 else None
+        )
+        raw_max_elapsed = st.number_input(
+            "Default research max elapsed seconds (0 uses no limit)",
+            min_value=0,
+            value=int(runtime.research.default_max_elapsed_seconds or 0),
+            step=1,
+        )
+        runtime.research.default_max_elapsed_seconds = (
+            int(raw_max_elapsed) if int(raw_max_elapsed) > 0 else None
+        )
+        runtime.research.include_replay_by_default = st.checkbox(
+            "Include replay by default",
+            value=runtime.research.include_replay_by_default,
+        )
+    with st.expander("Exported defaults", expanded=False):
+        runtime.default_workspace_root = _render_directory_path_input(
+            label="Default workspace root in exported YAML",
+            value=runtime.default_workspace_root,
+            placeholder="Optional default workspace root",
+            browse_key="browse-default-workspace-root",
+        )
+        runtime.show_token_usage = st.checkbox(
+            "Show token usage",
+            value=runtime.show_token_usage,
+        )
+        runtime.show_footer_help = st.checkbox(
+            "Show footer help",
+            value=runtime.show_footer_help,
+        )
+        runtime.inspector_open = st.checkbox(
+            "Show inspector details",
+            value=runtime.inspector_open,
+        )
 
 
 def _render_sidebar_config_export(
@@ -2428,7 +3552,6 @@ def _render_sidebar_config_export(
     session_id: str,
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
-    st.markdown("### 7. Save configuration")
     st.caption(
         "Config YAML is optional. Generate a reusable preset from the current session setup when you want to save or share the non-secret defaults."
     )
@@ -2945,7 +4068,7 @@ def _render_research_session_details(
     active: StreamlitPersistedSessionRecord,
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
-    if not config.research.enabled:
+    if not runtime.research.enabled:
         return
     session_id = _selected_research_session_id()
     if session_id is None:
@@ -3129,9 +4252,8 @@ def _render_sidebar_research_controls(
     active: StreamlitPersistedSessionRecord,
 ) -> None:  # pragma: no cover
     st = _streamlit_module()
-    if not config.research.enabled:
+    if not runtime.research.enabled:
         return
-    st.markdown("### Research tasks")
     st.caption(_research_transition_copy(app_state, active=active))
     controller = _build_research_controller(config=config, runtime=runtime)
     research_prompt = st.text_area(
@@ -3175,35 +4297,51 @@ def _render_sidebar(
     active = _active_session(app_state)
     runtime = active.runtime
     with st.sidebar:
-        if _render_sidebar_session_controls(
-            app_state,
-            config=config,
-            root_path=root_path,
-            runtime=runtime,
-        ):
-            return
+        with st.expander("Appearance", expanded=False):
+            _render_sidebar_appearance_controls(app_state.preferences)
+        with st.expander("Assistant sessions", expanded=False):
+            if _render_sidebar_session_controls(
+                app_state,
+                config=config,
+                root_path=root_path,
+                runtime=runtime,
+            ):
+                return
         st.caption(
             "Follow the setup order below so the assistant always shows what is ready, what is blocked, and what to configure next."
         )
-        _render_sidebar_runtime_settings(
-            runtime,
-            config=config,
-            session_id=active.summary.session_id,
-        )
-        _render_sidebar_permission_controls(runtime)
-        _render_sidebar_tool_controls(runtime)
-        _render_sidebar_protection_controls(runtime)
-        _render_sidebar_config_export(
-            config=config,
-            runtime=runtime,
-            session_id=active.summary.session_id,
-        )
-        _render_sidebar_research_controls(
-            app_state,
-            config=config,
-            runtime=runtime,
-            active=active,
-        )
+        with st.expander("1. Connect to provider", expanded=True):
+            llm_config = _render_sidebar_provider_connection_controls(
+                runtime,
+                config=config,
+                session_id=active.summary.session_id,
+            )
+        with st.expander("2. Model selection", expanded=True):
+            _render_sidebar_model_selection_controls(
+                runtime,
+                llm_config=llm_config,
+                session_id=active.summary.session_id,
+            )
+        with st.expander("3. Workspace", expanded=False):
+            _render_sidebar_workspace_controls(runtime)
+        with st.expander("4. Sources", expanded=False):
+            _render_sidebar_source_controls(runtime)
+        with st.expander("5. Advanced", expanded=False):
+            _render_sidebar_advanced_controls(runtime)
+        with st.expander("6. Save configuration", expanded=False):
+            _render_sidebar_config_export(
+                config=config,
+                runtime=runtime,
+                session_id=active.summary.session_id,
+            )
+        if runtime.research.enabled:
+            with st.expander("Research tasks", expanded=False):
+                _render_sidebar_research_controls(
+                    app_state,
+                    config=config,
+                    runtime=runtime,
+                    active=active,
+                )
         _remember_runtime_preferences(app_state.preferences, runtime)
         _touch_record(active)
         _save_workspace_state(app_state)
@@ -3315,6 +4453,7 @@ def run_streamlit_assistant_app(
     st.session_state.setdefault(_EXPORTED_CONFIG_STATE_SLOT, "")
     app_state: AssistantWorkspaceState = st.session_state[_APP_STATE_SLOT]
 
+    _sync_theme_preference_from_widget_state(app_state.preferences)
     _render_theme(app_state.preferences)
     pending_prompt = _drain_active_turn_events(app_state)
     _render_sidebar(app_state, config=config, root_path=root_path)

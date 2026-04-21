@@ -514,15 +514,15 @@ class ToolRuntime:
             ):
                 services.gitlab = build_gitlab_gateway(secrets)
             if "jira" in tags or required_secrets.intersection(
-                {"JIRA_BASE_URL", "JIRA_USERNAME", "JIRA_API_TOKEN"}
+                {"JIRA_BASE_URL", "JIRA_API_TOKEN"}
             ):
                 services.jira = build_jira_gateway(secrets)
             if "bitbucket" in tags or required_secrets.intersection(
-                {"BITBUCKET_BASE_URL", "BITBUCKET_USERNAME", "BITBUCKET_API_TOKEN"}
+                {"BITBUCKET_BASE_URL", "BITBUCKET_API_TOKEN"}
             ):
                 services.bitbucket = build_bitbucket_gateway(secrets)
             if "confluence" in tags or required_secrets.intersection(
-                {"CONFLUENCE_BASE_URL", "CONFLUENCE_USERNAME", "CONFLUENCE_API_TOKEN"}
+                {"CONFLUENCE_BASE_URL", "CONFLUENCE_API_TOKEN"}
             ):
                 services.confluence = build_confluence_gateway(secrets)
         return services

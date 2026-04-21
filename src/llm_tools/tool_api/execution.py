@@ -14,15 +14,13 @@ from llm_tools.tool_api.models import SourceProvenanceRef, ToolContext
 _RUNTIME_CONTEXT_ISSUER = object()
 _RUNTIME_PERMIT_ISSUER = object()
 
-_JIRA_SECRET_KEYS = ("JIRA_BASE_URL", "JIRA_USERNAME", "JIRA_API_TOKEN")
+_JIRA_SECRET_KEYS = ("JIRA_BASE_URL", "JIRA_API_TOKEN")
 _BITBUCKET_SECRET_KEYS = (
     "BITBUCKET_BASE_URL",
-    "BITBUCKET_USERNAME",
     "BITBUCKET_API_TOKEN",
 )
 _CONFLUENCE_SECRET_KEYS = (
     "CONFLUENCE_BASE_URL",
-    "CONFLUENCE_USERNAME",
     "CONFLUENCE_API_TOKEN",
 )
 _GITLAB_SECRET_KEYS = ("GITLAB_BASE_URL", "GITLAB_API_TOKEN")
@@ -408,13 +406,15 @@ def build_jira_gateway(secrets: SecretView) -> JiraGateway:
     values = _secret_values(secrets, _JIRA_SECRET_KEYS, label="Jira")
     from atlassian import Jira
 
-    return _StaticClientGateway(
-        Jira(
-            url=values["JIRA_BASE_URL"],
-            username=values["JIRA_USERNAME"],
-            password=values["JIRA_API_TOKEN"],
-        )
-    )
+    username = secrets.get("JIRA_USERNAME")
+    kwargs: dict[str, Any] = {
+        "url": values["JIRA_BASE_URL"],
+    }
+    if username:
+        kwargs.update(username=username, password=values["JIRA_API_TOKEN"])
+    else:
+        kwargs["token"] = values["JIRA_API_TOKEN"]
+    return _StaticClientGateway(Jira(**kwargs))
 
 
 def build_bitbucket_gateway(secrets: SecretView) -> BitbucketGateway:
@@ -422,14 +422,16 @@ def build_bitbucket_gateway(secrets: SecretView) -> BitbucketGateway:
     values = _secret_values(secrets, _BITBUCKET_SECRET_KEYS, label="Bitbucket")
     from atlassian import Bitbucket
 
+    username = secrets.get("BITBUCKET_USERNAME")
     bitbucket_cls = cast(Any, Bitbucket)
-    return _StaticClientGateway(
-        bitbucket_cls(
-            url=values["BITBUCKET_BASE_URL"],
-            username=values["BITBUCKET_USERNAME"],
-            password=values["BITBUCKET_API_TOKEN"],
-        )
-    )
+    kwargs: dict[str, Any] = {
+        "url": values["BITBUCKET_BASE_URL"],
+    }
+    if username:
+        kwargs.update(username=username, password=values["BITBUCKET_API_TOKEN"])
+    else:
+        kwargs["token"] = values["BITBUCKET_API_TOKEN"]
+    return _StaticClientGateway(bitbucket_cls(**kwargs))
 
 
 def build_confluence_gateway(secrets: SecretView) -> ConfluenceGateway:
@@ -437,14 +439,16 @@ def build_confluence_gateway(secrets: SecretView) -> ConfluenceGateway:
     values = _secret_values(secrets, _CONFLUENCE_SECRET_KEYS, label="Confluence")
     from atlassian import Confluence
 
+    username = secrets.get("CONFLUENCE_USERNAME")
     confluence_cls = cast(Any, Confluence)
-    return _StaticClientGateway(
-        confluence_cls(
-            url=values["CONFLUENCE_BASE_URL"],
-            username=values["CONFLUENCE_USERNAME"],
-            password=values["CONFLUENCE_API_TOKEN"],
-        )
-    )
+    kwargs: dict[str, Any] = {
+        "url": values["CONFLUENCE_BASE_URL"],
+    }
+    if username:
+        kwargs.update(username=username, password=values["CONFLUENCE_API_TOKEN"])
+    else:
+        kwargs["token"] = values["CONFLUENCE_API_TOKEN"]
+    return _StaticClientGateway(confluence_cls(**kwargs))
 
 
 def _create_execution_context(

@@ -224,6 +224,7 @@ def test_enterprise_data_chat_example_respects_network_and_credentials_gate() ->
         model_name=config.llm.model_name,
         api_base_url=config.llm.api_base_url,
         enabled_tools=list(config.policy.enabled_tools or []),
+        allow_network=False,
     )
     tool_specs = _MODULES.app._all_tool_specs()
     env = {

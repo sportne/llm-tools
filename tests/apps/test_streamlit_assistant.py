@@ -9,7 +9,7 @@ import sys
 import time
 import tomllib
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from tests.apps._imports import import_streamlit_assistant_modules
@@ -136,6 +136,9 @@ class _FakeBlock:
     def selectbox(self, label: str, **kwargs: object) -> object:
         return self._streamlit.selectbox(label, **kwargs)
 
+    def number_input(self, label: str, **kwargs: object) -> object:
+        return self._streamlit.number_input(label, **kwargs)
+
     def columns(self, spec: int | list[int]) -> list[_FakeBlock]:
         return self._streamlit.columns(spec)
 
@@ -166,12 +169,14 @@ class _FakeStreamlit:
         text_input_values: dict[str, str] | None = None,
         checkbox_values: dict[str, bool] | None = None,
         selectbox_values: dict[str, object] | None = None,
+        number_input_values: dict[str, int | float] | None = None,
     ) -> None:
         self.session_state: dict[str, object] = {}
         self.button_values = button_values or {}
         self.text_input_values = text_input_values or {}
         self.checkbox_values = checkbox_values or {}
         self.selectbox_values = selectbox_values or {}
+        self.number_input_values = number_input_values or {}
         self.sidebar = _FakeBlock(self)
         self.page_config_kwargs: list[dict[str, object]] = []
         self.markdown_messages: list[str] = []
@@ -179,9 +184,11 @@ class _FakeStreamlit:
         self.warning_messages: list[str] = []
         self.error_messages: list[str] = []
         self.button_labels: list[str] = []
+        self.selectbox_labels: list[str] = []
         self.text_area_values: dict[str, str] = {}
         self.chat_roles: list[str] = []
         self.rerun_called = False
+        self.iframe_messages: list[str] = []
 
     def set_page_config(self, **kwargs: object) -> None:
         self.page_config_kwargs.append(kwargs)
@@ -265,6 +272,21 @@ class _FakeStreamlit:
         token = key or label
         return self.checkbox_values.get(token, self.checkbox_values.get(label, value))
 
+    def toggle(
+        self,
+        label: str,
+        *,
+        value: bool = False,
+        key: str | None = None,
+        disabled: bool = False,
+    ) -> bool:
+        return self.checkbox(
+            label,
+            value=value,
+            key=key,
+            disabled=disabled,
+        )
+
     def selectbox(
         self,
         label: str,
@@ -276,11 +298,28 @@ class _FakeStreamlit:
         format_func=None,
     ) -> object:
         del format_func
+        self.selectbox_labels.append(label)
         if disabled:
             return options[index]
         token = key or label
         return self.selectbox_values.get(
             token, self.selectbox_values.get(label, options[index])
+        )
+
+    def number_input(
+        self,
+        label: str,
+        *,
+        value: int | float = 0,
+        key: str | None = None,
+        min_value: int | float | None = None,
+        max_value: int | float | None = None,
+        step: int | float | None = None,
+    ) -> int | float:
+        del min_value, max_value, step
+        token = key or label
+        return self.number_input_values.get(
+            token, self.number_input_values.get(label, value)
         )
 
     def columns(self, spec: int | list[int]) -> list[_FakeBlock]:
@@ -295,6 +334,17 @@ class _FakeStreamlit:
     def chat_message(self, role: str) -> _FakeBlock:
         self.chat_roles.append(role)
         return _FakeBlock(self)
+
+    def iframe(
+        self,
+        src: str,
+        *,
+        width: int | str = "stretch",
+        height: int | str = "content",
+        tab_index: int | None = None,
+    ) -> None:
+        del width, height, tab_index
+        self.iframe_messages.append(src)
 
     def rerun(self) -> None:
         self.rerun_called = True
@@ -374,7 +424,7 @@ def _make_app_state(*, session_id: str = "session-1", root_path: str | None = No
         sessions={session_id: record},
         session_order=[session_id],
         active_session_id=session_id,
-        preferences=_MODULES.models.StreamlitPreferences(theme_mode="light"),
+        preferences=_MODULES.models.StreamlitPreferences(theme_mode="dark"),
         turn_states={session_id: _MODULES.app.AssistantTurnState()},
     )
 
@@ -970,9 +1020,10 @@ def test_streamlit_assistant_helper_paths_and_preferences(
 
     runtime = _MODULES.app._default_runtime_config(config, root_path=tmp_path)
     assert runtime.root_path == str(tmp_path)
-    assert runtime.allow_filesystem is False
-    assert runtime.allow_subprocess is False
-    preferences = _MODULES.models.StreamlitPreferences(theme_mode="light")
+    assert runtime.allow_network is True
+    assert runtime.allow_filesystem is True
+    assert runtime.allow_subprocess is True
+    preferences = _MODULES.models.StreamlitPreferences(theme_mode="dark")
     _MODULES.app._remember_runtime_preferences(preferences, runtime)
     assert preferences.recent_roots[0] == str(tmp_path)
     assert preferences.recent_models[runtime.provider.value][0] == runtime.model_name
@@ -996,7 +1047,7 @@ def test_streamlit_assistant_helper_paths_and_preferences(
     )
 
 
-def test_streamlit_assistant_runtime_settings_keep_permissions_opt_in(
+def test_streamlit_assistant_provider_and_workspace_settings_keep_permissions_opt_in(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1009,35 +1060,178 @@ def test_streamlit_assistant_runtime_settings_keep_permissions_opt_in(
     )
     runtime = _MODULES.app._default_runtime_config(config, root_path=None)
 
-    _MODULES.app._render_sidebar_runtime_settings(
+    llm_config = _MODULES.app._render_sidebar_provider_connection_controls(
         runtime,
         config=config,
         session_id="session-1",
     )
+    _MODULES.app._render_sidebar_model_selection_controls(
+        runtime,
+        llm_config=llm_config,
+        session_id="session-1",
+    )
+    _MODULES.app._render_sidebar_remote_credentials_controls()
+    _MODULES.app._render_sidebar_workspace_controls(runtime)
     _MODULES.app._render_sidebar_permission_controls(runtime)
 
     assert runtime.root_path == str(tmp_path.resolve())
-    assert runtime.allow_filesystem is False
-    assert runtime.allow_subprocess is False
+    assert runtime.allow_network is True
+    assert runtime.allow_filesystem is True
+    assert runtime.allow_subprocess is True
+    assert "Validate provider connection" in fake_st.button_labels
     assert any(
-        "### 1. Connect model" in message for message in fake_st.markdown_messages
+        "Validate the current provider settings before you choose a model" in message
+        for message in fake_st.caption_messages
     )
     assert any(
-        "### 2. Remote credentials" in message for message in fake_st.markdown_messages
-    )
-    assert any(
-        "### 3. Choose workspace" in message for message in fake_st.markdown_messages
-    )
-    assert any(
-        "### 4. Allow access" in message for message in fake_st.markdown_messages
+        "Validate the provider connection first." in message
+        for message in fake_st.caption_messages
     )
     assert any(
         "Workspace selected. Local tools are scoped now" in message
         for message in fake_st.caption_messages
     )
     assert any(
-        "Turn on only what you need: network unlocks connected sources" in message
+        "Network, filesystem, and subprocess access are on by default." in message
         for message in fake_st.caption_messages
+    )
+
+
+def test_streamlit_assistant_pick_local_path_rejects_invalid_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+
+    class _FakeTkRoot:
+        def withdraw(self) -> None:
+            return None
+
+        def attributes(self, *_args: object) -> None:
+            return None
+
+        def destroy(self) -> None:
+            return None
+
+    fake_tk = ModuleType("tkinter")
+    fake_tk.Tk = lambda: _FakeTkRoot()
+    fake_dialog = ModuleType("filedialog")
+    fake_dialog.askopenfilename = lambda: "/work/example.txt"
+    fake_tk.filedialog = fake_dialog
+    monkeypatch.setitem(sys.modules, "tkinter", fake_tk)
+
+    picked = _MODULES.app._pick_local_path(
+        directory=False,
+        allowed_suffixes={".json"},
+    )
+
+    assert picked is None
+    assert any(
+        "Selected file must use one of these extensions" in message
+        for message in fake_st.warning_messages
+    )
+
+
+def test_streamlit_assistant_path_inputs_use_picker_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit(
+        button_values={
+            "browse-workspace-root": True,
+            "browse-corrections": True,
+        }
+    )
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    picks = iter([[str(tmp_path)], [str(tmp_path / "corrections.json")]])
+    monkeypatch.setattr(_MODULES.app, "_pick_local_path", lambda **kwargs: next(picks))
+
+    workspace = _MODULES.app._render_directory_path_input(
+        label="Workspace root",
+        value=None,
+        placeholder="dir",
+        browse_key="browse-workspace-root",
+    )
+    corrections = _MODULES.app._render_file_path_input(
+        label="Corrections",
+        value=None,
+        placeholder="file",
+        browse_key="browse-corrections",
+        allowed_suffixes={".json"},
+    )
+
+    assert workspace == str(tmp_path)
+    assert corrections == str(tmp_path / "corrections.json")
+
+
+def test_streamlit_assistant_source_and_advanced_controls_update_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit(
+        checkbox_values={
+            "source-group:GitLab": True,
+            "Enable research tasks": True,
+            "Show token usage": False,
+            "Show footer help": False,
+            "Show inspector details": True,
+        },
+        text_input_values={
+            "remote-url:GITLAB_BASE_URL": "https://gitlab.internal",
+            "remote-secret:GITLAB_API_TOKEN": "gitlab-token",
+            "Default workspace root in exported YAML": str(tmp_path),
+            "Research store directory": str(tmp_path / "research-store"),
+            "Protection corrections path": str(tmp_path / "corrections.yaml"),
+            "assistant-protection-paths": str(tmp_path),
+        },
+        number_input_values={
+            "Temperature": 0.3,
+            "Provider timeout seconds": 45.0,
+            "Max context tokens": 32000,
+            "Max tool round trips": 5,
+            "Max tool calls per round": 3,
+            "Max total tool calls per turn": 9,
+            "Max entries per call": 111,
+            "Max recursive depth": 7,
+            "Max files scanned": 1234,
+            "Max search matches": 15,
+            "Max read lines": 77,
+            "Max read input bytes": 2048,
+            "Max file size characters": 4096,
+            "Max read file characters (0 uses no override)": 512,
+            "Max tool result characters": 9000,
+            "Recent research sessions to show": 4,
+            "Default research max turns": 8,
+            "Default research max tool invocations (0 uses no limit)": 16,
+            "Default research max elapsed seconds (0 uses no limit)": 120,
+        },
+    )
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    (tmp_path / "policy.txt").write_text("private", encoding="utf-8")
+    runtime = _MODULES.models.StreamlitRuntimeConfig(
+        protection=_MODULES.app.ProtectionConfig(enabled=True),
+    )
+
+    _MODULES.app._render_sidebar_source_controls(runtime)
+    _MODULES.app._render_sidebar_advanced_controls(runtime)
+
+    assert "search_gitlab_code" in runtime.enabled_tools
+    assert (
+        _MODULES.app._get_session_env_value("GITLAB_BASE_URL")
+        == "https://gitlab.internal"
+    )
+    assert _MODULES.app._get_secret_value("GITLAB_API_TOKEN") == "gitlab-token"
+    assert runtime.temperature == 0.3
+    assert runtime.timeout_seconds == 45.0
+    assert runtime.session_config.max_context_tokens == 32000
+    assert runtime.tool_limits.max_read_file_chars == 512
+    assert runtime.research.store_dir == str(tmp_path / "research-store")
+    assert runtime.default_workspace_root == str(tmp_path)
+    assert runtime.show_token_usage is False
+    assert runtime.show_footer_help is False
+    assert runtime.inspector_open is True
+    assert any(
+        "Current source readiness" in message for message in fake_st.markdown_messages
     )
 
 
@@ -1053,23 +1247,20 @@ def test_streamlit_assistant_sidebar_tool_controls_show_guided_readiness_copy(
     _MODULES.app._render_sidebar_tool_controls(runtime)
 
     assert any(
-        "### 5. Choose sources" in message for message in fake_st.markdown_messages
-    )
-    assert any(
         "Current source readiness" in message for message in fake_st.markdown_messages
     )
     assert any(
-        "Enabled sources: Atlassian: 1 enabled | needs credentials; Local Files: 1 enabled | needs workspace"
+        "Enabled sources: Jira: 1 enabled | needs credentials; Local Files: 1 enabled | needs workspace"
         in message
         for message in fake_st.caption_messages
     )
     assert any(
-        "Next: choose a workspace root in Step 3 for local file and git sources."
+        "Next: choose a workspace root in the Workspace section for local file and git sources."
         in message
         for message in fake_st.caption_messages
     )
     assert any(
-        "Next: provide the required service credentials in Step 2 for the enabled remote sources."
+        "Next: add the required URLs and credentials in the Sources section for the enabled remote sources."
         in message
         for message in fake_st.caption_messages
     )
@@ -1121,12 +1312,11 @@ def test_streamlit_assistant_execution_blocker_uses_session_only_remote_credenti
     )
 
     assert blocker == (
-        "Research is not ready yet. Add credentials for the enabled remote "
-        "sources in Step 2."
+        "Research is not ready yet. Add the required URLs and credentials for the enabled remote "
+        "sources in the Sources section."
     )
 
-    _MODULES.app._set_secret_value("JIRA_BASE_URL", "https://jira.internal")
-    _MODULES.app._set_secret_value("JIRA_USERNAME", "assistant")
+    _MODULES.app._set_session_env_value("JIRA_BASE_URL", "https://jira.internal")
     _MODULES.app._set_secret_value("JIRA_API_TOKEN", "jira-token")
 
     assert (
@@ -1203,8 +1393,7 @@ def test_streamlit_assistant_config_export_and_state_persistence_omit_secrets(
     )
     _MODULES.app._set_secret_value("OPENAI_API_KEY", "model-secret")
     _MODULES.app._set_secret_value("JIRA_API_TOKEN", "jira-secret")
-    _MODULES.app._set_secret_value("JIRA_BASE_URL", "https://jira.internal")
-    _MODULES.app._set_secret_value("JIRA_USERNAME", "assistant")
+    _MODULES.app._set_session_env_value("JIRA_BASE_URL", "https://jira.internal")
 
     _MODULES.app._render_sidebar_config_export(
         config=config,
@@ -1253,15 +1442,15 @@ def test_streamlit_assistant_tool_capability_caption_uses_explicit_blockers() ->
     items = {item.tool_name: item for group in capabilities.values() for item in group}
 
     assert _MODULES.app._tool_capability_caption(items["read_file"]) == (
-        "Not ready yet. Choose a workspace root in Step 3. "
+        "Not ready yet. Choose a workspace root in the Workspace section. "
         "This tool pauses for approval before it runs."
     )
     assert _MODULES.app._tool_capability_caption(items["search_jira"]) == (
-        "Not ready yet. Add credentials: JIRA_API_TOKEN, JIRA_BASE_URL, JIRA_USERNAME. "
-        "Turn on network access in Step 4."
+        "Not ready yet. Add credentials: JIRA_API_TOKEN, JIRA_BASE_URL. "
+        "Turn on network access in the Advanced section."
     )
     assert _MODULES.app._tool_capability_caption(items["run_git_status"]) == (
-        "Not ready yet. Choose a workspace root in Step 3. "
+        "Not ready yet. Choose a workspace root in the Workspace section. "
         "This tool pauses for approval before it runs."
     )
 
@@ -1295,6 +1484,395 @@ def test_streamlit_assistant_copy_helpers_cover_status_sources_and_session_meta(
         is_active=True,
     )
     assert meta == "current | 3 msgs | working | follow-up queued | draft saved"
+
+
+def test_streamlit_assistant_defaults_to_dark_theme_for_new_workspace_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(_MODULES.app._STORAGE_ENV_VAR, str(tmp_path / "state"))
+
+    app_state = _MODULES.app._load_workspace_state(
+        root_path=None,
+        config=StreamlitAssistantConfig(),
+    )
+
+    assert app_state.preferences.theme_mode == "dark"
+
+
+def test_streamlit_assistant_migrates_legacy_light_preference_to_dark_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    storage_root = tmp_path / "state"
+    monkeypatch.setenv(_MODULES.app._STORAGE_ENV_VAR, str(storage_root))
+    storage_root.mkdir(parents=True)
+    (storage_root / "preferences.json").write_text(
+        _MODULES.models.StreamlitPreferences(theme_mode="light").model_dump_json(
+            indent=2
+        )
+    )
+
+    app_state = _MODULES.app._load_workspace_state(
+        root_path=None,
+        config=StreamlitAssistantConfig(),
+    )
+
+    assert app_state.preferences.theme_mode == "dark"
+    assert app_state.preferences.appearance_mode_explicit is False
+
+
+def test_streamlit_assistant_theme_sync_applies_widget_choice_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_st = _FakeStreamlit()
+    fake_st.session_state["assistant-theme-mode"] = False
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    preferences = _MODULES.models.StreamlitPreferences(theme_mode="dark")
+
+    _MODULES.app._sync_theme_preference_from_widget_state(preferences)
+
+    assert preferences.theme_mode == "light"
+    assert preferences.appearance_mode_explicit is True
+
+
+def test_streamlit_assistant_theme_sync_initializes_widget_state_without_forcing_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    preferences = _MODULES.models.StreamlitPreferences(theme_mode="dark")
+
+    _MODULES.app._sync_theme_preference_from_widget_state(preferences)
+
+    assert fake_st.session_state["assistant-theme-mode"] is True
+    assert preferences.appearance_mode_explicit is False
+
+
+def test_streamlit_assistant_theme_sync_accepts_legacy_string_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_st = _FakeStreamlit()
+    fake_st.session_state["assistant-theme-mode"] = "light"
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    preferences = _MODULES.models.StreamlitPreferences(theme_mode="dark")
+
+    _MODULES.app._sync_theme_preference_from_widget_state(preferences)
+
+    assert preferences.theme_mode == "light"
+    assert preferences.appearance_mode_explicit is True
+
+
+def test_streamlit_assistant_appearance_controls_render_non_editable_theme_combo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_st = _FakeStreamlit(checkbox_values={"assistant-theme-mode": False})
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    preferences = _MODULES.models.StreamlitPreferences(theme_mode="dark")
+    fake_st.session_state["assistant-theme-mode"] = "dark"
+
+    _MODULES.app._render_sidebar_appearance_controls(preferences)
+
+    assert fake_st.checkbox_values["assistant-theme-mode"] is False
+    assert preferences.theme_mode == "dark"
+
+
+def test_streamlit_assistant_page_config_uses_speech_bubble_icon() -> None:
+    page_config = _MODULES.app._page_config()
+
+    assert page_config["page_title"] == "llm-tools assistant"
+    assert page_config["page_icon"] == "💬"
+
+
+def test_streamlit_assistant_render_theme_supports_dark_and_light(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+
+    _MODULES.app._render_theme(_MODULES.models.StreamlitPreferences(theme_mode="dark"))
+    dark_css = fake_st.markdown_messages[-1]
+    assert "--assistant-bg: #060b14;" in dark_css
+    assert "--assistant-accent: #5e93ff;" in dark_css
+    assert ".assistant-chip--ready" in dark_css
+    assert ".assistant-empty-state" in dark_css
+    assert ".assistant-summary-panel" in dark_css
+    assert '[data-testid="stSidebarResizer"]::before' in dark_css
+    assert 'header[data-testid="stHeader"] button' in dark_css
+    assert (
+        '[data-testid="stSidebar"] > div:first-child > div:first-child button'
+        in dark_css
+    )
+    assert ".stAppToolbar" in dark_css
+    assert '[data-testid="stAppViewContainer"] .main .block-container' in dark_css
+    assert "Connection to llm-tools assistant lost" in dark_css
+    assert "Reconnect to the llm-tools assistant" in dark_css
+    assert "MutationObserver" in dark_css
+
+    dark_override = fake_st.iframe_messages[-1]
+    assert "window.parent?.document" in dark_override
+    assert '[data-testid="stConnectionStatus"]' in dark_override
+    assert "Connection to llm-tools assistant lost" in dark_override
+
+    _MODULES.app._render_theme(_MODULES.models.StreamlitPreferences(theme_mode="light"))
+    light_css = fake_st.markdown_messages[-1]
+    assert "--assistant-bg: #edf3fb;" in light_css
+    assert "--assistant-accent: #245dff;" in light_css
+    assert light_css != dark_css
+
+
+def test_streamlit_assistant_provider_type_choice_maps_runtime_defaults() -> None:
+    runtime = _MODULES.models.StreamlitRuntimeConfig(
+        provider="ollama",
+        provider_mode_strategy="auto",
+        api_base_url="http://127.0.0.1:11434/v1",
+    )
+
+    _MODULES.app._apply_provider_type_choice(runtime, choice="OpenAI Compatible")
+    assert runtime.provider.value == "custom_openai_compatible"
+    assert runtime.provider_mode_strategy.value == "json"
+    assert runtime.api_base_url is None
+
+    _MODULES.app._apply_provider_type_choice(runtime, choice="Ollama")
+    assert runtime.provider.value == "ollama"
+    assert runtime.provider_mode_strategy.value == "auto"
+    assert runtime.api_base_url == "http://127.0.0.1:11434/v1"
+
+
+def test_streamlit_assistant_provider_connection_controls_allow_mode_selection_for_ollama(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_st = _FakeStreamlit(
+        text_input_values={
+            "Provider Base URL": "http://127.0.0.1:11434/v1",
+        },
+        selectbox_values={
+            "Provider Type": "Ollama",
+            "Provider mode": "json",
+        },
+    )
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+
+    runtime = _MODULES.models.StreamlitRuntimeConfig(
+        provider="ollama",
+        provider_mode_strategy="auto",
+        api_base_url="http://127.0.0.1:11434/v1",
+    )
+    _MODULES.app._render_sidebar_provider_connection_controls(
+        runtime,
+        config=StreamlitAssistantConfig(),
+        session_id="session-1",
+    )
+
+    assert runtime.provider.value == "ollama"
+    assert runtime.provider_mode_strategy.value == "json"
+    assert "Provider mode" in fake_st.selectbox_labels
+
+
+def test_streamlit_assistant_provider_connection_status_copy_covers_variants() -> None:
+    ok_with_models = _MODULES.app.ProviderPreflightResult(
+        ok=True,
+        connection_succeeded=True,
+        model_accepted=True,
+        selected_mode_supported=True,
+        model_listing_supported=True,
+        available_models=["a", "b"],
+        resolved_mode=None,
+        actionable_message="ready",
+    )
+    assert _MODULES.app._provider_connection_status_copy(ok_with_models) == (
+        "Provider connection is ready. Retrieved 2 model(s) for this session.",
+        False,
+    )
+
+    ok_without_models = _MODULES.app.ProviderPreflightResult(
+        ok=True,
+        connection_succeeded=True,
+        model_accepted=True,
+        selected_mode_supported=True,
+        model_listing_supported=False,
+        available_models=[],
+        resolved_mode=None,
+        actionable_message="ready",
+    )
+    assert _MODULES.app._provider_connection_status_copy(ok_without_models) == (
+        "Provider connection is ready, but this endpoint did not expose a model list.",
+        True,
+    )
+
+    failed = _MODULES.app.ProviderPreflightResult(
+        ok=False,
+        connection_succeeded=False,
+        model_accepted=False,
+        selected_mode_supported=False,
+        model_listing_supported=False,
+        available_models=[],
+        resolved_mode=None,
+        actionable_message="broken",
+    )
+    assert _MODULES.app._provider_connection_status_copy(failed) == ("broken", True)
+
+
+def test_streamlit_assistant_provider_and_model_sections_use_validated_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_st = _FakeStreamlit(
+        button_values={"validate-connection:session-1": True},
+        text_input_values={
+            "Provider Base URL": "http://llm.internal/v1",
+            "OPENAI_API_KEY": "secret",
+        },
+        selectbox_values={
+            "Provider Type": "OpenAI Compatible",
+            "Provider mode": "json",
+            "Model": "model-b",
+        },
+    )
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(
+        _MODULES.app,
+        "_validate_model_connection",
+        lambda **kwargs: _MODULES.app.ProviderPreflightResult(
+            ok=True,
+            connection_succeeded=True,
+            model_accepted=True,
+            selected_mode_supported=True,
+            model_listing_supported=True,
+            available_models=["model-a", "model-b"],
+            resolved_mode=None,
+            actionable_message="ready",
+        ),
+    )
+    runtime = _MODULES.models.StreamlitRuntimeConfig()
+    config = StreamlitAssistantConfig()
+
+    llm_config = _MODULES.app._render_sidebar_provider_connection_controls(
+        runtime,
+        config=config,
+        session_id="session-1",
+    )
+    _MODULES.app._store_connection_report(
+        "session-1",
+        signature=_MODULES.app._provider_signature(
+            runtime=runtime,
+            api_key=_MODULES.app._current_api_key(llm_config),
+        ),
+        report=_MODULES.app.ProviderPreflightResult(
+            ok=True,
+            connection_succeeded=True,
+            model_accepted=True,
+            selected_mode_supported=True,
+            model_listing_supported=True,
+            available_models=["model-a", "model-b"],
+            resolved_mode=None,
+            actionable_message="ready",
+        ),
+    )
+    _MODULES.app._render_sidebar_model_selection_controls(
+        runtime,
+        llm_config=llm_config,
+        session_id="session-1",
+    )
+
+    assert runtime.provider.value == "custom_openai_compatible"
+    assert runtime.provider_mode_strategy.value == "json"
+    assert runtime.api_base_url == "http://llm.internal/v1"
+    assert runtime.model_name == "model-b"
+    assert "Validate provider connection" in fake_st.button_labels
+
+
+def test_streamlit_assistant_research_sidebar_helpers_cover_edge_states(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+
+    assert _MODULES.app._selected_research_session_id() is None
+    _MODULES.app._select_research_session("research-1")
+    assert _MODULES.app._selected_research_session_id() == "research-1"
+
+    summary = SimpleNamespace(
+        session_id="research-1",
+        total_turns=2,
+        active_task_ids=["task-1"],
+        pending_approval_ids=[],
+        stop_reason=None,
+    )
+    resumed = SimpleNamespace(
+        disposition=_MODULES.app.ResumeDisposition.TERMINAL,
+        issues=[SimpleNamespace(message="needs review")],
+    )
+    view = _MODULES.app._build_research_session_view(
+        summary,
+        resumed=resumed,
+        summarized=True,
+    )
+    assert view.state_label == "stopped"
+    assert "needs attention" in view.state_detail
+    assert view.issue_messages == ["needs review"]
+
+    assert _MODULES.app._payload_for_display({"ok": True}) == {"ok": True}
+    inspection = SimpleNamespace(
+        snapshot=SimpleNamespace(
+            state=SimpleNamespace(
+                session=SimpleNamespace(root_task_id="task-1"),
+                tasks=[SimpleNamespace(task_id="task-1", title="Root Task")],
+            )
+        )
+    )
+    assert _MODULES.app._research_session_title(inspection) == "Root Task"
+
+
+def test_streamlit_assistant_chip_classifies_readiness_states() -> None:
+    assert (
+        _MODULES.app._chip_class_for_token("workspace ready") == "assistant-chip--ready"
+    )
+    assert (
+        _MODULES.app._chip_class_for_token("network blocked")
+        == "assistant-chip--blocked"
+    )
+    assert (
+        _MODULES.app._chip_class_for_token("approval required")
+        == "assistant-chip--approval"
+    )
+    assert (
+        _MODULES.app._chip_class_for_token("missing credentials")
+        == "assistant-chip--warning"
+    )
+    assert (
+        _MODULES.app._chip_class_for_token("needs attention")
+        == "assistant-chip--warning"
+    )
+    assert _MODULES.app._chip_class_for_token("local files") == ""
+
+
+def test_streamlit_assistant_sidebar_sections_are_collapsible(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(_MODULES.app, "_save_workspace_state", lambda app_state: None)
+
+    app_state = _make_app_state(root_path=str(tmp_path))
+    _MODULES.app._render_sidebar(
+        app_state,
+        config=StreamlitAssistantConfig(),
+        root_path=tmp_path,
+    )
+
+    for label in (
+        "Appearance",
+        "Assistant sessions",
+        "1. Connect to provider",
+        "2. Model selection",
+        "3. Workspace",
+        "4. Sources",
+        "5. Advanced",
+        "6. Save configuration",
+        "Research tasks",
+    ):
+        assert label in fake_st.button_labels
 
 
 def test_streamlit_assistant_render_helpers_show_updated_copy(
@@ -1363,7 +1941,7 @@ def test_streamlit_assistant_render_helpers_show_updated_copy(
         "This assistant can answer directly without tools." in item
         for item in fake_st.markdown_messages
     )
-    assert any("Assistant session" in item for item in fake_st.markdown_messages)
+    assert any("Current Session" in item for item in fake_st.markdown_messages)
     assert any("Local Files: ready" in item for item in fake_st.markdown_messages)
     assert created == ["next question"]
     assert app_state.drafts[session_id] == ""
@@ -2683,7 +3261,7 @@ def test_streamlit_assistant_fallback_storage_provider_helpers_and_missing_sessi
 
     runtime = _make_runtime(root_path=str(tmp_path))
     runtime.api_base_url = None
-    preferences = _MODULES.models.StreamlitPreferences(theme_mode="light")
+    preferences = _MODULES.models.StreamlitPreferences(theme_mode="dark")
     _MODULES.app._remember_runtime_preferences(preferences, runtime)
     assert runtime.provider.value in preferences.recent_models
     assert runtime.provider.value not in preferences.recent_base_urls

@@ -30,15 +30,13 @@ from llm_tools.tools.filesystem._content import (
 )
 from llm_tools.tools.filesystem.models import FileReadKind, FileReadResult, ToolLimits
 
-_JIRA_ENV_KEYS = ("JIRA_BASE_URL", "JIRA_USERNAME", "JIRA_API_TOKEN")
+_JIRA_ENV_KEYS = ("JIRA_BASE_URL", "JIRA_API_TOKEN")
 _BITBUCKET_ENV_KEYS = (
     "BITBUCKET_BASE_URL",
-    "BITBUCKET_USERNAME",
     "BITBUCKET_API_TOKEN",
 )
 _CONFLUENCE_ENV_KEYS = (
     "CONFLUENCE_BASE_URL",
-    "CONFLUENCE_USERNAME",
     "CONFLUENCE_API_TOKEN",
 )
 _INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1F]')

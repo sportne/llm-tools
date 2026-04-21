@@ -119,8 +119,12 @@ def assistant_tool_group(spec: ToolSpec) -> str:
     tags = set(spec.tags)
     if "gitlab" in tags:
         return "GitLab"
-    if "atlassian" in tags or "jira" in tags or "confluence" in tags:
-        return "Atlassian"
+    if "jira" in tags:
+        return "Jira"
+    if "confluence" in tags:
+        return "Confluence"
+    if "bitbucket" in tags:
+        return "Bitbucket"
     if "git" in tags:
         return "Git"
     if "filesystem" in tags:
