@@ -2425,49 +2425,13 @@ header[data-testid="stHeader"] button svg,
   border-color: var(--assistant-border);
 }}
 </style>
-<script>
-(() => {{
-  const assistantDialogTitle = "Connection to llm-tools assistant lost";
-  const assistantDialogBody = "Reconnect to the llm-tools assistant by refreshing this page or restarting the assistant service if it stopped.";
-
-  const updateReconnectDialog = () => {{
-    const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'));
-    for (const dialog of dialogs) {{
-      const title = dialog.querySelector('h1, h2, [data-testid="stMarkdownContainer"] h1, [data-testid="stMarkdownContainer"] h2');
-      if (!title || !/connection error/i.test(title.textContent || "")) {{
-        continue;
-      }}
-      title.textContent = assistantDialogTitle;
-      const paragraphs = Array.from(dialog.querySelectorAll('p'));
-      for (const paragraph of paragraphs) {{
-        const text = (paragraph.textContent || "").trim();
-        if (/streamlit/i.test(text) || /restart it in your terminal/i.test(text)) {{
-          paragraph.textContent = assistantDialogBody;
-        }}
-      }}
-      for (const codeBlock of dialog.querySelectorAll('pre, code')) {{
-        const text = (codeBlock.textContent || "").trim();
-        if (/streamlit run/i.test(text) || /yourscript[.]py/i.test(text)) {{
-          const container = codeBlock.closest('pre') || codeBlock;
-          if (container instanceof HTMLElement) {{
-            container.style.display = 'none';
-          }}
-        }}
-      }}
-    }}
-  }};
-
-  updateReconnectDialog();
-  const observer = new MutationObserver(() => updateReconnectDialog());
-  observer.observe(document.body, {{ childList: true, subtree: true }});
-}})();
-</script>
 """,
         unsafe_allow_html=True,
     )
-    with suppress(Exception):
-        st.iframe(
-            """
+
+
+def _streamlit_connection_error_override_html() -> str:
+    return """
 <script>
 (() => {
   const parentDocument = window.parent?.document;
@@ -2493,36 +2457,28 @@ header[data-testid="stHeader"] button svg,
     parentDocument.head.appendChild(style);
   };
 
-  const replaceLeafText = (root, pattern, replacement) => {
-    const candidates = Array.from(root.querySelectorAll("p, div, span, code, pre"));
-    for (const candidate of candidates) {
-      if (!(candidate instanceof HTMLElement)) {
-        continue;
+  const replaceMatchingText = (root, pattern, replacement) => {
+    const walker = parentDocument.createTreeWalker(
+      root,
+      window.NodeFilter.SHOW_TEXT,
+    );
+    let node = walker.nextNode();
+    while (node) {
+      const text = (node.nodeValue || "").trim();
+      if (text && pattern.test(text)) {
+        node.nodeValue = replacement;
       }
-      if (candidate.children.length > 0 && candidate.tagName !== "PRE") {
-        continue;
-      }
-      const text = (candidate.textContent || "").trim();
-      if (!text || !pattern.test(text)) {
-        continue;
-      }
-      candidate.textContent = replacement;
-      return true;
+      node = walker.nextNode();
     }
-    return false;
   };
 
-  const hideLeaf = (root, pattern) => {
-    const candidates = Array.from(root.querySelectorAll("pre, code, p, div, span"));
-    for (const candidate of candidates) {
-      if (!(candidate instanceof HTMLElement)) {
-        continue;
-      }
-      const text = (candidate.textContent || "").trim();
+  const hideMatchingElements = (root, pattern) => {
+    for (const element of root.querySelectorAll("pre, code")) {
+      const text = (element.textContent || "").trim();
       if (!text || !pattern.test(text)) {
         continue;
       }
-      candidate.style.display = "none";
+      element.remove();
     }
   };
 
@@ -2542,30 +2498,42 @@ header[data-testid="stHeader"] button svg,
         continue;
       }
 
-      const title = dialog.querySelector("h1, h2, h3, [data-testid='stMarkdownContainer'] h1, [data-testid='stMarkdownContainer'] h2");
+      const title = dialog.querySelector(
+        "h1, h2, h3, [data-testid='stMarkdownContainer'] h1, [data-testid='stMarkdownContainer'] h2"
+      );
       if (title instanceof HTMLElement) {
         title.textContent = assistantDialogTitle;
       }
 
-      replaceLeafText(
+      replaceMatchingText(
         dialog,
         /is streamlit still running|if you accidentally stopped streamlit|streamlit server is not responding|are you connected to the internet/i,
         assistantDialogBody,
       );
-      hideLeaf(dialog, /streamlit run +yourscript[.]py/i);
+      hideMatchingElements(dialog, /streamlit run +yourscript[.]py/i);
     }
   };
 
   updateReconnectDialog();
   const observer = new MutationObserver(() => updateReconnectDialog());
-  observer.observe(parentDocument.body, { childList: true, subtree: true });
+  observer.observe(parentDocument.body, { childList: true, subtree: true, characterData: true });
   window.addEventListener("beforeunload", () => observer.disconnect(), { once: true });
 })();
 </script>
-            """,
-            height=0,
-            width=0,
-        )
+"""
+
+
+def _render_connection_error_override() -> None:  # pragma: no cover
+    st = _streamlit_module()
+    components_v1 = getattr(getattr(st, "components", None), "v1", None)
+    render_html = getattr(components_v1, "html", None)
+    if render_html is None:
+        return
+    render_html(
+        _streamlit_connection_error_override_html(),
+        height=0,
+        width=0,
+    )
 
 
 def _render_fatal_error(exc: Exception) -> None:  # pragma: no cover
@@ -4560,6 +4528,7 @@ def run_streamlit_assistant_app(
 
     _sync_theme_preference_from_widget_state(app_state.preferences)
     _render_theme(app_state.preferences)
+    _render_connection_error_override()
     pending_prompt = _drain_active_turn_events(app_state)
     _render_sidebar(app_state, config=config, root_path=root_path)
     active_record = _active_session(app_state)

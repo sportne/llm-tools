@@ -230,8 +230,10 @@ class _FakeStreamlit:
         self.selectbox_values = selectbox_values or {}
         self.number_input_values = number_input_values or {}
         self.sidebar = _FakeBlock(self)
+        self.components = SimpleNamespace(v1=SimpleNamespace(html=self._component_html))
         self.page_config_kwargs: list[dict[str, object]] = []
         self.markdown_messages: list[str] = []
+        self.component_html_calls: list[tuple[str, int | None, int | None]] = []
         self.caption_messages: list[str] = []
         self.warning_messages: list[str] = []
         self.error_messages: list[str] = []
@@ -240,7 +242,6 @@ class _FakeStreamlit:
         self.text_area_values: dict[str, str] = {}
         self.chat_roles: list[str] = []
         self.rerun_called = False
-        self.iframe_messages: list[str] = []
 
     def set_page_config(self, **kwargs: object) -> None:
         self.page_config_kwargs.append(kwargs)
@@ -248,6 +249,17 @@ class _FakeStreamlit:
     def markdown(self, text: str, unsafe_allow_html: bool = False) -> None:
         del unsafe_allow_html
         self.markdown_messages.append(text)
+
+    def _component_html(
+        self,
+        html: str,
+        *,
+        height: int | None = None,
+        width: int | None = None,
+        scrolling: bool = False,
+    ) -> None:
+        del scrolling
+        self.component_html_calls.append((html, height, width))
 
     def caption(self, text: str) -> None:
         self.caption_messages.append(text)
@@ -386,17 +398,6 @@ class _FakeStreamlit:
     def chat_message(self, role: str) -> _FakeBlock:
         self.chat_roles.append(role)
         return _FakeBlock(self)
-
-    def iframe(
-        self,
-        src: str,
-        *,
-        width: int | str = "stretch",
-        height: int | str = "content",
-        tab_index: int | None = None,
-    ) -> None:
-        del width, height, tab_index
-        self.iframe_messages.append(src)
 
     def rerun(self) -> None:
         self.rerun_called = True
@@ -1879,20 +1880,32 @@ def test_streamlit_assistant_render_theme_supports_dark_and_light(
     )
     assert ".stAppToolbar" in dark_css
     assert '[data-testid="stAppViewContainer"] .main .block-container' in dark_css
-    assert "Connection to llm-tools assistant lost" in dark_css
-    assert "Reconnect to the llm-tools assistant" in dark_css
-    assert "MutationObserver" in dark_css
-
-    dark_override = fake_st.iframe_messages[-1]
-    assert "window.parent?.document" in dark_override
-    assert '[data-testid="stConnectionStatus"]' in dark_override
-    assert "Connection to llm-tools assistant lost" in dark_override
 
     _MODULES.app._render_theme(_MODULES.models.StreamlitPreferences(theme_mode="light"))
     light_css = fake_st.markdown_messages[-1]
     assert "--assistant-bg: #edf3fb;" in light_css
     assert "--assistant-accent: #245dff;" in light_css
     assert light_css != dark_css
+
+
+def test_streamlit_assistant_injects_connection_error_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+
+    _MODULES.app._render_connection_error_override()
+
+    assert fake_st.component_html_calls
+    html, height, width = fake_st.component_html_calls[-1]
+    assert "window.parent?.document" in html
+    assert '[data-testid="stConnectionStatus"]' in html
+    assert "Connection to llm-tools assistant lost" in html
+    assert "Reconnect to the llm-tools assistant" in html
+    assert "MutationObserver" in html
+    assert "streamlit run +yourscript[.]py" in html
+    assert height == 0
+    assert width == 0
 
 
 def test_streamlit_assistant_provider_type_choice_maps_runtime_defaults() -> None:
