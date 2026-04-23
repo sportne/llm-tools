@@ -1850,8 +1850,7 @@ def _drain_active_turn_events(
                 app_state,
                 session_id=queued_event.session_id,
                 error_message=(
-                    "Failed to apply assistant turn event. "
-                    f"{type(exc).__name__}: {exc}"
+                    f"Failed to apply assistant turn event. {type(exc).__name__}: {exc}"
                 ),
             )
             st.session_state[_ACTIVE_TURN_STATE_SLOT] = None
@@ -2002,10 +2001,7 @@ def _cancel_active_turn(
     st = _streamlit_module()
     handle = _coerce_active_turn_handle(st.session_state.get(_ACTIVE_TURN_STATE_SLOT))
     turn_state = _turn_state_for(app_state, session_id)
-    if (
-        handle is None
-        or handle.session_id != session_id
-    ):
+    if handle is None or handle.session_id != session_id:
         if turn_state.busy:
             turn_state.pending_approval = None
             turn_state.approval_decision_in_flight = False

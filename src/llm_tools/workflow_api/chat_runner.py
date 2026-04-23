@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from datetime import UTC, datetime
 from threading import Condition
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -125,6 +125,8 @@ _GIT_GROUNDING_HINTS = (
     "diff",
     "tracked file",
 )
+
+_StagedStepT = TypeVar("_StagedStepT")
 
 
 class ModelTurnProvider(Protocol):
@@ -468,8 +470,10 @@ class ChatSessionTurnRunner:
         round_index: int,
         messages: list[dict[str, Any]],
         prepared: PreparedModelInteraction,
-    ) -> Iterator[
-        ChatWorkflowStatusEvent | ChatWorkflowInspectorEvent | ChatWorkflowResultEvent
+    ) -> Generator[
+        ChatWorkflowStatusEvent | ChatWorkflowInspectorEvent | ChatWorkflowResultEvent,
+        None,
+        ParsedModelResponse,
     ]:
         provider = self._structured_provider()
         decision_model = self._adapter.build_decision_step_model(prepared.tool_specs)
@@ -545,9 +549,11 @@ class ChatSessionTurnRunner:
         stage_name: str,
         messages: list[dict[str, Any]],
         response_model: type[BaseModel],
-        parser: Callable[[object], Any],
-    ) -> Iterator[
-        ChatWorkflowStatusEvent | ChatWorkflowInspectorEvent | ChatWorkflowResultEvent
+        parser: Callable[[object], _StagedStepT],
+    ) -> Generator[
+        ChatWorkflowStatusEvent | ChatWorkflowInspectorEvent | ChatWorkflowResultEvent,
+        None,
+        _StagedStepT,
     ]:
         attempt_messages = list(messages)
         repair_attempted = False
@@ -738,7 +744,9 @@ class ChatSessionTurnRunner:
         for spec in tool_specs:
             if spec.name == tool_name:
                 return spec
-        raise ValueError(f"Unknown tool selected during staged interaction: {tool_name}")
+        raise ValueError(
+            f"Unknown tool selected during staged interaction: {tool_name}"
+        )
 
     def _apply_prompt_protection(
         self,
@@ -895,9 +903,9 @@ class ChatSessionTurnRunner:
             return True
         if any(token in request for token in _REPOSITORY_GROUNDING_HINTS):
             return True
-        return bool(
-            self._enabled_tool_names & _GIT_GROUNDING_TOOL_NAMES
-        ) and any(token in request for token in _GIT_GROUNDING_HINTS)
+        return bool(self._enabled_tool_names & _GIT_GROUNDING_TOOL_NAMES) and any(
+            token in request for token in _GIT_GROUNDING_HINTS
+        )
 
     def _grounding_repair_message(self) -> ChatMessage:
         preferred_tools = sorted(self._enabled_tool_names & _LOCAL_GROUNDING_TOOL_NAMES)

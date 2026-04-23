@@ -117,6 +117,12 @@ class _ProbeModel(BaseModel):
     items: list[str]
 
 
+class _MarkdownCarrier(BaseModel):
+    status: str
+    count: int
+    items: list[str]
+
+
 def test_provider_helper_methods_cover_listing_and_parameter_merging() -> None:
     data_page = SimpleNamespace(
         data=[
@@ -269,7 +275,9 @@ def test_ollama_json_mode_uses_native_json_schema_payload(monkeypatch: Any) -> N
     assert "response_model" not in call
 
 
-def test_ollama_json_mode_uses_native_json_schema_payload_async(monkeypatch: Any) -> None:
+def test_ollama_json_mode_uses_native_json_schema_payload_async(
+    monkeypatch: Any,
+) -> None:
     monkeypatch.setattr(provider_module, "_instructor", _RealNamedInstructor())
     completions = _NativeAsyncCompletions(
         _native_response('{"status":"ok","count":3,"items":["alpha","beta","gamma"]}')
@@ -355,6 +363,120 @@ def test_md_json_mode_extracts_json_from_markdown_content_async() -> None:
     assert len(completions.calls) == 1
 
 
+def test_md_json_mode_uses_selected_wrapped_sync_client(monkeypatch: Any) -> None:
+    base_completions = _NativeSyncCompletions(
+        _native_response('{"status":"wrong","count":0,"items":[]}')
+    )
+    wrapped_completions = _NativeSyncCompletions(
+        _native_response(
+            '```json\n{"status":"ok","count":3,"items":["alpha","beta","gamma"]}\n```'
+        )
+    )
+    wrapped_client = _BareClient(chat=SimpleNamespace(completions=wrapped_completions))
+
+    class _SpecificWrappedInstructor(_WrappedInstructor):
+        @staticmethod
+        def from_openai(client: Any, *, mode: _FakeMode) -> Any:
+            assert client.chat.completions is base_completions
+            assert mode is _FakeMode.MD_JSON
+            return wrapped_client
+
+    monkeypatch.setattr(provider_module, "_instructor", _SpecificWrappedInstructor())
+    provider = OpenAICompatibleProvider(
+        model="demo-model",
+        client=_BareClient(chat=SimpleNamespace(completions=base_completions)),
+        mode_strategy=ProviderModeStrategy.MD_JSON,
+    )
+
+    payload = provider.run_structured(
+        messages=[{"role": "user", "content": "Return structured data."}],
+        response_model=_ProbeModel,
+        request_params={"temperature": 0},
+    )
+
+    assert payload.model_dump()["status"] == "ok"
+    assert len(base_completions.calls) == 0
+    assert len(wrapped_completions.calls) == 1
+
+
+def test_md_json_mode_uses_selected_wrapped_async_client(monkeypatch: Any) -> None:
+    base_completions = _NativeAsyncCompletions(
+        _native_response('{"status":"wrong","count":0,"items":[]}')
+    )
+    wrapped_completions = _NativeAsyncCompletions(
+        _native_response('{"status":"ok","count":3,"items":["alpha","beta","gamma"]}')
+    )
+    wrapped_client = _BareClient(chat=SimpleNamespace(completions=wrapped_completions))
+
+    class _SpecificWrappedInstructor(_WrappedInstructor):
+        @staticmethod
+        def from_openai(client: Any, *, mode: _FakeMode) -> Any:
+            assert client.chat.completions is base_completions
+            assert mode is _FakeMode.MD_JSON
+            return wrapped_client
+
+    monkeypatch.setattr(provider_module, "_instructor", _SpecificWrappedInstructor())
+    provider = OpenAICompatibleProvider(
+        model="demo-model",
+        async_client=_BareClient(chat=SimpleNamespace(completions=base_completions)),
+        mode_strategy=ProviderModeStrategy.MD_JSON,
+    )
+
+    payload = asyncio.run(
+        provider.run_structured_async(
+            messages=[{"role": "user", "content": "Return structured data."}],
+            response_model=_ProbeModel,
+            request_params={"temperature": 0},
+        )
+    )
+
+    assert payload.model_dump()["status"] == "ok"
+    assert len(base_completions.calls) == 0
+    assert len(wrapped_completions.calls) == 1
+
+
+def test_parse_markdown_json_response_accepts_structured_payloads() -> None:
+    payload = OpenAICompatibleProvider._parse_markdown_json_response(
+        response=_MarkdownCarrier(status="ok", count=3, items=["alpha"]),
+        response_model=_ProbeModel,
+    )
+    assert payload.model_dump() == {
+        "status": "ok",
+        "count": 3,
+        "items": ["alpha"],
+    }
+
+    payload = OpenAICompatibleProvider._parse_markdown_json_response(
+        response={"status": "ok", "count": 4, "items": ["beta"]},
+        response_model=_ProbeModel,
+    )
+    assert payload.model_dump() == {
+        "status": "ok",
+        "count": 4,
+        "items": ["beta"],
+    }
+
+
+def test_parse_markdown_json_response_reports_invalid_structured_payload() -> None:
+    try:
+        OpenAICompatibleProvider._parse_markdown_json_response(
+            response=_MarkdownCarrier(status="ok", count=3, items=["alpha"]),
+            response_model=type(
+                "_StrictProbeModel",
+                (BaseModel,),
+                {"__annotations__": {"status": int}},
+            ),
+        )
+    except provider_module.StructuredOutputValidationError as exc:
+        assert exc.invalid_payload == {
+            "status": "ok",
+            "count": 3,
+            "items": ["alpha"],
+        }
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("Expected invalid structured payload to raise")
+
+
 def test_provider_helper_methods_cover_retry_classification_edges() -> None:
     assert OpenAICompatibleProvider._should_retry_mode_failure(
         json.JSONDecodeError("bad json", "{}", 0)
@@ -414,6 +536,19 @@ def test_provider_preflight_reports_success_for_selected_mode() -> None:
     assert report.resolved_mode is ProviderModeStrategy.JSON
     assert create_calls[0]["model"] == "demo-model"
     assert create_calls[0]["temperature"] == 0.0
+
+
+def test_provider_preflight_error_helpers_cover_model_and_connection_messages() -> None:
+    provider = OpenAICompatibleProvider(model="missing-model")
+
+    message = provider._preflight_error_message(
+        RuntimeError("unknown model"),
+        available_models=["alpha", "beta"],
+        model_listing_supported=True,
+    )
+    assert "Choose one of the listed models: alpha, beta." in message
+    assert not provider._looks_connected(RuntimeError("connection refused"))
+    assert provider._looks_connected(RuntimeError("schema validation failed"))
 
 
 def test_provider_preflight_reports_mode_failure_for_selected_mode() -> None:

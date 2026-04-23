@@ -202,9 +202,7 @@ class ActionEnvelopeAdapter:
         """Build the strict staged decision model for one tool-or-finalize step."""
         allowed_tool_names = [spec.name for spec in specs]
         mode_annotation = (
-            Literal["tool", "finalize"]
-            if allowed_tool_names
-            else Literal["finalize"]
+            Literal["tool", "finalize"] if allowed_tool_names else Literal["finalize"]
         )
         tool_name_annotation = (
             _literal_annotation(allowed_tool_names, allow_none=True)
@@ -271,11 +269,12 @@ class ActionEnvelopeAdapter:
             step = response_model.model_validate(normalized)
         except ValidationError as exc:
             raise ValueError("Invalid staged tool-invocation payload.") from exc
+        step_payload = cast(Any, step)
         return ParsedModelResponse(
             invocations=[
                 ToolInvocationRequest(
-                    tool_name=step.tool_name,
-                    arguments=self._normalize_arguments(step.arguments),
+                    tool_name=step_payload.tool_name,
+                    arguments=self._normalize_arguments(step_payload.arguments),
                 )
             ]
         )
@@ -301,10 +300,7 @@ class ActionEnvelopeAdapter:
     @staticmethod
     def export_compact_tool_catalog(specs: list[ToolSpec]) -> list[dict[str, str]]:
         """Return compact tool summaries for staged decision prompts."""
-        return [
-            {"name": spec.name, "description": spec.description}
-            for spec in specs
-        ]
+        return [{"name": spec.name, "description": spec.description} for spec in specs]
 
     def export_schema(self, response_model: type[BaseModel]) -> dict[str, Any]:
         """Return JSON schema for the supplied action-envelope model."""
@@ -427,9 +423,8 @@ class ActionEnvelopeAdapter:
     def _simplified_final_response_annotation(final_response_model: object) -> object:
         if final_response_model is str:
             return str | None
-        if (
-            isinstance(final_response_model, type)
-            and issubclass(final_response_model, BaseModel)
+        if isinstance(final_response_model, type) and issubclass(
+            final_response_model, BaseModel
         ):
             return dict[str, Any] | None
         return _optional_annotation(final_response_model)

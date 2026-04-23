@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Sequence
+from typing import TypeVar
 
 from pydantic import BaseModel
 
@@ -21,6 +22,8 @@ from llm_tools.llm_providers import OpenAICompatibleProvider, ProviderModeStrate
 from llm_tools.tool_api import ToolContext, ToolRegistry, ToolSpec
 from llm_tools.workflow_api.executor import PreparedModelInteraction
 from llm_tools.workflow_api.protection import ProtectionController
+
+_StagedStepT = TypeVar("_StagedStepT")
 
 
 class AssistantHarnessTurnProvider:
@@ -238,7 +241,9 @@ class AssistantHarnessTurnProvider:
             parser=lambda payload: decision_model.model_validate(payload),
         )
         if getattr(decision, "mode", None) == "finalize":
-            final_model = adapter.build_final_response_step_model(final_response_model=str)
+            final_model = adapter.build_final_response_step_model(
+                final_response_model=str
+            )
             return self._run_staged_step(
                 stage_name="final_response",
                 messages=[
@@ -321,7 +326,9 @@ class AssistantHarnessTurnProvider:
             parser=lambda payload: decision_model.model_validate(payload),
         )
         if getattr(decision, "mode", None) == "finalize":
-            final_model = adapter.build_final_response_step_model(final_response_model=str)
+            final_model = adapter.build_final_response_step_model(
+                final_response_model=str
+            )
             return await self._run_staged_step_async(
                 stage_name="final_response",
                 messages=[
@@ -382,8 +389,8 @@ class AssistantHarnessTurnProvider:
         stage_name: str,
         messages: list[dict[str, str]],
         response_model: type[BaseModel],
-        parser: Callable[[object], object],
-    ) -> object:
+        parser: Callable[[object], _StagedStepT],
+    ) -> _StagedStepT:
         attempt_messages = list(messages)
         repair_attempted = False
         while True:
@@ -421,8 +428,8 @@ class AssistantHarnessTurnProvider:
         stage_name: str,
         messages: list[dict[str, str]],
         response_model: type[BaseModel],
-        parser: Callable[[object], object],
-    ) -> object:
+        parser: Callable[[object], _StagedStepT],
+    ) -> _StagedStepT:
         attempt_messages = list(messages)
         repair_attempted = False
         while True:
@@ -517,7 +524,9 @@ class AssistantHarnessTurnProvider:
         for spec in tool_specs:
             if spec.name == tool_name:
                 return spec
-        raise ValueError(f"Unknown tool selected during staged interaction: {tool_name}")
+        raise ValueError(
+            f"Unknown tool selected during staged interaction: {tool_name}"
+        )
 
 
 def build_live_harness_provider(
@@ -563,10 +572,17 @@ def build_live_harness_provider(
             tool_limits=config.tool_limits,
             enabled_tool_names=enabled_tool_names,
             workspace_enabled=workspace_enabled,
-            staged_schema_protocol=provider.uses_staged_schema_protocol(),
+            staged_schema_protocol=_uses_staged_schema_protocol(provider),
         ),
         protection_controller=protection_controller,
     )
+
+
+def _uses_staged_schema_protocol(provider: object) -> bool:
+    preference = getattr(provider, "uses_staged_schema_protocol", None)
+    if not callable(preference):
+        return False
+    return bool(preference())
 
 
 def _build_research_messages(

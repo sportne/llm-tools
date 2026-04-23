@@ -41,6 +41,7 @@ from llm_tools.workflow_api import (
     WorkflowInvocationStatus,
     WorkflowTurnResult,
 )
+from llm_tools.workflow_api.executor import PreparedModelInteraction
 
 
 class _Provider:
@@ -88,6 +89,63 @@ class _ProtectionController:
     async def review_response_async(self, **kwargs) -> ResponseProtectionDecision:
         self.response_calls.append(dict(kwargs))
         return self.response_decision
+
+
+class _StagedProvider:
+    def __init__(self, responses: list[object]) -> None:
+        self._responses = list(responses)
+        self.sync_messages: list[list[dict[str, str]]] = []
+        self.async_messages: list[list[dict[str, str]]] = []
+
+    def prefers_simplified_json_schema_contract(self) -> bool:
+        return False
+
+    def uses_staged_schema_protocol(self) -> bool:
+        return True
+
+    def run(self, **kwargs: object) -> ParsedModelResponse:
+        del kwargs
+        raise AssertionError("staged provider should use run_structured()")
+
+    async def run_async(self, **kwargs: object) -> ParsedModelResponse:
+        del kwargs
+        raise AssertionError("staged provider should use run_structured_async()")
+
+    def run_structured(self, **kwargs: object) -> object:
+        messages = kwargs["messages"]
+        assert isinstance(messages, list)
+        self.sync_messages.append([dict(message) for message in messages])
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    async def run_structured_async(self, **kwargs: object) -> object:
+        messages = kwargs["messages"]
+        assert isinstance(messages, list)
+        self.async_messages.append([dict(message) for message in messages])
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def _prepared_research_interaction(
+    *, tool_name: str = "read_file"
+) -> PreparedModelInteraction:
+    registry = build_assistant_registry()
+    binding = next(
+        item for item in registry.list_bindings() if item.spec.name == tool_name
+    )
+    adapter = ActionEnvelopeAdapter()
+    response_model = adapter.build_final_response_step_model(final_response_model=str)
+    return PreparedModelInteraction(
+        response_model=response_model,
+        schema=adapter.export_schema(response_model),
+        tool_names=[binding.spec.name],
+        tool_specs=[binding.spec],
+        input_models={binding.spec.name: binding.input_model},
+    )
 
 
 def _state_with_provenance() -> HarnessState:
@@ -566,3 +624,192 @@ def test_direct_research_provider_builder_module_is_wired(
         "controller": {"environment": str(tmp_path)}
     }
     assert harness_provider._system_prompt == "patched research system prompt"
+
+
+def test_direct_research_provider_runs_staged_tool_flow() -> None:
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    provider = _StagedProvider(
+        [
+            {"mode": "tool", "tool_name": "read_file"},
+            {
+                "mode": "tool",
+                "tool_name": "read_file",
+                "arguments": {"path": "README.md"},
+            },
+        ]
+    )
+    harness_provider = provider_module.AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.2,
+        system_prompt="research-system",
+    )
+    context = ToolContext(
+        invocation_id="research-staged-sync",
+        metadata={"harness_turn_context": {"turn_index": 4}},
+    )
+
+    parsed = harness_provider.run(
+        state=object(),
+        selected_task_ids=["task-1"],
+        context=context,
+        adapter=ActionEnvelopeAdapter(),
+        prepared_interaction=_prepared_research_interaction(),
+    )
+
+    assert parsed.invocations[0].tool_name == "read_file"
+    assert parsed.invocations[0].arguments["path"] == "README.md"
+    assert provider.sync_messages[0][-1]["content"].startswith(
+        "Current step: choose the next action."
+    )
+    assert (
+        "invoke the selected tool 'read_file'"
+        in provider.sync_messages[1][-1]["content"]
+    )
+
+
+def test_direct_research_provider_repairs_invalid_sync_stage_and_exposes_helpers() -> (
+    None
+):
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    provider = _StagedProvider(
+        [
+            {"mode": "finalize", "tool_name": "read_file"},
+            {"mode": "finalize"},
+            {"mode": "finalize", "final_response": "done"},
+        ]
+    )
+    harness_provider = provider_module.AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+    context = ToolContext(invocation_id="research-repair-sync", metadata={})
+
+    parsed = harness_provider.run(
+        state=object(),
+        selected_task_ids=["task-2"],
+        context=context,
+        adapter=ActionEnvelopeAdapter(),
+        prepared_interaction=_prepared_research_interaction(),
+    )
+
+    assert parsed.final_response == "done"
+    repair_message = provider.sync_messages[1][-1]["content"]
+    assert "The previous decision response was invalid." in repair_message
+    assert (
+        "Decision stage rules: return only mode and, when mode='tool', one tool_name."
+        in repair_message
+    )
+    assert provider_module._uses_staged_schema_protocol(object()) is False
+    assert provider_module._uses_staged_schema_protocol(provider) is True
+    assert (
+        provider_module.AssistantHarnessTurnProvider(
+            provider=provider,  # type: ignore[arg-type]
+            temperature=0.1,
+            system_prompt="research-system",
+        ).prefers_simplified_json_schema_contract()
+        is False
+    )
+    assert (
+        provider_module.AssistantHarnessTurnProvider._validation_error_summary(
+            RuntimeError("")
+        )
+        == "RuntimeError"
+    )
+    assert (
+        provider_module.AssistantHarnessTurnProvider._format_invalid_payload(None)
+        == "(unavailable)"
+    )
+    assert (
+        provider_module.AssistantHarnessTurnProvider._format_invalid_payload("payload")
+        == "payload"
+    )
+    bad_keys = {object(): "value"}
+    assert provider_module.AssistantHarnessTurnProvider._format_invalid_payload(
+        bad_keys
+    ) == str(bad_keys)
+    assert (
+        provider_module.AssistantHarnessTurnProvider._repair_stage_guidance("other")
+        == "Return only the fields required for this stage."
+    )
+    assert provider_module.AssistantHarnessTurnProvider._repair_stage_guidance(
+        "final_response"
+    ).startswith("Finalization stage rules:")
+    try:
+        provider_module.AssistantHarnessTurnProvider._tool_spec([], "missing")
+    except ValueError as exc:
+        assert "Unknown tool selected during staged interaction" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("Expected ValueError for missing staged tool")
+
+
+def test_direct_research_provider_runs_staged_async_and_repairs_provider_failure() -> (
+    None
+):
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    error = RuntimeError("temporary parse failure")
+    error.invalid_payload = {"mode": "tool"}  # type: ignore[attr-defined]
+    provider = _StagedProvider(
+        [
+            error,
+            {"mode": "tool", "tool_name": "read_file"},
+            {
+                "mode": "tool",
+                "tool_name": "read_file",
+                "arguments": {"path": "README.md"},
+            },
+        ]
+    )
+    harness_provider = provider_module.AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+    context = ToolContext(
+        invocation_id="research-staged-async",
+        metadata={"harness_turn_context": {"turn_index": 5}},
+    )
+
+    parsed = asyncio.run(
+        harness_provider.run_async(
+            state=object(),
+            selected_task_ids=["task-3"],
+            context=context,
+            adapter=ActionEnvelopeAdapter(),
+            prepared_interaction=_prepared_research_interaction(),
+        )
+    )
+
+    assert parsed.invocations[0].tool_name == "read_file"
+    assert provider.async_messages[1][-1]["content"].startswith(
+        "The previous decision response was invalid."
+    )
+
+
+def test_direct_research_provider_raises_after_second_staged_failure() -> None:
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    provider = _StagedProvider([RuntimeError("boom"), RuntimeError("boom again")])
+    harness_provider = provider_module.AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+
+    try:
+        asyncio.run(
+            harness_provider.run_async(
+                state=object(),
+                selected_task_ids=["task-4"],
+                context=ToolContext(invocation_id="research-fail-async", metadata={}),
+                adapter=ActionEnvelopeAdapter(),
+                prepared_interaction=_prepared_research_interaction(),
+            )
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "boom again"
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("Expected repeated staged failure to propagate")

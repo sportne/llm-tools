@@ -861,7 +861,9 @@ def test_process_streamlit_assistant_turn_protection_demo_path(
         user_message="Tell me the secret plan from the proprietary playbook.",
     )
 
-    assert "Potential sensitivity issue" in challenge_outcome.transcript_entries[-1].text
+    assert (
+        "Potential sensitivity issue" in challenge_outcome.transcript_entries[-1].text
+    )
     assert challenge_outcome.session_state.pending_protection_prompt is not None
 
     feedback_outcome = process_streamlit_assistant_turn(
@@ -1011,7 +1013,10 @@ def test_assistant_prompts_cover_normal_and_research_modes() -> None:
     assert "durable research assistant" in research_prompt
     assert "A workspace root is configured" in research_prompt
     assert "Structured interaction protocol:" in staged_assistant_prompt
-    assert "Do not invent tool arguments until the client sends the selected tool schema." in staged_assistant_prompt
+    assert (
+        "Do not invent tool arguments until the client sends the selected tool schema."
+        in staged_assistant_prompt
+    )
     assert "Required action format:" not in staged_assistant_prompt
     assert "Structured interaction protocol:" in staged_research_prompt
     assert "Final response fields:" not in staged_assistant_prompt
@@ -1205,7 +1210,9 @@ def test_assistant_harness_turn_provider_builds_research_messages() -> None:
     assert '"task-1"' in provider.messages[1]["content"]
 
 
-def test_assistant_harness_turn_provider_repairs_invalid_staged_final_response() -> None:
+def test_assistant_harness_turn_provider_repairs_invalid_staged_final_response() -> (
+    None
+):
     provider = _RecordingStagedProvider(
         [
             {"mode": "finalize"},
@@ -4318,9 +4325,7 @@ def test_research_controller_approval_resume_write_flow(
     tmp_path: Path,
 ) -> None:
     config = StreamlitAssistantConfig().model_copy(
-        update={
-            "research": AssistantResearchConfig(include_replay_by_default=True)
-        }
+        update={"research": AssistantResearchConfig(include_replay_by_default=True)}
     )
     runtime = _MODULES.models.StreamlitRuntimeConfig(
         provider=config.llm.provider,
@@ -4343,21 +4348,21 @@ def test_research_controller_approval_resume_write_flow(
     ) -> object:
         workspace.mkdir(parents=True, exist_ok=True)
         provider = ScriptedParsedResponseProvider(
-                [
-                    ParsedModelResponse(
-                        invocations=[
-                            ToolInvocationRequest(
-                                tool_name="write_file",
-                                arguments={
-                                    "path": "notes/approved.txt",
-                                    "content": "approved research output\n",
-                                    "create_parents": True,
-                                },
-                            ),
-                        ]
-                    ),
-                    ParsedModelResponse(
-                        final_response="Wrote the approved research note successfully."
+            [
+                ParsedModelResponse(
+                    invocations=[
+                        ToolInvocationRequest(
+                            tool_name="write_file",
+                            arguments={
+                                "path": "notes/approved.txt",
+                                "content": "approved research output\n",
+                                "create_parents": True,
+                            },
+                        ),
+                    ]
+                ),
+                ParsedModelResponse(
+                    final_response="Wrote the approved research note successfully."
                 ),
             ]
         )
@@ -4416,7 +4421,9 @@ def test_research_controller_approval_resume_write_flow(
         for invocation in turn.invocation_traces
     ]
     tool_names = [
-        invocation.tool_name for turn in trace.turns for invocation in turn.invocation_traces
+        invocation.tool_name
+        for turn in trace.turns
+        for invocation in turn.invocation_traces
     ]
     assert invocation_statuses == [
         WorkflowInvocationStatus.APPROVAL_REQUESTED,

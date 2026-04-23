@@ -234,8 +234,7 @@ def test_chat_session_runner_retries_ungrounded_repo_answer_with_tools(
         for event in events
     )
     assert any(
-        isinstance(event, ChatWorkflowStatusEvent)
-        and event.status == "searching text"
+        isinstance(event, ChatWorkflowStatusEvent) and event.status == "searching text"
         for event in events
     )
     result_event = events[-1]
@@ -398,6 +397,49 @@ def test_chat_session_runner_with_no_tools_repairs_invalid_tool_decision(
     assert isinstance(repair_message, str)
     assert "The previous decision response was invalid." in repair_message
     assert '"const": "finalize"' in repair_message
+
+
+def test_chat_session_runner_stage_helpers_cover_remaining_edges(
+    tmp_path: Path,
+) -> None:
+    runner = run_interactive_chat_session_turn(
+        user_message="Show git status for this repo.",
+        session_state=ChatSessionState(),
+        executor=_empty_executor(),
+        provider=_FakeProvider(
+            [ParsedModelResponse(final_response={"answer": "unused"})]
+        ),
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+        enabled_tool_names={"run_git_status"},
+    )
+
+    assert runner._validation_error_summary(RuntimeError("")) == "RuntimeError"
+    assert runner._repair_stage_guidance("tool:read_file").startswith(
+        "Tool stage rules:"
+    )
+    assert (
+        runner._repair_stage_guidance("mystery")
+        == "Return only the fields required for this stage."
+    )
+    assert runner._format_invalid_payload(None) == "(unavailable)"
+    assert runner._format_invalid_payload("payload") == "payload"
+    bad_keys = {object(): "value"}
+    assert runner._format_invalid_payload(bad_keys) == str(bad_keys)
+    assert runner._should_retry_ungrounded_final_response(
+        parsed=ParsedModelResponse(final_response={"answer": "draft"}),
+        tool_results=[],
+    )
+    try:
+        runner._tool_spec([], "missing")
+    except ValueError as exc:
+        assert "Unknown tool selected during staged interaction" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("Expected ValueError for missing staged tool")
 
 
 def test_chat_session_runner_returns_continuation_for_tool_budget(

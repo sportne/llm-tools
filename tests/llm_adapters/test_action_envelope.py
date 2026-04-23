@@ -252,7 +252,10 @@ def test_build_response_model_can_simplify_json_schema_contract() -> None:
     assert schema["properties"]["mode"]["enum"] == ["actions", "final"]
     assert schema["properties"]["actions"]["items"]["$ref"] == "#/$defs/_LooseAction"
     assert schema["$defs"]["_LooseAction"]["title"] == "_LooseAction"
-    assert schema["properties"]["final_response"]["anyOf"][0]["additionalProperties"] is True
+    assert (
+        schema["properties"]["final_response"]["anyOf"][0]["additionalProperties"]
+        is True
+    )
 
 
 def test_parse_model_output_accepts_simplified_json_action_arguments() -> None:
