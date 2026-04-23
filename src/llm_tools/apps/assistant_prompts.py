@@ -73,14 +73,70 @@ def _tool_catalog(
     )
 
 
+def _compact_tool_catalog(
+    *,
+    tool_registry: ToolRegistry,
+    enabled_tool_names: set[str] | None,
+) -> str:
+    return json.dumps(
+        [
+            {
+                "name": tool.spec.name,
+                "description": tool.spec.description,
+            }
+            for tool in tool_registry.list_bindings()
+            if enabled_tool_names is None or tool.spec.name in enabled_tool_names
+        ],
+        indent=2,
+        sort_keys=True,
+    )
+
+
 def build_assistant_system_prompt(
     *,
     tool_registry: ToolRegistry,
     tool_limits: ToolLimits,
     enabled_tool_names: set[str] | None = None,
     workspace_enabled: bool = True,
+    staged_schema_protocol: bool = False,
 ) -> str:
     """Return the interactive assistant system prompt."""
+    workspace_rules = (
+        "- A workspace root is configured for this session. Local path-based tools may use it.\n"
+        if workspace_enabled
+        else "- No workspace root is configured for this session. Do not use local workspace tools unless a root is selected later.\n"
+    )
+    if staged_schema_protocol:
+        tool_catalog = _compact_tool_catalog(
+            tool_registry=tool_registry,
+            enabled_tool_names=enabled_tool_names,
+        )
+        return (
+            f"{ASSISTANT_SYSTEM_PROMPT_PREAMBLE}\n\n"
+            "Available tools:\n"
+            "- Use the compact summaries below to choose the next step.\n"
+            "- Do not invent tool arguments until the client sends the selected tool schema.\n"
+            f"{tool_catalog}\n\n"
+            "Structured interaction protocol:\n"
+            "- Each step uses a small strict schema.\n"
+            "- First choose either one tool or finalize.\n"
+            "- If a tool is chosen, the client will reply with that tool's exact argument schema and usage guidance.\n"
+            "- Return exactly one tool invocation for that selected tool.\n"
+            "- After tool results arrive, choose the next step again.\n"
+            "- Only finalize when you have enough evidence to satisfy the final strict response schema.\n\n"
+            "Operational rules:\n"
+            f"{workspace_rules}"
+            "- Use tools only when the user request depends on tool-visible data or verification.\n"
+            "- If the user asks about this repository, workspace, source files, app/runtime wiring, or git state, inspect relevant local files or git data before finalizing.\n"
+            "- If the user explicitly asks you to use tools or cite local files, you must do that before finalizing.\n"
+            "- Prefer narrow reads and specific searches before broad file or remote fetches.\n"
+            "- If a tool call fails because of missing access, missing credentials, or bad arguments, do not repeat the same failing call.\n"
+            "- Answer conservatively and cite the evidence you actually have.\n\n"
+            "Relevant limits:\n"
+            "- search-style tools may cap result counts per call.\n"
+            f"- read-oriented content is bounded by configured readable-character limits near {tool_limits.max_file_size_characters} characters.\n"
+            f"- any single tool result may be truncated near {tool_limits.max_tool_result_chars} characters.\n"
+        )
     tool_catalog = _tool_catalog(
         tool_registry=tool_registry,
         enabled_tool_names=enabled_tool_names,
@@ -88,11 +144,6 @@ def build_assistant_system_prompt(
     response_fields = "\n".join(
         f"- {field_name}: {FIELD_GUIDANCE.get(field_name, DEFAULT_FIELD_GUIDANCE)}"
         for field_name in ChatFinalResponse.model_fields
-    )
-    workspace_rules = (
-        "- A workspace root is configured for this session. Local path-based tools may use it.\n"
-        if workspace_enabled
-        else "- No workspace root is configured for this session. Do not use local workspace tools unless a root is selected later.\n"
     )
     return (
         f"{ASSISTANT_SYSTEM_PROMPT_PREAMBLE}\n\n"
@@ -108,6 +159,8 @@ def build_assistant_system_prompt(
         "Operational rules:\n"
         f"{workspace_rules}"
         "- Use tools only when the user request depends on tool-visible data or verification.\n"
+        "- If the user asks about this repository, workspace, source files, app/runtime wiring, or git state, inspect relevant local files or git data before returning final_response.\n"
+        "- If the user explicitly asks you to use tools or cite local files, you must do that before returning final_response.\n"
         "- Prefer narrow reads and specific searches before broad file or remote fetches.\n"
         "- Local write tools are higher-risk than read tools and should not be used unless clearly needed.\n"
         "- Git tools require a workspace and subprocess access.\n"
@@ -129,16 +182,40 @@ def build_research_system_prompt(
     tool_limits: ToolLimits,
     enabled_tool_names: set[str] | None = None,
     workspace_enabled: bool = True,
+    staged_schema_protocol: bool = False,
 ) -> str:
     """Return the harness-research system prompt."""
-    tool_catalog = _tool_catalog(
-        tool_registry=tool_registry,
-        enabled_tool_names=enabled_tool_names,
-    )
     workspace_rules = (
         "- A workspace root is configured for this research session.\n"
         if workspace_enabled
         else "- No workspace root is configured for this research session.\n"
+    )
+    if staged_schema_protocol:
+        tool_catalog = _compact_tool_catalog(
+            tool_registry=tool_registry,
+            enabled_tool_names=enabled_tool_names,
+        )
+        return (
+            f"{RESEARCH_SYSTEM_PROMPT_PREAMBLE}\n\n"
+            "Available tools:\n"
+            f"{tool_catalog}\n\n"
+            "Structured interaction protocol:\n"
+            "- Each step uses a small strict schema.\n"
+            "- First choose either one tool or finalize.\n"
+            "- If a tool is chosen, the client will reply with that tool's exact argument schema and usage guidance.\n"
+            "- Return exactly one tool invocation for that selected tool.\n"
+            "- After tool results arrive, choose the next step again.\n"
+            "- Finalize only when the selected task has reached a durable stopping point for this turn.\n\n"
+            "Operational rules:\n"
+            f"{workspace_rules}"
+            "- Use the task and context JSON from the user message as the current source of work.\n"
+            "- Prefer precise searches and targeted reads over broad scans.\n"
+            "- If execution is blocked by missing access, credentials, or missing context, say so in the final response.\n"
+            f"- Tool outputs may be truncated near {tool_limits.max_tool_result_chars} characters.\n"
+        )
+    tool_catalog = _tool_catalog(
+        tool_registry=tool_registry,
+        enabled_tool_names=enabled_tool_names,
     )
     return (
         f"{RESEARCH_SYSTEM_PROMPT_PREAMBLE}\n\n"

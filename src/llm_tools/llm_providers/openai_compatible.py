@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Sequence
 from enum import Enum
 from typing import Any
@@ -65,6 +66,14 @@ class _ProviderPreflightResponse(BaseModel):
     status: str
 
 
+class StructuredOutputValidationError(ValueError):
+    """Structured output could not be parsed or validated."""
+
+    def __init__(self, message: str, *, invalid_payload: object | None = None) -> None:
+        super().__init__(message)
+        self.invalid_payload = invalid_payload
+
+
 class OpenAICompatibleProvider:
     """Call an OpenAI-compatible endpoint through Instructor."""
 
@@ -78,11 +87,13 @@ class OpenAICompatibleProvider:
         default_request_params: dict[str, Any] | None = None,
         client: OpenAI | Any | None = None,
         async_client: AsyncOpenAI | Any | None = None,
+        provider_family: str = "generic",
     ) -> None:
         self.model = model
         self.base_url = base_url
         self.mode_strategy = ProviderModeStrategy(mode_strategy)
         self.default_request_params = dict(default_request_params or {})
+        self.provider_family = provider_family
         self.last_mode_used: ProviderModeStrategy | None = None
         self._api_key = api_key
         self._client = client
@@ -109,6 +120,7 @@ class OpenAICompatibleProvider:
             default_request_params=default_request_params,
             client=client,
             async_client=async_client,
+            provider_family="openai",
         )
 
     @classmethod
@@ -132,6 +144,7 @@ class OpenAICompatibleProvider:
             default_request_params=default_request_params,
             client=client,
             async_client=async_client,
+            provider_family="ollama",
         )
 
     def run_structured(
@@ -163,6 +176,17 @@ class OpenAICompatibleProvider:
             request_params=request_params,
         )
         return adapter.parse_model_output(payload, response_model=response_model)
+
+    def prefers_simplified_json_schema_contract(self) -> bool:
+        """Return whether JSON mode should use the simplified action envelope."""
+        return self._should_use_native_json_schema(ProviderModeStrategy.JSON)
+
+    def uses_staged_schema_protocol(self) -> bool:
+        """Return whether structured interaction should use staged strict schemas."""
+        return self.mode_strategy in {
+            ProviderModeStrategy.JSON,
+            ProviderModeStrategy.MD_JSON,
+        }
 
     def list_available_models(self) -> list[str]:
         """Return discoverable model ids from the active endpoint."""
@@ -320,7 +344,7 @@ class OpenAICompatibleProvider:
         failures: list[tuple[ProviderModeStrategy, Exception]] = []
         previous_client: Any | None = None
         for mode in self._candidate_modes():
-            client = self._instructor_sync_client(mode)
+            client = self._sync_execution_client(mode)
             if failures and not self._mode_attempts_are_distinct(
                 previous_client, client
             ):
@@ -328,6 +352,7 @@ class OpenAICompatibleProvider:
 
             try:
                 payload = self._create_sync_completion(
+                    mode=mode,
                     client=client,
                     messages=messages,
                     response_model=response_model,
@@ -355,7 +380,7 @@ class OpenAICompatibleProvider:
         failures: list[tuple[ProviderModeStrategy, Exception]] = []
         previous_client: Any | None = None
         for mode in self._candidate_modes():
-            client = self._instructor_async_client(mode)
+            client = self._async_execution_client(mode)
             if failures and not self._mode_attempts_are_distinct(
                 previous_client, client
             ):
@@ -363,6 +388,7 @@ class OpenAICompatibleProvider:
 
             try:
                 payload = await self._create_async_completion(
+                    mode=mode,
                     client=client,
                     messages=messages,
                     response_model=response_model,
@@ -388,8 +414,9 @@ class OpenAICompatibleProvider:
         response_model: type[BaseModel],
         request_params: dict[str, Any] | None,
     ) -> object:
-        client = self._instructor_sync_client(mode)
+        client = self._sync_execution_client(mode)
         payload = self._create_sync_completion(
+            mode=mode,
             client=client,
             messages=messages,
             response_model=response_model,
@@ -401,11 +428,24 @@ class OpenAICompatibleProvider:
     def _create_sync_completion(
         self,
         *,
+        mode: ProviderModeStrategy,
         client: Any,
         messages: Sequence[dict[str, Any]],
         response_model: type[BaseModel],
         request_params: dict[str, Any] | None,
     ) -> object:
+        if self._should_use_native_json_schema(mode):
+            return self._create_native_json_schema_sync(
+                messages=messages,
+                response_model=response_model,
+                request_params=request_params,
+            )
+        if self._should_use_local_md_json(mode):
+            return self._create_local_md_json_sync(
+                messages=messages,
+                response_model=response_model,
+                request_params=request_params,
+            )
         return client.chat.completions.create(
             model=self.model,
             messages=list(messages),
@@ -416,16 +456,99 @@ class OpenAICompatibleProvider:
     async def _create_async_completion(
         self,
         *,
+        mode: ProviderModeStrategy,
         client: Any,
         messages: Sequence[dict[str, Any]],
         response_model: type[BaseModel],
         request_params: dict[str, Any] | None,
     ) -> object:
+        if self._should_use_native_json_schema(mode):
+            return await self._create_native_json_schema_async(
+                messages=messages,
+                response_model=response_model,
+                request_params=request_params,
+            )
+        if self._should_use_local_md_json(mode):
+            return await self._create_local_md_json_async(
+                messages=messages,
+                response_model=response_model,
+                request_params=request_params,
+            )
         return await client.chat.completions.create(
             model=self.model,
             messages=list(messages),
             response_model=response_model,
             **self._merged_request_params(request_params),
+        )
+
+    def _create_native_json_schema_sync(
+        self,
+        *,
+        messages: Sequence[dict[str, Any]],
+        response_model: type[BaseModel],
+        request_params: dict[str, Any] | None,
+    ) -> BaseModel:
+        response = self._sync_client.chat.completions.create(
+            model=self.model,
+            messages=list(messages),
+            response_format=self._native_json_schema_payload(response_model),
+            **self._merged_request_params(request_params),
+        )
+        return self._parse_native_json_schema_response(
+            response=response,
+            response_model=response_model,
+        )
+
+    def _create_local_md_json_sync(
+        self,
+        *,
+        messages: Sequence[dict[str, Any]],
+        response_model: type[BaseModel],
+        request_params: dict[str, Any] | None,
+    ) -> BaseModel:
+        response = self._sync_client.chat.completions.create(
+            model=self.model,
+            messages=list(messages),
+            **self._merged_request_params(request_params),
+        )
+        return self._parse_markdown_json_response(
+            response=response,
+            response_model=response_model,
+        )
+
+    async def _create_native_json_schema_async(
+        self,
+        *,
+        messages: Sequence[dict[str, Any]],
+        response_model: type[BaseModel],
+        request_params: dict[str, Any] | None,
+    ) -> BaseModel:
+        response = await self._async_client_instance.chat.completions.create(
+            model=self.model,
+            messages=list(messages),
+            response_format=self._native_json_schema_payload(response_model),
+            **self._merged_request_params(request_params),
+        )
+        return self._parse_native_json_schema_response(
+            response=response,
+            response_model=response_model,
+        )
+
+    async def _create_local_md_json_async(
+        self,
+        *,
+        messages: Sequence[dict[str, Any]],
+        response_model: type[BaseModel],
+        request_params: dict[str, Any] | None,
+    ) -> BaseModel:
+        response = await self._async_client_instance.chat.completions.create(
+            model=self.model,
+            messages=list(messages),
+            **self._merged_request_params(request_params),
+        )
+        return self._parse_markdown_json_response(
+            response=response,
+            response_model=response_model,
         )
 
     @staticmethod
@@ -498,12 +621,38 @@ class OpenAICompatibleProvider:
 
     def _candidate_modes(self) -> list[ProviderModeStrategy]:
         if self.mode_strategy is ProviderModeStrategy.AUTO:
+            if self.provider_family == "ollama":
+                return [
+                    ProviderModeStrategy.JSON,
+                    ProviderModeStrategy.MD_JSON,
+                    ProviderModeStrategy.TOOLS,
+                ]
             return [
                 ProviderModeStrategy.TOOLS,
                 ProviderModeStrategy.JSON,
                 ProviderModeStrategy.MD_JSON,
             ]
         return [self.mode_strategy]
+
+    def _should_use_native_json_schema(self, mode: ProviderModeStrategy) -> bool:
+        return (
+            self.provider_family == "ollama"
+            and mode is ProviderModeStrategy.JSON
+        )
+
+    @staticmethod
+    def _should_use_local_md_json(mode: ProviderModeStrategy) -> bool:
+        return mode is ProviderModeStrategy.MD_JSON
+
+    def _sync_execution_client(self, mode: ProviderModeStrategy) -> Any:
+        if self._should_use_native_json_schema(mode):
+            return self._sync_client
+        return self._instructor_sync_client(mode)
+
+    def _async_execution_client(self, mode: ProviderModeStrategy) -> Any:
+        if self._should_use_native_json_schema(mode):
+            return self._async_client_instance
+        return self._instructor_async_client(mode)
 
     def _instructor_sync_client(self, mode: ProviderModeStrategy) -> Any:
         if mode not in self._instructor_sync_clients:
@@ -696,6 +845,146 @@ class OpenAICompatibleProvider:
         if request_params is not None:
             merged.update(request_params)
         return merged
+
+    @staticmethod
+    def _native_json_schema_payload(
+        response_model: type[BaseModel],
+    ) -> dict[str, Any]:
+        schema_name = response_model.__name__ or "StructuredResponse"
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema_name,
+                "strict": True,
+                "schema": response_model.model_json_schema(),
+            },
+        }
+
+    @classmethod
+    def _parse_native_json_schema_response(
+        cls,
+        *,
+        response: Any,
+        response_model: type[BaseModel],
+    ) -> BaseModel:
+        raw_text = cls._native_response_text(response)
+        try:
+            return response_model.model_validate_json(raw_text)
+        except ValidationError as exc:
+            raise StructuredOutputValidationError(
+                str(exc),
+                invalid_payload=raw_text,
+            ) from exc
+
+    @classmethod
+    def _parse_markdown_json_response(
+        cls,
+        *,
+        response: Any,
+        response_model: type[BaseModel],
+    ) -> BaseModel:
+        raw_text = cls._structured_response_text(response)
+        try:
+            return response_model.model_validate_json(raw_text)
+        except ValidationError as exc:
+            candidate = cls._extract_markdown_json_candidate(raw_text)
+            if candidate is None or candidate.strip() == raw_text.strip():
+                raise StructuredOutputValidationError(
+                    str(exc),
+                    invalid_payload=raw_text,
+                ) from exc
+            try:
+                return response_model.model_validate_json(candidate)
+            except ValidationError as candidate_exc:
+                raise StructuredOutputValidationError(
+                    str(candidate_exc),
+                    invalid_payload=candidate,
+                ) from candidate_exc
+
+    @staticmethod
+    def _native_response_text(response: Any) -> str:
+        return OpenAICompatibleProvider._structured_response_text(response)
+
+    @staticmethod
+    def _structured_response_text(response: Any) -> str:
+        choices = getattr(response, "choices", None)
+        if not choices:
+            raise ValueError("Structured provider response did not include choices.")
+        first_choice = choices[0]
+        message = getattr(first_choice, "message", None)
+        if message is None:
+            raise ValueError("Structured provider response did not include a message.")
+        content = getattr(message, "content", None)
+        if isinstance(content, str) and content.strip():
+            return content
+        if isinstance(content, list):
+            parts = [
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict) and isinstance(item.get("text"), str)
+            ]
+            text = "".join(parts).strip()
+            if text:
+                return text
+        raise ValueError("Structured provider response did not include JSON content.")
+
+    @classmethod
+    def _extract_markdown_json_candidate(cls, text: str) -> str | None:
+        for match in reversed(
+            list(re.finditer(r"```(?:json)?\s*(.*?)```", text, re.IGNORECASE | re.DOTALL))
+        ):
+            candidate = match.group(1).strip()
+            balanced = cls._find_balanced_json_slice(candidate)
+            if balanced is not None:
+                return balanced
+            if candidate:
+                return candidate
+        return cls._find_balanced_json_slice(text)
+
+    @staticmethod
+    def _find_balanced_json_slice(text: str) -> str | None:
+        for start_index, char in enumerate(text):
+            if char not in "[{":
+                continue
+            candidate = OpenAICompatibleProvider._balanced_json_from_index(
+                text, start_index
+            )
+            if candidate is not None:
+                return candidate
+        return None
+
+    @staticmethod
+    def _balanced_json_from_index(text: str, start_index: int) -> str | None:
+        stack: list[str] = []
+        in_string = False
+        escaping = False
+        for index in range(start_index, len(text)):
+            char = text[index]
+            if in_string:
+                if escaping:
+                    escaping = False
+                    continue
+                if char == "\\":
+                    escaping = True
+                    continue
+                if char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+                continue
+            if char == "{":
+                stack.append("}")
+                continue
+            if char == "[":
+                stack.append("]")
+                continue
+            if char in "}]":
+                if not stack or char != stack.pop():
+                    return None
+                if not stack:
+                    return text[start_index : index + 1]
+        return None
 
     @property
     def _sync_client(self) -> OpenAI | Any:

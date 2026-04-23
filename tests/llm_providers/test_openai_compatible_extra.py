@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from enum import Enum
 from types import SimpleNamespace
 from typing import Any
+
+from pydantic import BaseModel
 
 import llm_tools.llm_providers.openai_compatible as provider_module
 from llm_tools.llm_providers import OpenAICompatibleProvider, ProviderModeStrategy
@@ -78,6 +81,42 @@ class PydanticTransportError(RuntimeError):
 PydanticTransportError.__module__ = "pydantic.testing"
 
 
+class _NativeSyncCompletions:
+    def __init__(self, response: Any) -> None:
+        self._response = response
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **kwargs: Any) -> object:
+        self.calls.append(kwargs)
+        return self._response
+
+
+class _NativeAsyncCompletions:
+    def __init__(self, response: Any) -> None:
+        self._response = response
+        self.calls: list[dict[str, Any]] = []
+
+    async def create(self, **kwargs: Any) -> object:
+        self.calls.append(kwargs)
+        return self._response
+
+
+def _native_response(json_payload: str) -> Any:
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=json_payload),
+            )
+        ]
+    )
+
+
+class _ProbeModel(BaseModel):
+    status: str
+    count: int
+    items: list[str]
+
+
 def test_provider_helper_methods_cover_listing_and_parameter_merging() -> None:
     data_page = SimpleNamespace(
         data=[
@@ -116,6 +155,14 @@ def test_provider_helper_methods_cover_listing_and_parameter_merging() -> None:
         ProviderModeStrategy.TOOLS,
         ProviderModeStrategy.JSON,
         ProviderModeStrategy.MD_JSON,
+    ]
+    assert OpenAICompatibleProvider.for_ollama(
+        model="demo-model",
+        mode_strategy=ProviderModeStrategy.AUTO,
+    )._candidate_modes() == [
+        ProviderModeStrategy.JSON,
+        ProviderModeStrategy.MD_JSON,
+        ProviderModeStrategy.TOOLS,
     ]
     assert OpenAICompatibleProvider(
         model="demo-model",
@@ -172,6 +219,132 @@ def test_provider_helper_methods_cover_listing_and_parameter_merging() -> None:
         "RuntimeError",
         "InstructorSchemaValidationError",
     ]
+
+
+def test_ollama_json_mode_uses_native_json_schema_payload(monkeypatch: Any) -> None:
+    monkeypatch.setattr(provider_module, "_instructor", _RealNamedInstructor())
+    completions = _NativeSyncCompletions(
+        _native_response('{"status":"ok","count":3,"items":["alpha","beta","gamma"]}')
+    )
+    provider = OpenAICompatibleProvider.for_ollama(
+        model="gemma4:e4b",
+        client=_BareClient(
+            chat=SimpleNamespace(completions=completions),
+            models=SimpleNamespace(list=lambda: [SimpleNamespace(id="gemma4:e4b")]),
+        ),
+        mode_strategy=ProviderModeStrategy.JSON,
+    )
+
+    payload = provider.run_structured(
+        messages=[{"role": "user", "content": "Return structured data."}],
+        response_model=_ProbeModel,
+        request_params={"temperature": 0},
+    )
+
+    assert payload.model_dump() == {
+        "status": "ok",
+        "count": 3,
+        "items": ["alpha", "beta", "gamma"],
+    }
+    assert len(completions.calls) == 1
+    call = completions.calls[0]
+    assert call["model"] == "gemma4:e4b"
+    assert call["temperature"] == 0
+    assert call["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "_ProbeModel",
+            "strict": True,
+            "schema": _ProbeModel.model_json_schema(),
+        },
+    }
+    assert "response_model" not in call
+
+
+def test_ollama_json_mode_uses_native_json_schema_payload_async(monkeypatch: Any) -> None:
+    monkeypatch.setattr(provider_module, "_instructor", _RealNamedInstructor())
+    completions = _NativeAsyncCompletions(
+        _native_response('{"status":"ok","count":3,"items":["alpha","beta","gamma"]}')
+    )
+    provider = OpenAICompatibleProvider.for_ollama(
+        model="gemma4:e4b",
+        async_client=_BareClient(chat=SimpleNamespace(completions=completions)),
+        mode_strategy=ProviderModeStrategy.JSON,
+    )
+
+    payload = asyncio.run(
+        provider.run_structured_async(
+            messages=[{"role": "user", "content": "Return structured data."}],
+            response_model=_ProbeModel,
+            request_params={"temperature": 0},
+        )
+    )
+
+    assert payload.model_dump() == {
+        "status": "ok",
+        "count": 3,
+        "items": ["alpha", "beta", "gamma"],
+    }
+    assert len(completions.calls) == 1
+    assert completions.calls[0]["response_format"]["type"] == "json_schema"
+
+
+def test_md_json_mode_extracts_json_from_markdown_content() -> None:
+    completions = _NativeSyncCompletions(
+        _native_response(
+            "I will use the strict schema.\n\n```json\n"
+            '{"status":"ok","count":3,"items":["alpha","beta","gamma"]}\n'
+            "```"
+        )
+    )
+    provider = OpenAICompatibleProvider(
+        model="demo-model",
+        client=_BareClient(chat=SimpleNamespace(completions=completions)),
+        mode_strategy=ProviderModeStrategy.MD_JSON,
+    )
+
+    payload = provider.run_structured(
+        messages=[{"role": "user", "content": "Return structured data."}],
+        response_model=_ProbeModel,
+        request_params={"temperature": 0},
+    )
+
+    assert payload.model_dump() == {
+        "status": "ok",
+        "count": 3,
+        "items": ["alpha", "beta", "gamma"],
+    }
+    assert len(completions.calls) == 1
+    assert "response_model" not in completions.calls[0]
+
+
+def test_md_json_mode_extracts_json_from_markdown_content_async() -> None:
+    completions = _NativeAsyncCompletions(
+        _native_response(
+            "Response follows.\n\n"
+            '{"status":"ok","count":3,"items":["alpha","beta","gamma"]}'
+        )
+    )
+    provider = OpenAICompatibleProvider(
+        model="demo-model",
+        async_client=_BareClient(chat=SimpleNamespace(completions=completions)),
+        mode_strategy=ProviderModeStrategy.MD_JSON,
+    )
+
+    payload = asyncio.run(
+        provider.run_structured_async(
+            messages=[{"role": "user", "content": "Return structured data."}],
+            response_model=_ProbeModel,
+            request_params={"temperature": 0},
+        )
+    )
+
+    assert payload.model_dump() == {
+        "status": "ok",
+        "count": 3,
+        "items": ["alpha", "beta", "gamma"],
+    }
+    assert len(completions.calls) == 1
 
 
 def test_provider_helper_methods_cover_retry_classification_edges() -> None:

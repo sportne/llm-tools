@@ -44,10 +44,31 @@ from llm_tools.workflow_api.models import (
 class _FakeProvider:
     def __init__(self, responses: list[ParsedModelResponse]) -> None:
         self._responses = list(responses)
+        self.calls = 0
 
     def run(self, **kwargs) -> ParsedModelResponse:
         del kwargs
+        self.calls += 1
         return self._responses.pop(0)
+
+
+class _FakeStagedProvider:
+    def __init__(self, responses: list[object]) -> None:
+        self._responses = list(responses)
+        self.calls: list[list[dict[str, object]]] = []
+
+    def run(self, **kwargs) -> ParsedModelResponse:
+        del kwargs
+        raise AssertionError("staged provider should use run_structured()")
+
+    def run_structured(self, **kwargs) -> object:
+        messages = kwargs["messages"]
+        assert isinstance(messages, list)
+        self.calls.append([dict(message) for message in messages])
+        return self._responses.pop(0)
+
+    def uses_staged_schema_protocol(self) -> bool:
+        return True
 
 
 class _CancelOnRunProvider:
@@ -148,6 +169,180 @@ def test_chat_session_runner_executes_tool_then_returns_final_response(
     assert result_event.result.final_response.answer == "It is defined in src/app.py."
     assert result_event.result.session_state is not None
     assert len(result_event.result.session_state.turns) == 1
+
+
+def test_chat_session_runner_retries_ungrounded_repo_answer_with_tools(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("needle = 1\n", encoding="utf-8")
+    provider = _FakeProvider(
+        [
+            ParsedModelResponse(
+                final_response=ChatFinalResponse(
+                    answer="The app probably wires state through Streamlit session state."
+                ).model_dump(mode="json")
+            ),
+            ParsedModelResponse(
+                invocations=[
+                    {
+                        "tool_name": "search_text",
+                        "arguments": {"path": ".", "query": "session_state"},
+                    }
+                ]
+            ),
+            ParsedModelResponse(
+                final_response=ChatFinalResponse(
+                    answer="It wires state through Streamlit session state.",
+                    citations=[{"source_path": "src/app.py", "line_start": 1}],
+                ).model_dump(mode="json")
+            ),
+        ]
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message=(
+            "Explain how this repository wires chat state together. "
+            "You must use local workspace tools before answering."
+        ),
+        session_state=ChatSessionState(),
+        executor=_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(max_tool_result_chars=500),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+        enabled_tool_names={"search_text", "read_file", "find_files"},
+    )
+
+    events = list(runner)
+
+    assert provider.calls == 3
+    assert any(
+        isinstance(event, ChatWorkflowStatusEvent)
+        and event.status == "gathering evidence"
+        for event in events
+    )
+    assert any(
+        isinstance(event, ChatWorkflowStatusEvent)
+        and event.status == "searching text"
+        for event in events
+    )
+    result_event = events[-1]
+    assert isinstance(result_event, ChatWorkflowResultEvent)
+    assert result_event.result.final_response is not None
+    assert (
+        result_event.result.final_response.answer
+        == "It wires state through Streamlit session state."
+    )
+
+
+def test_chat_session_runner_executes_staged_tool_then_returns_final_response(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("needle = 1\n", encoding="utf-8")
+    provider = _FakeStagedProvider(
+        [
+            {"mode": "tool", "tool_name": "search_text"},
+            {
+                "mode": "tool",
+                "tool_name": "search_text",
+                "arguments": {"path": ".", "query": "needle"},
+            },
+            {"mode": "finalize"},
+            {
+                "mode": "finalize",
+                "final_response": {
+                    "answer": "It is defined in src/app.py.",
+                    "citations": [{"source_path": "src/app.py", "line_start": 1}],
+                },
+            },
+        ]
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Where is needle defined?",
+        session_state=ChatSessionState(),
+        executor=_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(max_tool_result_chars=500),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    events = list(runner)
+
+    assert any(
+        isinstance(event, ChatWorkflowStatusEvent)
+        and event.status == "preparing search_text"
+        for event in events
+    )
+    result_event = events[-1]
+    assert isinstance(result_event, ChatWorkflowResultEvent)
+    assert result_event.result.final_response is not None
+    assert result_event.result.final_response.answer == "It is defined in src/app.py."
+    assert len(provider.calls) == 4
+    assert "Current step: choose the next action." in provider.calls[0][-1]["content"]
+    assert "invoke the selected tool 'search_text'" in provider.calls[1][-1]["content"]
+    assert "Current step: finalize the answer." in provider.calls[3][-1]["content"]
+
+
+def test_chat_session_runner_repairs_invalid_staged_final_response(
+    tmp_path: Path,
+) -> None:
+    provider = _FakeStagedProvider(
+        [
+            {"mode": "finalize"},
+            {
+                "mode": "finalize",
+                "final_response": {
+                    "answer": "done",
+                    "citations": ["README.md"],
+                },
+            },
+            {
+                "mode": "finalize",
+                "final_response": {
+                    "answer": "done",
+                    "citations": [{"source_path": "README.md", "line_start": 1}],
+                },
+            },
+        ]
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer with a citation.",
+        session_state=ChatSessionState(),
+        executor=_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    events = list(runner)
+
+    assert any(
+        isinstance(event, ChatWorkflowStatusEvent)
+        and event.status == "repairing final_response"
+        for event in events
+    )
+    result_event = events[-1]
+    assert isinstance(result_event, ChatWorkflowResultEvent)
+    assert result_event.result.final_response is not None
+    assert result_event.result.final_response.answer == "done"
+    assert len(provider.calls) == 3
+    repair_message = provider.calls[-1][-1]["content"]
+    assert isinstance(repair_message, str)
+    assert "The previous final_response response was invalid." in repair_message
+    assert "Validation summary:" in repair_message
+    assert '"citations": [' in repair_message
 
 
 def test_chat_session_runner_returns_continuation_for_tool_budget(

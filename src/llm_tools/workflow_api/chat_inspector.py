@@ -26,6 +26,14 @@ def _tool_status_label(tool_name: str) -> str:
         return "searching text"
     if tool_name in {"get_file_info", "read_file"}:
         return "reading file"
+    if tool_name in {"run_git_status", "show_git_status"}:
+        return "checking git status"
+    if tool_name in {"run_git_diff", "read_git_diff"}:
+        return "reading git diff"
+    if tool_name == "run_git_log":
+        return "reading git history"
+    if tool_name == "read_git_file":
+        return "reading tracked file"
     return "thinking"
 
 

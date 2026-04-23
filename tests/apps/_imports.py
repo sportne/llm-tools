@@ -108,6 +108,22 @@ class _FakeOpenAICompatibleProvider:
         )
         return adapter.parse_model_output(payload, response_model=response_model)
 
+    def run_structured(
+        self,
+        *,
+        messages: Sequence[dict[str, Any]],
+        response_model: type[Any],
+        request_params: dict[str, Any] | None = None,
+    ) -> object:
+        if self._client is None:
+            raise RuntimeError("Fake provider requires a sync client.")
+        return self._client.chat.completions.create(
+            model=self.model,
+            messages=list(messages),
+            response_model=response_model,
+            **self._merged_request_params(request_params),
+        )
+
     async def run_async(
         self,
         *,
@@ -125,6 +141,28 @@ class _FakeOpenAICompatibleProvider:
             **self._merged_request_params(request_params),
         )
         return adapter.parse_model_output(payload, response_model=response_model)
+
+    async def run_structured_async(
+        self,
+        *,
+        messages: Sequence[dict[str, Any]],
+        response_model: type[Any],
+        request_params: dict[str, Any] | None = None,
+    ) -> object:
+        if self._async_client is None:
+            raise RuntimeError("Fake provider requires an async client.")
+        return await self._async_client.chat.completions.create(
+            model=self.model,
+            messages=list(messages),
+            response_model=response_model,
+            **self._merged_request_params(request_params),
+        )
+
+    def uses_staged_schema_protocol(self) -> bool:
+        return self.mode_strategy in {
+            _FakeProviderModeStrategy.JSON,
+            _FakeProviderModeStrategy.MD_JSON,
+        }
 
     def _merged_request_params(
         self, request_params: dict[str, Any] | None

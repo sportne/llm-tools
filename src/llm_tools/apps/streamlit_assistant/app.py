@@ -151,6 +151,7 @@ class AssistantTurnState:
 
     busy: bool = False
     status_text: str = ""
+    status_history: list[str] = field(default_factory=list)
     pending_approval: ChatWorkflowApprovalState | None = None
     approval_decision_in_flight: bool = False
     active_turn_number: int = 0
@@ -185,6 +186,29 @@ class AssistantActiveTurnHandle:
     event_queue: queue.Queue[AssistantQueuedEvent]
     thread: threading.Thread
     turn_number: int
+
+
+def _coerce_active_turn_handle(raw: object) -> AssistantActiveTurnHandle | None:
+    """Normalize a previously stored active-turn handle across Streamlit reruns."""
+    if isinstance(raw, AssistantActiveTurnHandle):
+        return raw
+    required_fields = (
+        "session_id",
+        "runner",
+        "event_queue",
+        "thread",
+        "turn_number",
+    )
+    if not all(hasattr(raw, field_name) for field_name in required_fields):
+        return None
+    legacy_handle = cast(Any, raw)
+    return AssistantActiveTurnHandle(
+        session_id=str(legacy_handle.session_id),
+        runner=legacy_handle.runner,
+        event_queue=legacy_handle.event_queue,
+        thread=legacy_handle.thread,
+        turn_number=int(legacy_handle.turn_number),
+    )
 
 
 @dataclass(slots=True)
@@ -1168,6 +1192,14 @@ def _is_default_assistant_session_title(title: str) -> bool:
 def _assistant_status_copy(status_text: str) -> str:
     status_map = {
         "thinking": "Assistant is drafting a response.",
+        "gathering evidence": "Assistant is gathering workspace evidence before answering.",
+        "listing files": "Assistant is scanning workspace files.",
+        "searching text": "Assistant is searching the workspace.",
+        "reading file": "Assistant is reading relevant files.",
+        "checking git status": "Assistant is checking git status.",
+        "reading git diff": "Assistant is reviewing recent git changes.",
+        "reading git history": "Assistant is reviewing git history.",
+        "reading tracked file": "Assistant is reading a tracked file.",
         "approval required": "Approval is needed to continue.",
         "approving": "Applying approval and continuing.",
         "denying": "Skipping the requested tool and continuing.",
@@ -1180,6 +1212,30 @@ def _assistant_status_copy(status_text: str) -> str:
     if not cleaned:
         return ""
     return status_map.get(cleaned, cleaned.replace("_", " ").capitalize() + ".")
+
+
+def _remember_turn_status(
+    turn_state: AssistantTurnState,
+    status_text: str,
+) -> None:
+    cleaned = status_text.strip()
+    if not cleaned:
+        return
+    if turn_state.status_history and turn_state.status_history[-1] == cleaned:
+        return
+    turn_state.status_history.append(cleaned)
+    if len(turn_state.status_history) > 6:
+        del turn_state.status_history[:-6]
+
+
+def _recent_status_history_copy(turn_state: AssistantTurnState) -> str:
+    if not turn_state.status_history:
+        return ""
+    recent = [
+        _assistant_status_copy(status).rstrip(".")
+        for status in turn_state.status_history[-4:]
+    ]
+    return "Recent steps: " + " -> ".join(recent)
 
 
 def _approval_request_copy(approval: ChatWorkflowApprovalState) -> str:
@@ -1475,6 +1531,7 @@ def _build_assistant_runner(
             tool_limits=effective_config.tool_limits,
             enabled_tool_names=exposed_tool_names,
             workspace_enabled=root is not None,
+            staged_schema_protocol=_uses_staged_schema_protocol(provider),
         ),
         base_context=build_assistant_context(
             root_path=root,
@@ -1487,7 +1544,15 @@ def _build_assistant_runner(
         redaction_config=effective_config.policy.redaction,
         temperature=effective_config.llm.temperature,
         protection_controller=protection_controller,
+        enabled_tool_names=exposed_tool_names,
     )
+
+
+def _uses_staged_schema_protocol(provider: ModelTurnProvider) -> bool:
+    preference = getattr(provider, "uses_staged_schema_protocol", None)
+    if not callable(preference):
+        return False
+    return bool(preference())
 
 
 def _serialize_workflow_event(
@@ -1618,6 +1683,7 @@ def _apply_turn_result(
                 StreamlitTranscriptEntry(role="system", text=result.interruption_reason)
             )
     turn_state.status_text = ""
+    turn_state.status_history = []
     turn_state.busy = False
     turn_state.cancelling = False
     pending_prompt = turn_state.queued_follow_up_prompt
@@ -1659,6 +1725,7 @@ def _apply_turn_error(
     pending_prompt = turn_state.queued_follow_up_prompt
     turn_state.busy = False
     turn_state.status_text = ""
+    turn_state.status_history = []
     turn_state.pending_approval = None
     turn_state.approval_decision_in_flight = False
     turn_state.queued_follow_up_prompt = None
@@ -1679,12 +1746,14 @@ def _apply_queued_event(
             return None
         status_event = ChatWorkflowStatusEvent.model_validate(queued_event.payload)
         turn_state.status_text = status_event.status
+        _remember_turn_status(turn_state, status_event.status)
         return None
     if queued_event.kind == "approval_requested":
         approval_event = ChatWorkflowApprovalEvent.model_validate(queued_event.payload)
         turn_state.pending_approval = approval_event.approval
         turn_state.approval_decision_in_flight = False
         turn_state.status_text = "approval required"
+        _remember_turn_status(turn_state, "approval required")
         record.transcript.append(
             StreamlitTranscriptEntry(
                 role="system",
@@ -1709,6 +1778,7 @@ def _apply_queued_event(
             "timed_out": "approval timed out",
             "cancelled": "",
         }[approval_resolved_event.resolution]
+        _remember_turn_status(turn_state, turn_state.status_text)
         _touch_record(record)
         return None
     if queued_event.kind == "inspector":
@@ -1745,6 +1815,7 @@ def _apply_queued_event(
             pending_prompt = turn_state.queued_follow_up_prompt
             turn_state.busy = False
             turn_state.status_text = ""
+            turn_state.status_history = []
             turn_state.pending_approval = None
             turn_state.approval_decision_in_flight = False
             turn_state.queued_follow_up_prompt = None
@@ -1762,24 +1833,42 @@ def _drain_active_turn_events(
     app_state: AssistantWorkspaceState,
 ) -> tuple[str, str] | None:
     st = _streamlit_module()
-    handle = st.session_state.get(_ACTIVE_TURN_STATE_SLOT)
-    if not isinstance(handle, AssistantActiveTurnHandle):
+    handle = _coerce_active_turn_handle(st.session_state.get(_ACTIVE_TURN_STATE_SLOT))
+    if handle is None:
         return None
+    st.session_state[_ACTIVE_TURN_STATE_SLOT] = handle
     pending_prompt: tuple[str, str] | None = None
     while True:
         try:
             queued_event = handle.event_queue.get_nowait()
         except queue.Empty:
             break
-        next_prompt = _apply_queued_event(app_state, queued_event)
+        try:
+            next_prompt = _apply_queued_event(app_state, queued_event)
+        except Exception as exc:
+            next_prompt = _apply_turn_error(
+                app_state,
+                session_id=queued_event.session_id,
+                error_message=(
+                    "Failed to apply assistant turn event. "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+            )
+            st.session_state[_ACTIVE_TURN_STATE_SLOT] = None
         if next_prompt is not None:
             pending_prompt = (queued_event.session_id, next_prompt)
     turn_state = _turn_state_for(app_state, handle.session_id)
-    if (
-        not handle.thread.is_alive()
-        and handle.event_queue.empty()
-        and not turn_state.busy
-    ):
+    if not handle.thread.is_alive() and handle.event_queue.empty():
+        if turn_state.busy:
+            next_prompt = _apply_turn_error(
+                app_state,
+                session_id=handle.session_id,
+                error_message=(
+                    "Assistant turn ended before a final response was applied."
+                ),
+            )
+            if next_prompt is not None:
+                pending_prompt = (handle.session_id, next_prompt)
         st.session_state[_ACTIVE_TURN_STATE_SLOT] = None
     _save_workspace_state(app_state)
     return pending_prompt
@@ -1820,6 +1909,8 @@ def _start_streamlit_turn(
     turn_state.active_turn_number = turn_number
     turn_state.busy = True
     turn_state.status_text = "thinking"
+    turn_state.status_history = []
+    _remember_turn_status(turn_state, "thinking")
     turn_state.pending_approval = None
     turn_state.approval_decision_in_flight = False
     turn_state.queued_follow_up_prompt = None
@@ -1887,16 +1978,18 @@ def _resolve_active_approval(
     approved: bool,
 ) -> None:
     st = _streamlit_module()
-    handle = st.session_state.get(_ACTIVE_TURN_STATE_SLOT)
+    handle = _coerce_active_turn_handle(st.session_state.get(_ACTIVE_TURN_STATE_SLOT))
     turn_state = _turn_state_for(app_state, session_id)
-    if not isinstance(handle, AssistantActiveTurnHandle):
+    if handle is None:
         return
+    st.session_state[_ACTIVE_TURN_STATE_SLOT] = handle
     if handle.session_id != session_id or turn_state.pending_approval is None:
         return
     if not handle.runner.resolve_pending_approval(approved):
         return
     turn_state.approval_decision_in_flight = True
     turn_state.status_text = "approving" if approved else "denying"
+    _remember_turn_status(turn_state, turn_state.status_text)
     _save_workspace_state(app_state)
 
 
@@ -1907,10 +2000,10 @@ def _cancel_active_turn(
     preserve_pending_prompt: bool = False,
 ) -> None:
     st = _streamlit_module()
-    handle = st.session_state.get(_ACTIVE_TURN_STATE_SLOT)
+    handle = _coerce_active_turn_handle(st.session_state.get(_ACTIVE_TURN_STATE_SLOT))
     turn_state = _turn_state_for(app_state, session_id)
     if (
-        not isinstance(handle, AssistantActiveTurnHandle)
+        handle is None
         or handle.session_id != session_id
     ):
         if turn_state.busy:
@@ -1918,15 +2011,18 @@ def _cancel_active_turn(
             turn_state.approval_decision_in_flight = False
             turn_state.cancelling = False
             turn_state.status_text = ""
+            turn_state.status_history = []
             turn_state.busy = False
             app_state.sessions[session_id].transcript.append(
                 StreamlitTranscriptEntry(role="system", text="Stopped the active turn.")
             )
         return
+    st.session_state[_ACTIVE_TURN_STATE_SLOT] = handle
     turn_state.pending_approval = None
     turn_state.approval_decision_in_flight = False
     turn_state.cancelling = True
     turn_state.status_text = "stopping"
+    _remember_turn_status(turn_state, "stopping")
     handle.runner.cancel()
 
 
@@ -4359,6 +4455,8 @@ def _render_status_and_composer(
     turn_state = _turn_state_for(app_state, session_id)
     if turn_state.status_text:
         st.caption(_assistant_status_copy(turn_state.status_text))
+    if turn_state.busy and turn_state.status_history:
+        st.caption(_recent_status_history_copy(turn_state))
     if turn_state.pending_approval is not None:
         st.markdown(
             f"**Approval needed**: {_approval_request_copy(turn_state.pending_approval)}"
@@ -4368,12 +4466,14 @@ def _render_status_and_composer(
             "Allow tool",
             use_container_width=True,
             disabled=turn_state.approval_decision_in_flight,
+            key=f"allow-tool:{session_id}",
         ):
             _resolve_active_approval(app_state, session_id=session_id, approved=True)
         if cols[1].button(
             "Skip tool",
             use_container_width=True,
             disabled=turn_state.approval_decision_in_flight,
+            key=f"skip-tool:{session_id}",
         ):
             _resolve_active_approval(app_state, session_id=session_id, approved=False)
     if turn_state.queued_follow_up_prompt:
@@ -4391,7 +4491,11 @@ def _render_status_and_composer(
     app_state.drafts[session_id] = prompt
     cols = st.columns(2)
     send_label = "Queue follow-up" if turn_state.busy else "Send"
-    if cols[0].button(send_label, use_container_width=True):
+    if cols[0].button(
+        send_label,
+        use_container_width=True,
+        key=f"send:{session_id}",
+    ):
         llm_config = _llm_config_for_runtime(config, runtime)
         metadata = llm_config.credential_prompt_metadata()
         if metadata.expects_api_key and _current_api_key(llm_config) is None:
@@ -4409,6 +4513,7 @@ def _render_status_and_composer(
         "Stop current turn",
         use_container_width=True,
         disabled=not turn_state.busy,
+        key=f"stop-turn:{session_id}",
     ):
         _cancel_active_turn(app_state, session_id=session_id)
         _save_workspace_state(app_state)

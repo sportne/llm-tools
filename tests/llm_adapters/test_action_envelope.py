@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from llm_tools.llm_adapters import ActionEnvelopeAdapter
 from llm_tools.tool_api import ToolInvocationRequest, ToolSpec
+from llm_tools.workflow_api.chat_models import ChatFinalResponse
 
 
 class EchoInput(BaseModel):
@@ -234,6 +235,197 @@ def test_parse_model_output_rejects_empty_final_response() -> None:
         adapter.parse_model_output(
             {"actions": [], "final_response": "   "},
             response_model=response_model,
+        )
+
+
+def test_build_response_model_can_simplify_json_schema_contract() -> None:
+    adapter = ActionEnvelopeAdapter()
+    response_model = adapter.build_response_model(
+        _specs(),
+        _input_models(),
+        final_response_model=ChatFinalResponse,
+        simplify_json_schema=True,
+    )
+    schema = adapter.export_schema(response_model)
+
+    assert schema["title"] == "ActionEnvelopeSimplified"
+    assert schema["properties"]["mode"]["enum"] == ["actions", "final"]
+    assert schema["properties"]["actions"]["items"]["$ref"] == "#/$defs/_LooseAction"
+    assert schema["$defs"]["_LooseAction"]["title"] == "_LooseAction"
+    assert schema["properties"]["final_response"]["anyOf"][0]["additionalProperties"] is True
+
+
+def test_parse_model_output_accepts_simplified_json_action_arguments() -> None:
+    adapter = ActionEnvelopeAdapter()
+    response_model = adapter.build_response_model(
+        _specs(),
+        _input_models(),
+        simplify_json_schema=True,
+    )
+
+    parsed = adapter.parse_model_output(
+        {
+            "mode": "actions",
+            "actions": [
+                {
+                    "tool_name": "read_file",
+                    "arguments": {
+                        "path": "README.md",
+                        "encoding": 123,
+                        "extra_flag": True,
+                    },
+                }
+            ],
+            "final_response": None,
+        },
+        response_model=response_model,
+    )
+
+    assert parsed.final_response is None
+    assert parsed.invocations == [
+        ToolInvocationRequest(
+            tool_name="read_file",
+            arguments={
+                "path": "README.md",
+                "encoding": 123,
+                "extra_flag": True,
+            },
+        )
+    ]
+
+
+def test_parse_model_output_normalizes_simplified_json_final_response_model() -> None:
+    adapter = ActionEnvelopeAdapter()
+    response_model = adapter.build_response_model(
+        _specs(),
+        _input_models(),
+        final_response_model=ChatFinalResponse,
+        simplify_json_schema=True,
+    )
+
+    parsed = adapter.parse_model_output(
+        {
+            "mode": "final",
+            "actions": [],
+            "final_response": {"answer": "done", "missing_information": ["none"]},
+        },
+        response_model=response_model,
+    )
+
+    assert parsed.invocations == []
+    assert parsed.final_response == {
+        "answer": "done",
+        "missing_information": ["none"],
+    }
+
+
+def test_build_decision_step_model_constrains_tool_names() -> None:
+    adapter = ActionEnvelopeAdapter()
+    response_model = adapter.build_decision_step_model(_specs())
+    schema = adapter.export_schema(response_model)
+
+    assert schema["title"] == "DecisionStep"
+    assert schema["properties"]["mode"]["enum"] == ["tool", "finalize"]
+    assert sorted(schema["properties"]["tool_name"]["anyOf"][0]["enum"]) == [
+        "echo",
+        "read_file",
+    ]
+
+
+def test_decision_step_model_rejects_invalid_mode_combinations() -> None:
+    adapter = ActionEnvelopeAdapter()
+    response_model = adapter.build_decision_step_model(_specs())
+
+    with pytest.raises(ValueError):
+        response_model.model_validate({"mode": "tool"})
+    with pytest.raises(ValueError):
+        response_model.model_validate({"mode": "finalize", "tool_name": "echo"})
+    with pytest.raises(ValueError):
+        response_model.model_validate({"mode": "tool", "tool_name": "missing"})
+
+
+def test_parse_staged_tool_invocation_and_final_response_steps() -> None:
+    adapter = ActionEnvelopeAdapter()
+    invocation_model = adapter.build_tool_invocation_step_model(
+        tool_name="read_file",
+        input_model=ReadInput,
+    )
+    final_model = adapter.build_final_response_step_model(
+        final_response_model=ChatFinalResponse
+    )
+
+    parsed_invocation = adapter.parse_tool_invocation_step(
+        {
+            "mode": "tool",
+            "tool_name": "read_file",
+            "arguments": {"path": "README.md"},
+        },
+        response_model=invocation_model,
+    )
+    parsed_final = adapter.parse_final_response_step(
+        {
+            "mode": "finalize",
+            "final_response": {"answer": "done", "citations": []},
+        },
+        response_model=final_model,
+    )
+
+    assert parsed_invocation.invocations == [
+        ToolInvocationRequest(
+            tool_name="read_file",
+            arguments={"path": "README.md", "encoding": "utf-8"},
+        )
+    ]
+    assert parsed_invocation.final_response is None
+    assert parsed_final.invocations == []
+    assert parsed_final.final_response is not None
+    assert parsed_final.final_response["answer"] == "done"
+    assert parsed_final.final_response["citations"] == []
+
+
+def test_tool_invocation_step_model_rejects_wrong_tool_and_invalid_arguments() -> None:
+    adapter = ActionEnvelopeAdapter()
+    invocation_model = adapter.build_tool_invocation_step_model(
+        tool_name="read_file",
+        input_model=ReadInput,
+    )
+
+    with pytest.raises(ValueError):
+        adapter.parse_tool_invocation_step(
+            {
+                "mode": "tool",
+                "tool_name": "echo",
+                "arguments": {"value": "hello"},
+            },
+            response_model=invocation_model,
+        )
+    with pytest.raises(ValueError):
+        adapter.parse_tool_invocation_step(
+            {
+                "mode": "tool",
+                "tool_name": "read_file",
+                "arguments": {"encoding": "utf-8"},
+            },
+            response_model=invocation_model,
+        )
+
+
+def test_final_response_step_model_rejects_invalid_chat_final_response() -> None:
+    adapter = ActionEnvelopeAdapter()
+    final_model = adapter.build_final_response_step_model(
+        final_response_model=ChatFinalResponse
+    )
+
+    with pytest.raises(ValueError):
+        adapter.parse_final_response_step(
+            {
+                "mode": "finalize",
+                "final_response": {
+                    "answer": "done",
+                    "citations": ["README.md"],
+                },
+            },
+            response_model=final_model,
         )
 
 

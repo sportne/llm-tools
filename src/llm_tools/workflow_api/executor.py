@@ -45,6 +45,8 @@ class PreparedModelInteraction:
     response_model: type[BaseModel]
     schema: dict[str, Any]
     tool_names: list[str]
+    tool_specs: list[ToolSpec]
+    input_models: dict[str, type[BaseModel]]
 
 
 class WorkflowExecutor:
@@ -82,6 +84,7 @@ class WorkflowExecutor:
         context: ToolContext | None = None,
         include_requires_approval: bool = False,
         final_response_model: object = str,
+        simplify_json_schema: bool = False,
     ) -> PreparedModelInteraction:
         """Prepare a typed response model and schema for one model turn."""
         tools = self._registry.list_bindings()
@@ -99,11 +102,14 @@ class WorkflowExecutor:
             specs,
             input_models,
             final_response_model=final_response_model,
+            simplify_json_schema=simplify_json_schema,
         )
         return PreparedModelInteraction(
             response_model=response_model,
             schema=adapter.export_schema(response_model),
             tool_names=[spec.name for spec in specs],
+            tool_specs=specs,
+            input_models=input_models,
         )
 
     def execute_parsed_response(

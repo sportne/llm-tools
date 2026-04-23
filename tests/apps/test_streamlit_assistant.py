@@ -69,9 +69,16 @@ from llm_tools.workflow_api import (
     ChatWorkflowResultEvent,
     ChatWorkflowStatusEvent,
     ChatWorkflowTurnResult,
+    DefaultEnvironmentComparator,
     PromptProtectionDecision,
     ProtectionAction,
+    ProtectionAssessment,
+    ProtectionConfig,
+    ProtectionController,
+    ProtectionFeedbackStore,
     ResponseProtectionDecision,
+    WorkflowInvocationStatus,
+    load_protection_corpus,
 )
 
 _MODULES = import_streamlit_assistant_modules()
@@ -109,6 +116,51 @@ class _RecordingProtectionController:
     def review_response(self, **kwargs) -> ResponseProtectionDecision:
         self.response_calls.append(dict(kwargs))
         return self.response_decision
+
+
+class _UnexpectedProvider:
+    def run(self, **kwargs: object) -> ParsedModelResponse:
+        del kwargs
+        raise AssertionError("provider should not be called")
+
+
+class _DeterministicProtectionClassifier:
+    def __init__(self, *, document_id: str) -> None:
+        self._document_id = document_id
+
+    def assess_prompt(self, **kwargs) -> ProtectionAssessment:
+        messages = list(kwargs["messages"])
+        latest_message = str(messages[-1].get("content", "")).lower()
+        if "secret plan" in latest_message or "proprietary playbook" in latest_message:
+            return ProtectionAssessment(
+                sensitivity_label="restricted",
+                reasoning="Prompt requests proprietary planning material.",
+                confidence=0.99,
+                referenced_document_ids=[self._document_id],
+                recommended_action=ProtectionAction.CHALLENGE,
+            )
+        return ProtectionAssessment(
+            sensitivity_label="public",
+            reasoning="Prompt is safe to process.",
+            confidence=0.85,
+        )
+
+    def assess_response(self, **kwargs) -> ProtectionAssessment:
+        response_text = str(kwargs["response_payload"]).lower()
+        if "top secret token" in response_text:
+            return ProtectionAssessment(
+                sensitivity_label="restricted",
+                reasoning="Candidate answer contains proprietary material.",
+                confidence=0.99,
+                referenced_document_ids=[self._document_id],
+                recommended_action=ProtectionAction.SANITIZE,
+                sanitized_text="Safe replacement",
+            )
+        return ProtectionAssessment(
+            sensitivity_label="public",
+            reasoning="Candidate answer is safe.",
+            confidence=0.9,
+        )
 
 
 class _FakeBlock:
@@ -753,6 +805,120 @@ def test_process_streamlit_assistant_turn_brokered_tool_provenance_reaches_prote
     assert secret_text not in outcome.transcript_entries[-1].text
 
 
+def test_process_streamlit_assistant_turn_protection_demo_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    readme_path = tmp_path / "README.md"
+    readme_path.write_text("Workspace read target.\n", encoding="utf-8")
+    guidance_path = tmp_path / "proprietary-guidance.md"
+    guidance_path.write_text(
+        "Secret plans and proprietary playbooks are restricted.\n",
+        encoding="utf-8",
+    )
+    corrections_path = tmp_path / "corrections.json"
+    protection_config = ProtectionConfig(
+        enabled=True,
+        document_paths=[str(guidance_path)],
+        corrections_path=str(corrections_path),
+    )
+
+    def _build_demo_controller(**kwargs) -> ProtectionController:
+        config = kwargs["config"]
+        feedback_store = ProtectionFeedbackStore(config.corrections_path)
+        corpus = load_protection_corpus(config, feedback_store=feedback_store)
+        return ProtectionController(
+            config=config,
+            classifier=_DeterministicProtectionClassifier(
+                document_id=guidance_path.name
+            ),
+            environment=dict(kwargs["environment"]),
+            comparator=DefaultEnvironmentComparator(),
+            corpus=corpus,
+            feedback_store=feedback_store,
+        )
+
+    monkeypatch.setattr(
+        _MODULES.app,
+        "build_protection_controller",
+        _build_demo_controller,
+    )
+
+    runtime_config = _MODULES.models.StreamlitRuntimeConfig(
+        root_path=str(tmp_path),
+        enabled_tools=["read_file"],
+        allow_filesystem=True,
+        protection=protection_config,
+    )
+
+    challenge_outcome = process_streamlit_assistant_turn(
+        root_path=tmp_path,
+        config=StreamlitAssistantConfig(),
+        runtime_config=runtime_config,
+        provider=_UnexpectedProvider(),
+        session_state=ChatSessionState(),
+        user_message="Tell me the secret plan from the proprietary playbook.",
+    )
+
+    assert "Potential sensitivity issue" in challenge_outcome.transcript_entries[-1].text
+    assert challenge_outcome.session_state.pending_protection_prompt is not None
+
+    feedback_outcome = process_streamlit_assistant_turn(
+        root_path=tmp_path,
+        config=StreamlitAssistantConfig(),
+        runtime_config=runtime_config,
+        provider=_UnexpectedProvider(),
+        session_state=challenge_outcome.session_state,
+        user_message=(
+            "analysis_is_correct: false\n"
+            "expected_sensitivity_label: public\n"
+            "rationale: This request was already approved for external-safe sharing."
+        ),
+    )
+
+    assert feedback_outcome.session_state.pending_protection_prompt is None
+    assert "Recorded your correction" in feedback_outcome.transcript_entries[-1].text
+    feedback_entries = ProtectionFeedbackStore(corrections_path).load_entries()
+    assert feedback_entries[-1].expected_sensitivity_label == "public"
+
+    sanitize_outcome = process_streamlit_assistant_turn(
+        root_path=tmp_path,
+        config=StreamlitAssistantConfig(),
+        runtime_config=runtime_config,
+        provider=_FakeProvider(
+            [
+                ParsedModelResponse(
+                    invocations=[
+                        {"tool_name": "read_file", "arguments": {"path": "README.md"}}
+                    ]
+                ),
+                ParsedModelResponse(
+                    final_response={
+                        "answer": "TOP SECRET TOKEN",
+                        "citations": [],
+                        "confidence": 0.9,
+                        "uncertainty": [],
+                        "missing_information": [],
+                        "follow_up_suggestions": [],
+                    }
+                ),
+            ]
+        ),
+        session_state=feedback_outcome.session_state,
+        user_message="Use a local workspace tool to inspect README.md, then answer safely.",
+    )
+
+    assert sanitize_outcome.transcript_entries[-1].final_response is not None
+    assert (
+        sanitize_outcome.transcript_entries[-1].final_response.answer
+        == "Safe replacement"
+    )
+    assert "TOP SECRET TOKEN" not in sanitize_outcome.transcript_entries[-1].text
+    tool_result = sanitize_outcome.session_state.turns[-1].tool_results[0]
+    assert tool_result.metadata["execution_record"]["tool_name"] == "read_file"
+    assert tool_result.source_provenance[0].metadata["path"] == "README.md"
+
+
 def test_research_controller_can_launch_list_and_stop_sessions() -> None:
     store = InMemoryHarnessStateStore()
 
@@ -822,12 +988,32 @@ def test_assistant_prompts_cover_normal_and_research_modes() -> None:
         enabled_tool_names=enabled,
         workspace_enabled=True,
     )
+    staged_assistant_prompt = build_assistant_system_prompt(
+        tool_registry=registry,
+        tool_limits=StreamlitAssistantConfig().tool_limits,
+        enabled_tool_names=enabled,
+        workspace_enabled=True,
+        staged_schema_protocol=True,
+    )
+    staged_research_prompt = build_research_system_prompt(
+        tool_registry=registry,
+        tool_limits=StreamlitAssistantConfig().tool_limits,
+        enabled_tool_names=enabled,
+        workspace_enabled=True,
+        staged_schema_protocol=True,
+    )
 
     assert "general-purpose assistant" in assistant_prompt
     assert "No workspace root is configured" in assistant_prompt
     assert "search_jira" in assistant_prompt
+    assert "inspect relevant local files or git data" in assistant_prompt
     assert "durable research assistant" in research_prompt
     assert "A workspace root is configured" in research_prompt
+    assert "Structured interaction protocol:" in staged_assistant_prompt
+    assert "Do not invent tool arguments until the client sends the selected tool schema." in staged_assistant_prompt
+    assert "Required action format:" not in staged_assistant_prompt
+    assert "Structured interaction protocol:" in staged_research_prompt
+    assert "Final response fields:" not in staged_assistant_prompt
 
 
 def test_assistant_config_validators_normalize_blank_values() -> None:
@@ -961,6 +1147,35 @@ class _RecordingProvider:
         return ParsedModelResponse(final_response="done")
 
 
+class _RecordingStagedProvider:
+    def __init__(self, responses: list[object]) -> None:
+        self._responses = list(responses)
+        self.calls: list[list[dict[str, str]]] = []
+
+    def prefers_simplified_json_schema_contract(self) -> bool:
+        return False
+
+    def uses_staged_schema_protocol(self) -> bool:
+        return True
+
+    def run(self, **kwargs: object) -> ParsedModelResponse:
+        del kwargs
+        raise AssertionError("staged provider should use run_structured()")
+
+    async def run_async(self, **kwargs: object) -> ParsedModelResponse:
+        del kwargs
+        raise AssertionError("staged provider should use run_structured_async()")
+
+    def run_structured(self, **kwargs: object) -> object:
+        messages = kwargs["messages"]  # type: ignore[index]
+        assert isinstance(messages, list)
+        self.calls.append([dict(message) for message in messages])
+        return self._responses.pop(0)
+
+    async def run_structured_async(self, **kwargs: object) -> object:
+        return self.run_structured(**kwargs)
+
+
 def test_assistant_harness_turn_provider_builds_research_messages() -> None:
     provider = _RecordingProvider()
     harness_provider = AssistantHarnessTurnProvider(
@@ -987,6 +1202,42 @@ def test_assistant_harness_turn_provider_builds_research_messages() -> None:
     assert provider.messages is not None
     assert provider.messages[0]["content"] == "research-system"
     assert '"task-1"' in provider.messages[1]["content"]
+
+
+def test_assistant_harness_turn_provider_repairs_invalid_staged_final_response() -> None:
+    provider = _RecordingStagedProvider(
+        [
+            {"mode": "finalize"},
+            {"mode": "finalize", "final_response": {"summary": "bad-shape"}},
+            {"mode": "finalize", "final_response": "done"},
+        ]
+    )
+    harness_provider = AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+    response = harness_provider.run(
+        state=object(),
+        selected_task_ids=["task-1"],
+        context=ToolContext(
+            invocation_id="turn-1",
+            metadata={"harness_turn_context": {"turn_index": 1}},
+        ),
+        adapter=ActionEnvelopeAdapter(),
+        prepared_interaction=build_assistant_executor()[1].prepare_model_interaction(
+            ActionEnvelopeAdapter(),
+            context=ToolContext(invocation_id="demo"),
+            final_response_model=str,
+        ),
+    )
+
+    assert response.final_response == "done"
+    assert len(provider.calls) == 3
+    repair_message = provider.calls[-1][-1]["content"]
+    assert "The previous final_response response was invalid." in repair_message
+    assert "Validation summary:" in repair_message
+    assert '"summary": "bad-shape"' in repair_message
 
 
 def test_streamlit_assistant_helper_paths_and_preferences(
@@ -1463,6 +1714,9 @@ def test_streamlit_assistant_copy_helpers_cover_status_sources_and_session_meta(
     assert _MODULES.app._assistant_status_copy("thinking") == (
         "Assistant is drafting a response."
     )
+    assert _MODULES.app._assistant_status_copy("gathering evidence") == (
+        "Assistant is gathering workspace evidence before answering."
+    )
     assert _MODULES.app._source_readiness_tokens(runtime) == ["sources: chat only"]
 
     runtime = _make_runtime(root_path=None)
@@ -1484,6 +1738,26 @@ def test_streamlit_assistant_copy_helpers_cover_status_sources_and_session_meta(
         is_active=True,
     )
     assert meta == "current | 3 msgs | working | follow-up queued | draft saved"
+
+
+def test_streamlit_assistant_recent_status_history_copy_trims_to_recent_steps() -> None:
+    turn_state = _MODULES.app.AssistantTurnState(
+        busy=True,
+        status_history=[
+            "thinking",
+            "gathering evidence",
+            "searching text",
+            "reading file",
+            "drafting answer",
+        ],
+    )
+
+    assert _MODULES.app._recent_status_history_copy(turn_state) == (
+        "Recent steps: Assistant is gathering workspace evidence before answering"
+        " -> Assistant is searching the workspace"
+        " -> Assistant is reading relevant files"
+        " -> Drafting answer"
+    )
 
 
 def test_streamlit_assistant_defaults_to_dark_theme_for_new_workspace_state(
@@ -2399,6 +2673,43 @@ def test_streamlit_assistant_render_status_and_composer_shows_approval_copy(
     assert any(
         "Approval needed before using read_file. approval required." in item
         for item in fake_st.markdown_messages
+    )
+
+
+def test_streamlit_assistant_render_status_and_composer_shows_recent_steps(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(_MODULES.app, "_save_workspace_state", lambda app_state: None)
+
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+    turn_state = _MODULES.app._turn_state_for(app_state, session_id)
+    turn_state.busy = True
+    turn_state.status_text = "searching text"
+    turn_state.status_history = [
+        "thinking",
+        "gathering evidence",
+        "searching text",
+    ]
+
+    _MODULES.app._render_status_and_composer(
+        app_state,
+        session_id=session_id,
+        config=StreamlitAssistantConfig(),
+    )
+
+    assert any(
+        "Assistant is searching the workspace." in item
+        for item in fake_st.caption_messages
+    )
+    assert any(
+        "Recent steps: Assistant is drafting a response"
+        " -> Assistant is gathering workspace evidence before answering"
+        " -> Assistant is searching the workspace" in item
+        for item in fake_st.caption_messages
     )
 
 
@@ -3634,6 +3945,130 @@ def test_streamlit_assistant_apply_turn_result_and_queue_error_branches(
     assert _MODULES.app._drain_active_turn_events(app_state) is None
 
 
+def test_streamlit_assistant_drain_active_turn_events_recovers_orphaned_busy_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(_MODULES.app, "_save_workspace_state", lambda app_state: None)
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+    turn_state = _MODULES.app._turn_state_for(app_state, session_id)
+    turn_state.busy = True
+    turn_state.status_text = "drafting answer"
+    fake_st.session_state[_MODULES.app._ACTIVE_TURN_STATE_SLOT] = (
+        _MODULES.app.AssistantActiveTurnHandle(
+            session_id=session_id,
+            runner=_FakeRunnerHandle(),
+            event_queue=queue.Queue(),
+            thread=_DeadThread(),
+            turn_number=1,
+        )
+    )
+
+    pending = _MODULES.app._drain_active_turn_events(app_state)
+
+    assert pending is None
+    assert fake_st.session_state[_MODULES.app._ACTIVE_TURN_STATE_SLOT] is None
+    assert turn_state.busy is False
+    assert (
+        app_state.sessions[session_id].transcript[-1].text
+        == "Assistant turn ended before a final response was applied."
+    )
+
+
+def test_streamlit_assistant_drain_active_turn_events_surfaces_queue_apply_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(_MODULES.app, "_save_workspace_state", lambda app_state: None)
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+    turn_state = _MODULES.app._turn_state_for(app_state, session_id)
+    turn_state.busy = True
+    event_queue: queue.Queue[_MODULES.app.AssistantQueuedEvent] = queue.Queue()
+    event_queue.put(
+        _MODULES.app.AssistantQueuedEvent(
+            kind="mystery",
+            payload=object(),
+            turn_number=1,
+            session_id=session_id,
+        )
+    )
+    fake_st.session_state[_MODULES.app._ACTIVE_TURN_STATE_SLOT] = (
+        _MODULES.app.AssistantActiveTurnHandle(
+            session_id=session_id,
+            runner=_FakeRunnerHandle(),
+            event_queue=event_queue,
+            thread=_DeadThread(),
+            turn_number=1,
+        )
+    )
+
+    pending = _MODULES.app._drain_active_turn_events(app_state)
+
+    assert pending is None
+    assert fake_st.session_state[_MODULES.app._ACTIVE_TURN_STATE_SLOT] is None
+    assert turn_state.busy is False
+    assert "Failed to apply assistant turn event." in (
+        app_state.sessions[session_id].transcript[-1].text
+    )
+
+
+def test_streamlit_assistant_drain_active_turn_events_accepts_legacy_handle_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(_MODULES.app, "_streamlit_module", lambda: fake_st)
+    monkeypatch.setattr(_MODULES.app, "_save_workspace_state", lambda app_state: None)
+    app_state = _make_app_state(root_path=str(tmp_path))
+    session_id = app_state.active_session_id
+    event_queue: queue.Queue[_MODULES.app.AssistantQueuedEvent] = queue.Queue()
+    event_queue.put(
+        _MODULES.app.AssistantQueuedEvent(
+            kind="result",
+            payload=ChatWorkflowResultEvent(
+                result=ChatWorkflowTurnResult(
+                    status="completed",
+                    new_messages=[],
+                    final_response=ChatFinalResponse(answer="done"),
+                    session_state=ChatSessionState(),
+                )
+            ).model_dump(mode="json"),
+            turn_number=1,
+            session_id=session_id,
+        )
+    )
+    event_queue.put(
+        _MODULES.app.AssistantQueuedEvent(
+            kind="complete",
+            payload=None,
+            turn_number=1,
+            session_id=session_id,
+        )
+    )
+    turn_state = _MODULES.app._turn_state_for(app_state, session_id)
+    turn_state.busy = True
+    fake_st.session_state[_MODULES.app._ACTIVE_TURN_STATE_SLOT] = SimpleNamespace(
+        session_id=session_id,
+        runner=_FakeRunnerHandle(),
+        event_queue=event_queue,
+        thread=_DeadThread(),
+        turn_number=1,
+    )
+
+    pending = _MODULES.app._drain_active_turn_events(app_state)
+
+    assert pending is None
+    assert fake_st.session_state[_MODULES.app._ACTIVE_TURN_STATE_SLOT] is None
+    assert app_state.sessions[session_id].transcript[-1].text == "done"
+    assert turn_state.busy is False
+
+
 def _example_config_path(name: str) -> Path:
     return Path(__file__).resolve().parents[2] / "examples" / "assistant_configs" / name
 
@@ -3863,3 +4298,120 @@ def test_streamlit_assistant_product_journey_supports_research_approval_resume(
     assert approved.summary.stop_reason is HarnessStopReason.COMPLETED
     assert approved.summary.pending_approval_ids == []
     assert approved.snapshot.state.session.stop_reason is HarnessStopReason.COMPLETED
+
+
+def test_research_controller_approval_resume_write_flow(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = StreamlitAssistantConfig().model_copy(
+        update={
+            "research": AssistantResearchConfig(include_replay_by_default=True)
+        }
+    )
+    runtime = _MODULES.models.StreamlitRuntimeConfig(
+        provider=config.llm.provider,
+        model_name=config.llm.model_name,
+        api_base_url=config.llm.api_base_url,
+        root_path=str(tmp_path / "approve-workspace"),
+        default_workspace_root=str(tmp_path / "approve-workspace"),
+        enabled_tools=["list_directory", "write_file"],
+        allow_filesystem=True,
+        allow_subprocess=False,
+        require_approval_for={SideEffectClass.LOCAL_WRITE},
+    )
+    deny_workspace = tmp_path / "deny-workspace"
+    approve_workspace = tmp_path / "approve-workspace"
+
+    def _run_flow(
+        *,
+        workspace: Path,
+        approval_resolution: ApprovalResolution,
+    ) -> object:
+        workspace.mkdir(parents=True, exist_ok=True)
+        provider = ScriptedParsedResponseProvider(
+                [
+                    ParsedModelResponse(
+                        invocations=[
+                            ToolInvocationRequest(
+                                tool_name="write_file",
+                                arguments={
+                                    "path": "notes/approved.txt",
+                                    "content": "approved research output\n",
+                                    "create_parents": True,
+                                },
+                            ),
+                        ]
+                    ),
+                    ParsedModelResponse(
+                        final_response="Wrote the approved research note successfully."
+                ),
+            ]
+        )
+        monkeypatch.setattr(_MODULES.app, "_current_api_key", lambda llm_config: None)
+        monkeypatch.setattr(
+            _MODULES.app,
+            "build_live_harness_provider",
+            lambda **kwargs: provider,
+        )
+        controller = _MODULES.app._build_research_controller(
+            config=config,
+            runtime=runtime.model_copy(
+                update={
+                    "root_path": str(workspace),
+                    "default_workspace_root": str(workspace),
+                }
+            ),
+        )
+        waiting = controller.launch(
+            prompt=(
+                "List the workspace, then write an approval-gated note and confirm "
+                "completion."
+            )
+        )
+        resumed = controller.resume(
+            waiting.snapshot.session_id,
+            approval_resolution=approval_resolution,
+        )
+        return waiting, resumed
+
+    waiting_deny, denied = _run_flow(
+        workspace=deny_workspace,
+        approval_resolution=ApprovalResolution.DENY,
+    )
+    waiting_approve, approved = _run_flow(
+        workspace=approve_workspace,
+        approval_resolution=ApprovalResolution.APPROVE,
+    )
+
+    assert waiting_deny.summary.pending_approval_ids
+    assert waiting_deny.resumed.disposition is ResumeDisposition.WAITING_FOR_APPROVAL
+    assert not (deny_workspace / "notes" / "approved.txt").exists()
+    assert denied.summary.stop_reason is HarnessStopReason.APPROVAL_DENIED
+    assert denied.summary.pending_approval_ids == []
+
+    approved_path = approve_workspace / "notes" / "approved.txt"
+    assert waiting_approve.summary.pending_approval_ids
+    assert approved.summary.stop_reason is HarnessStopReason.COMPLETED
+    assert approved.summary.pending_approval_ids == []
+    assert approved_path.read_text(encoding="utf-8") == "approved research output\n"
+    trace = approved.snapshot.artifacts.trace
+    assert trace is not None
+    invocation_statuses = [
+        invocation.status
+        for turn in trace.turns
+        for invocation in turn.invocation_traces
+    ]
+    tool_names = [
+        invocation.tool_name for turn in trace.turns for invocation in turn.invocation_traces
+    ]
+    assert invocation_statuses == [
+        WorkflowInvocationStatus.APPROVAL_REQUESTED,
+        WorkflowInvocationStatus.EXECUTED,
+    ]
+    assert tool_names == ["write_file", "write_file"]
+    assert approved.replay is not None
+    assert approved.replay.steps[0].workflow_outcome_statuses == [
+        WorkflowInvocationStatus.APPROVAL_REQUESTED,
+        WorkflowInvocationStatus.EXECUTED,
+    ]

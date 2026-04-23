@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from threading import Condition
 from typing import Any, Protocol
@@ -16,6 +16,7 @@ from llm_tools.tool_api import (
     ProtectionProvenanceSnapshot,
     ToolContext,
     ToolResult,
+    ToolSpec,
 )
 from llm_tools.tool_api.redaction import RedactionConfig
 from llm_tools.tools.filesystem.models import ToolLimits
@@ -52,13 +53,78 @@ from llm_tools.workflow_api.chat_state import (
     _parse_timestamp,
     _prepare_session_context,
 )
-from llm_tools.workflow_api.executor import WorkflowExecutor
+from llm_tools.workflow_api.executor import PreparedModelInteraction, WorkflowExecutor
 from llm_tools.workflow_api.models import (
     ApprovalRequest,
     WorkflowInvocationStatus,
     WorkflowTurnResult,
 )
 from llm_tools.workflow_api.protection import ProtectionAction, ProtectionController
+
+_LOCAL_GROUNDING_TOOL_NAMES = frozenset(
+    {
+        "list_directory",
+        "find_files",
+        "get_file_info",
+        "read_file",
+        "search_text",
+        "read_git_file",
+        "run_git_status",
+        "run_git_diff",
+        "run_git_log",
+        "show_git_status",
+        "read_git_diff",
+    }
+)
+_GIT_GROUNDING_TOOL_NAMES = frozenset(
+    {
+        "read_git_file",
+        "run_git_status",
+        "run_git_diff",
+        "run_git_log",
+        "show_git_status",
+        "read_git_diff",
+    }
+)
+_EXPLICIT_GROUNDING_HINTS = (
+    "must use",
+    "use one or more",
+    "use the workspace tools",
+    "use local workspace tools",
+    "cite local files",
+    "cite the most relevant local files",
+    "ground your answer",
+    "inspect the repo",
+    "inspect the repository",
+)
+_REPOSITORY_GROUNDING_HINTS = (
+    "repository",
+    "repo",
+    "codebase",
+    "workspace",
+    "project",
+    "local files",
+    "source tree",
+    "streamlit assistant",
+    "app/runtime",
+    "runtime flow",
+    "wires together",
+    "module",
+    "function",
+    "class",
+    "file",
+    "files",
+)
+_GIT_GROUNDING_HINTS = (
+    "git status",
+    "git diff",
+    "git log",
+    "recent change",
+    "recent changes",
+    "commit",
+    "diff",
+    "tracked file",
+)
 
 
 class ModelTurnProvider(Protocol):
@@ -73,6 +139,18 @@ class ModelTurnProvider(Protocol):
         request_params: dict[str, Any] | None = None,
     ) -> ParsedModelResponse:
         """Return one parsed model response for a workflow turn."""
+
+    def run_structured(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        response_model: type[BaseModel],
+        request_params: dict[str, Any] | None = None,
+    ) -> object:
+        """Return one structured payload for a staged workflow step."""
+
+    def uses_staged_schema_protocol(self) -> bool:
+        """Return whether this provider expects staged strict schemas."""
 
 
 class ChatSessionTurnRunner:
@@ -92,6 +170,7 @@ class ChatSessionTurnRunner:
         redaction_config: RedactionConfig,
         temperature: float,
         protection_controller: ProtectionController | None = None,
+        enabled_tool_names: set[str] | None = None,
     ) -> None:
         (
             self._system_message,
@@ -114,11 +193,13 @@ class ChatSessionTurnRunner:
         self._redaction_config = redaction_config
         self._temperature = temperature
         self._protection_controller = protection_controller
+        self._enabled_tool_names = frozenset(enabled_tool_names or ())
         self._adapter = ActionEnvelopeAdapter()
         self._approval_condition = Condition()
         self._cancel_requested = False
         self._pending_approval: ChatWorkflowApprovalState | None = None
         self._pending_approval_decision: bool | None = None
+        self._grounding_retry_used = False
 
     def cancel(self) -> None:
         """Request cooperative cancellation at the next safe boundary."""
@@ -192,7 +273,7 @@ class ChatSessionTurnRunner:
 
             (
                 round_context,
-                response_model,
+                prepared,
                 round_index,
                 serialized_messages,
                 provenance,
@@ -211,17 +292,24 @@ class ChatSessionTurnRunner:
                 yield prompt_event
                 return
 
-            yield ChatWorkflowInspectorEvent(
-                round_index=round_index,
-                kind="provider_messages",
-                payload=serialized_messages,
-            )
-            parsed = self._provider.run(
-                adapter=self._adapter,
-                messages=serialized_messages,
-                response_model=response_model,
-                request_params={"temperature": self._temperature},
-            )
+            if self._uses_staged_schema_protocol():
+                parsed = yield from self._run_staged_round(
+                    round_index=round_index,
+                    messages=serialized_messages,
+                    prepared=prepared,
+                )
+            else:
+                yield ChatWorkflowInspectorEvent(
+                    round_index=round_index,
+                    kind="provider_messages",
+                    payload=serialized_messages,
+                )
+                parsed = self._provider.run(
+                    adapter=self._adapter,
+                    messages=serialized_messages,
+                    response_model=prepared.response_model,
+                    request_params={"temperature": self._temperature},
+                )
             parsed = self._apply_response_protection(
                 parsed=parsed,
                 provenance=provenance,
@@ -242,6 +330,24 @@ class ChatSessionTurnRunner:
                     reason="Interrupted by user.",
                 )
                 return
+
+            if self._should_retry_ungrounded_final_response(
+                parsed=parsed,
+                tool_results=tool_results,
+            ):
+                self._grounding_retry_used = True
+                messages.append(self._grounding_repair_message())
+                round_count += 1
+                round_limit_event = self._round_trip_limit_event(
+                    round_count=round_count,
+                    new_messages=new_messages,
+                    tool_results=tool_results,
+                )
+                if round_limit_event is not None:
+                    yield round_limit_event
+                    return
+                yield ChatWorkflowStatusEvent(status="gathering evidence")
+                continue
 
             self._append_assistant_message(
                 messages=messages,
@@ -310,7 +416,7 @@ class ChatSessionTurnRunner:
         round_count: int,
     ) -> tuple[
         ToolContext,
-        type[BaseModel],
+        PreparedModelInteraction,
         int,
         list[dict[str, Any]],
         ProtectionProvenanceSnapshot,
@@ -332,11 +438,303 @@ class ChatSessionTurnRunner:
         )
         return (
             round_context,
-            prepared.response_model,
+            prepared,
             round_index,
             serialized_messages,
             provenance,
         )
+
+    def _uses_staged_schema_protocol(self) -> bool:
+        preference = getattr(
+            self._provider,
+            "uses_staged_schema_protocol",
+            None,
+        )
+        if not callable(preference):
+            return False
+        return bool(preference())
+
+    def _structured_provider(self) -> ModelTurnProvider:
+        run_structured = getattr(self._provider, "run_structured", None)
+        if not callable(run_structured):
+            raise RuntimeError(
+                "Staged schema protocol requires a provider that supports run_structured()."
+            )
+        return self._provider
+
+    def _run_staged_round(
+        self,
+        *,
+        round_index: int,
+        messages: list[dict[str, Any]],
+        prepared: PreparedModelInteraction,
+    ) -> Iterator[
+        ChatWorkflowStatusEvent | ChatWorkflowInspectorEvent | ChatWorkflowResultEvent
+    ]:
+        provider = self._structured_provider()
+        decision_model = self._adapter.build_decision_step_model(prepared.tool_specs)
+        decision_payload = yield from self._run_staged_step(
+            provider=provider,
+            round_index=round_index,
+            stage_name="decision",
+            messages=self._decision_stage_messages(
+                base_messages=messages,
+                prepared=prepared,
+            ),
+            response_model=decision_model,
+            parser=lambda payload: decision_model.model_validate(payload),
+        )
+        decision_mode = getattr(decision_payload, "mode", None)
+        if decision_mode == "finalize":
+            final_response_model = self._adapter.build_final_response_step_model(
+                final_response_model=ChatFinalResponse
+            )
+            parsed_response = yield from self._run_staged_step(
+                provider=provider,
+                round_index=round_index,
+                stage_name="final_response",
+                messages=self._final_response_stage_messages(
+                    base_messages=messages,
+                    response_model=final_response_model,
+                ),
+                response_model=final_response_model,
+                parser=lambda payload: self._adapter.parse_final_response_step(
+                    payload,
+                    response_model=final_response_model,
+                ),
+            )
+            return parsed_response
+
+        tool_name = getattr(decision_payload, "tool_name", None)
+        if not isinstance(tool_name, str) or tool_name.strip() == "":
+            raise ValueError("Decision stage did not select a valid tool name.")
+        tool_input_model = prepared.input_models[tool_name]
+        tool_spec = self._tool_spec(prepared.tool_specs, tool_name)
+        tool_response_model = self._adapter.build_tool_invocation_step_model(
+            tool_name=tool_name,
+            input_model=tool_input_model,
+        )
+        yield ChatWorkflowStatusEvent(status=f"preparing {tool_name}")
+        parsed_response = yield from self._run_staged_step(
+            provider=provider,
+            round_index=round_index,
+            stage_name=f"tool:{tool_name}",
+            messages=self._tool_invocation_stage_messages(
+                base_messages=messages,
+                tool_spec=tool_spec,
+                tool_input_model=tool_input_model,
+                response_model=tool_response_model,
+            ),
+            response_model=tool_response_model,
+            parser=lambda payload: self._adapter.parse_tool_invocation_step(
+                payload,
+                response_model=tool_response_model,
+            ),
+        )
+        return parsed_response
+
+    def _run_staged_step(
+        self,
+        *,
+        provider: ModelTurnProvider,
+        round_index: int,
+        stage_name: str,
+        messages: list[dict[str, Any]],
+        response_model: type[BaseModel],
+        parser: Callable[[object], Any],
+    ) -> Iterator[
+        ChatWorkflowStatusEvent | ChatWorkflowInspectorEvent | ChatWorkflowResultEvent
+    ]:
+        attempt_messages = list(messages)
+        repair_attempted = False
+        while True:
+            yield ChatWorkflowInspectorEvent(
+                round_index=round_index,
+                kind="provider_messages",
+                payload=attempt_messages,
+            )
+            payload: object | None = None
+            try:
+                payload = provider.run_structured(
+                    messages=attempt_messages,
+                    response_model=response_model,
+                    request_params={"temperature": self._temperature},
+                )
+                return parser(payload)
+            except Exception as exc:
+                if repair_attempted:
+                    raise
+                repair_attempted = True
+                yield ChatWorkflowStatusEvent(status=f"repairing {stage_name}")
+                invalid_payload = payload
+                if invalid_payload is None:
+                    invalid_payload = getattr(exc, "invalid_payload", None)
+                attempt_messages = [
+                    *messages,
+                    {
+                        "role": "system",
+                        "content": self._repair_stage_message(
+                            stage_name=stage_name,
+                            response_model=response_model,
+                            error=exc,
+                            invalid_payload=invalid_payload,
+                        ),
+                    },
+                ]
+
+    def _decision_stage_messages(
+        self,
+        *,
+        base_messages: list[dict[str, Any]],
+        prepared: PreparedModelInteraction,
+    ) -> list[dict[str, Any]]:
+        tool_catalog = json.dumps(
+            self._adapter.export_compact_tool_catalog(prepared.tool_specs),
+            indent=2,
+            sort_keys=True,
+        )
+        return [
+            *base_messages,
+            {
+                "role": "system",
+                "content": (
+                    "Current step: choose the next action.\n"
+                    "Return mode='tool' with exactly one tool_name, or mode='finalize'.\n"
+                    "Do not provide tool arguments or a final answer in this step.\n"
+                    f"Available tools:\n{tool_catalog}"
+                ),
+            },
+        ]
+
+    def _tool_invocation_stage_messages(
+        self,
+        *,
+        base_messages: list[dict[str, Any]],
+        tool_spec: ToolSpec,
+        tool_input_model: type[BaseModel],
+        response_model: type[BaseModel],
+    ) -> list[dict[str, Any]]:
+        schema = json.dumps(
+            self._adapter.export_schema(response_model),
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+        tool_schema = json.dumps(
+            tool_input_model.model_json_schema(),
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+        return [
+            *base_messages,
+            {
+                "role": "system",
+                "content": (
+                    f"Current step: invoke the selected tool '{tool_spec.name}'.\n"
+                    f"Tool description: {tool_spec.description}\n"
+                    "Return exactly one invocation for this tool.\n"
+                    "Do not choose another tool and do not finalize in this step.\n"
+                    f"Tool argument schema:\n{tool_schema}\n\n"
+                    f"Full response schema for this step:\n{schema}"
+                ),
+            },
+        ]
+
+    def _final_response_stage_messages(
+        self,
+        *,
+        base_messages: list[dict[str, Any]],
+        response_model: type[BaseModel],
+    ) -> list[dict[str, Any]]:
+        schema = json.dumps(
+            self._adapter.export_schema(response_model),
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+        return [
+            *base_messages,
+            {
+                "role": "system",
+                "content": (
+                    "Current step: finalize the answer.\n"
+                    "Return only the final response and no tool invocation.\n"
+                    "The response must satisfy this schema exactly:\n"
+                    f"{schema}"
+                ),
+            },
+        ]
+
+    def _repair_stage_message(
+        self,
+        *,
+        stage_name: str,
+        response_model: type[BaseModel],
+        error: Exception,
+        invalid_payload: object | None,
+    ) -> str:
+        schema = json.dumps(
+            self._adapter.export_schema(response_model),
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+        guidance = self._repair_stage_guidance(stage_name)
+        invalid_payload_text = self._format_invalid_payload(invalid_payload)
+        return (
+            f"The previous {stage_name} response was invalid.\n"
+            "Correct the response for the same stage only.\n"
+            f"{guidance}\n"
+            f"Validation summary: {self._validation_error_summary(error)}\n"
+            f"Previous invalid payload:\n{invalid_payload_text}\n"
+            "Return a corrected payload that matches this schema exactly:\n"
+            f"{schema}"
+        )
+
+    @staticmethod
+    def _validation_error_summary(error: Exception) -> str:
+        message = str(error).strip()
+        if message:
+            return message
+        return type(error).__name__
+
+    @staticmethod
+    def _repair_stage_guidance(stage_name: str) -> str:
+        if stage_name == "decision":
+            return (
+                "Decision stage rules: return only mode and, when mode='tool', one tool_name. "
+                "Do not include arguments or final_response."
+            )
+        if stage_name.startswith("tool:"):
+            return (
+                "Tool stage rules: return exactly one invocation for the selected tool. "
+                "Include mode='tool', the fixed tool_name, and arguments only."
+            )
+        if stage_name == "final_response":
+            return (
+                "Finalization stage rules: return only mode='finalize' and final_response. "
+                "Do not include tool_name or arguments."
+            )
+        return "Return only the fields required for this stage."
+
+    @staticmethod
+    def _format_invalid_payload(invalid_payload: object | None) -> str:
+        if invalid_payload is None:
+            return "(unavailable)"
+        if isinstance(invalid_payload, str):
+            return invalid_payload
+        try:
+            return json.dumps(invalid_payload, indent=2, sort_keys=True, default=str)
+        except TypeError:
+            return str(invalid_payload)
+
+    @staticmethod
+    def _tool_spec(tool_specs: list[ToolSpec], tool_name: str) -> ToolSpec:
+        for spec in tool_specs:
+            if spec.name == tool_name:
+                return spec
+        raise ValueError(f"Unknown tool selected during staged interaction: {tool_name}")
 
     def _apply_prompt_protection(
         self,
@@ -470,6 +868,44 @@ class ChatSessionTurnRunner:
                 token_usage=None,
                 tool_results=tool_results,
             )
+        )
+
+    def _should_retry_ungrounded_final_response(
+        self,
+        *,
+        parsed: ParsedModelResponse,
+        tool_results: list[ToolResult],
+    ) -> bool:
+        if self._grounding_retry_used:
+            return False
+        if parsed.final_response is None or parsed.invocations:
+            return False
+        if tool_results:
+            return False
+        if self._base_context.workspace is None:
+            return False
+        if not (self._enabled_tool_names & _LOCAL_GROUNDING_TOOL_NAMES):
+            return False
+        request = self._user_chat_message.content.lower()
+        if any(token in request for token in _EXPLICIT_GROUNDING_HINTS):
+            return True
+        if any(token in request for token in _REPOSITORY_GROUNDING_HINTS):
+            return True
+        return bool(
+            self._enabled_tool_names & _GIT_GROUNDING_TOOL_NAMES
+        ) and any(token in request for token in _GIT_GROUNDING_HINTS)
+
+    def _grounding_repair_message(self) -> ChatMessage:
+        preferred_tools = sorted(self._enabled_tool_names & _LOCAL_GROUNDING_TOOL_NAMES)
+        tool_list = ", ".join(preferred_tools[:6]) or "local workspace or git tools"
+        return ChatMessage(
+            role="system",
+            content=(
+                "This request requires local workspace or git evidence before a "
+                "final answer. Your previous response skipped that evidence. "
+                "On the next response, call at least one relevant local tool first "
+                f"and do not return final_response until tool results are available. Prefer: {tool_list}."
+            ),
         )
 
     def _continuation_limit_event(
@@ -773,6 +1209,7 @@ def run_interactive_chat_session_turn(
     redaction_config: RedactionConfig,
     temperature: float,
     protection_controller: ProtectionController | None = None,
+    enabled_tool_names: set[str] | None = None,
 ) -> ChatSessionTurnRunner:
     """Return an interruptible multi-turn chat runner for one user message."""
     return ChatSessionTurnRunner(
@@ -787,4 +1224,5 @@ def run_interactive_chat_session_turn(
         redaction_config=redaction_config,
         temperature=temperature,
         protection_controller=protection_controller,
+        enabled_tool_names=enabled_tool_names,
     )
