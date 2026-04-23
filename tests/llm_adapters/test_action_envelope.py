@@ -344,6 +344,17 @@ def test_decision_step_model_rejects_invalid_mode_combinations() -> None:
         response_model.model_validate({"mode": "tool", "tool_name": "missing"})
 
 
+def test_decision_step_model_without_tools_only_allows_finalize() -> None:
+    adapter = ActionEnvelopeAdapter()
+    response_model = adapter.build_decision_step_model([])
+    schema = adapter.export_schema(response_model)
+
+    assert schema["properties"]["mode"]["const"] == "finalize"
+    assert response_model.model_validate({"mode": "finalize"}).mode == "finalize"
+    with pytest.raises(ValueError):
+        response_model.model_validate({"mode": "tool", "tool_name": "missing"})
+
+
 def test_parse_staged_tool_invocation_and_final_response_steps() -> None:
     adapter = ActionEnvelopeAdapter()
     invocation_model = adapter.build_tool_invocation_step_model(

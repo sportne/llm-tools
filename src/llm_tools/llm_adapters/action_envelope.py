@@ -201,16 +201,22 @@ class ActionEnvelopeAdapter:
     def build_decision_step_model(self, specs: list[ToolSpec]) -> type[BaseModel]:
         """Build the strict staged decision model for one tool-or-finalize step."""
         allowed_tool_names = [spec.name for spec in specs]
+        mode_annotation = (
+            Literal["tool", "finalize"]
+            if allowed_tool_names
+            else Literal["finalize"]
+        )
         tool_name_annotation = (
             _literal_annotation(allowed_tool_names, allow_none=True)
             if allowed_tool_names
-            else str | None
+            else type(None)
         )
         model = cast(
             type[BaseModel],
             create_model(
                 "DecisionStep",
                 __base__=_DecisionStepMixin,
+                mode=(mode_annotation, ...),
                 tool_name=(tool_name_annotation, None),
             ),
         )

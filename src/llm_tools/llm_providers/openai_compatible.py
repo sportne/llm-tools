@@ -183,6 +183,11 @@ class OpenAICompatibleProvider:
 
     def uses_staged_schema_protocol(self) -> bool:
         """Return whether structured interaction should use staged strict schemas."""
+        if (
+            self.mode_strategy is ProviderModeStrategy.AUTO
+            and self.provider_family == "ollama"
+        ):
+            return True
         return self.mode_strategy in {
             ProviderModeStrategy.JSON,
             ProviderModeStrategy.MD_JSON,

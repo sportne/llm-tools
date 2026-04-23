@@ -95,6 +95,15 @@ def _executor() -> WorkflowExecutor:
     )
 
 
+def _empty_executor() -> WorkflowExecutor:
+    return WorkflowExecutor(
+        registry=ToolRegistry(),
+        policy=ToolPolicy(
+            allowed_side_effects={SideEffectClass.NONE, SideEffectClass.LOCAL_READ}
+        ),
+    )
+
+
 def _context(tmp_path: Path) -> ToolContext:
     return ToolContext(
         invocation_id="chat-session",
@@ -343,6 +352,52 @@ def test_chat_session_runner_repairs_invalid_staged_final_response(
     assert "The previous final_response response was invalid." in repair_message
     assert "Validation summary:" in repair_message
     assert '"citations": [' in repair_message
+
+
+def test_chat_session_runner_with_no_tools_repairs_invalid_tool_decision(
+    tmp_path: Path,
+) -> None:
+    provider = _FakeStagedProvider(
+        [
+            {"mode": "tool", "tool_name": "missing"},
+            {"mode": "finalize"},
+            {
+                "mode": "finalize",
+                "final_response": {
+                    "answer": "done",
+                    "citations": [],
+                },
+            },
+        ]
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer without tools.",
+        session_state=ChatSessionState(),
+        executor=_empty_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    events = list(runner)
+
+    assert any(
+        isinstance(event, ChatWorkflowStatusEvent)
+        and event.status == "repairing decision"
+        for event in events
+    )
+    result_event = events[-1]
+    assert isinstance(result_event, ChatWorkflowResultEvent)
+    assert result_event.result.final_response is not None
+    assert result_event.result.final_response.answer == "done"
+    repair_message = provider.calls[1][-1]["content"]
+    assert isinstance(repair_message, str)
+    assert "The previous decision response was invalid." in repair_message
+    assert '"const": "finalize"' in repair_message
 
 
 def test_chat_session_runner_returns_continuation_for_tool_budget(

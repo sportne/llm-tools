@@ -508,8 +508,12 @@ class ChatSessionTurnRunner:
         tool_name = getattr(decision_payload, "tool_name", None)
         if not isinstance(tool_name, str) or tool_name.strip() == "":
             raise ValueError("Decision stage did not select a valid tool name.")
-        tool_input_model = prepared.input_models[tool_name]
         tool_spec = self._tool_spec(prepared.tool_specs, tool_name)
+        tool_input_model = prepared.input_models.get(tool_name)
+        if tool_input_model is None:
+            raise ValueError(
+                f"Selected tool '{tool_name}' was not prepared for this interaction."
+            )
         tool_response_model = self._adapter.build_tool_invocation_step_model(
             tool_name=tool_name,
             input_model=tool_input_model,

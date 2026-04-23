@@ -261,11 +261,16 @@ class AssistantHarnessTurnProvider:
         tool_name = getattr(decision, "tool_name", None)
         if not isinstance(tool_name, str) or tool_name.strip() == "":
             raise ValueError("Decision stage did not select a valid tool name.")
+        tool_spec = self._tool_spec(prepared_interaction.tool_specs, tool_name)
+        tool_input_model = prepared_interaction.input_models.get(tool_name)
+        if tool_input_model is None:
+            raise ValueError(
+                f"Selected tool '{tool_name}' was not prepared for this interaction."
+            )
         tool_model = adapter.build_tool_invocation_step_model(
             tool_name=tool_name,
-            input_model=prepared_interaction.input_models[tool_name],
+            input_model=tool_input_model,
         )
-        tool_spec = self._tool_spec(prepared_interaction.tool_specs, tool_name)
         return self._run_staged_step(
             stage_name=f"tool:{tool_name}",
             messages=[
@@ -339,11 +344,16 @@ class AssistantHarnessTurnProvider:
         tool_name = getattr(decision, "tool_name", None)
         if not isinstance(tool_name, str) or tool_name.strip() == "":
             raise ValueError("Decision stage did not select a valid tool name.")
+        tool_spec = self._tool_spec(prepared_interaction.tool_specs, tool_name)
+        tool_input_model = prepared_interaction.input_models.get(tool_name)
+        if tool_input_model is None:
+            raise ValueError(
+                f"Selected tool '{tool_name}' was not prepared for this interaction."
+            )
         tool_model = adapter.build_tool_invocation_step_model(
             tool_name=tool_name,
-            input_model=prepared_interaction.input_models[tool_name],
+            input_model=tool_input_model,
         )
-        tool_spec = self._tool_spec(prepared_interaction.tool_specs, tool_name)
         return await self._run_staged_step_async(
             stage_name=f"tool:{tool_name}",
             messages=[

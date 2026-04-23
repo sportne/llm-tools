@@ -164,6 +164,14 @@ def test_provider_helper_methods_cover_listing_and_parameter_merging() -> None:
         ProviderModeStrategy.MD_JSON,
         ProviderModeStrategy.TOOLS,
     ]
+    assert OpenAICompatibleProvider.for_ollama(
+        model="demo-model",
+        mode_strategy=ProviderModeStrategy.AUTO,
+    ).uses_staged_schema_protocol()
+    assert not OpenAICompatibleProvider.for_openai(
+        model="demo-model",
+        mode_strategy=ProviderModeStrategy.AUTO,
+    ).uses_staged_schema_protocol()
     assert OpenAICompatibleProvider(
         model="demo-model",
         mode_strategy=ProviderModeStrategy.JSON,
