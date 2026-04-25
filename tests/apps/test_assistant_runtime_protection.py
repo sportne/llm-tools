@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -128,6 +129,87 @@ class _StagedProvider:
         if isinstance(response, Exception):
             raise response
         return response
+
+
+class _PromptToolProvider:
+    def __init__(self, responses: list[object]) -> None:
+        self._responses = list(responses)
+        self.sync_messages: list[list[dict[str, str]]] = []
+        self.async_messages: list[list[dict[str, str]]] = []
+
+    def prefers_simplified_json_schema_contract(self) -> bool:
+        return False
+
+    def uses_prompt_tool_protocol(self) -> bool:
+        return True
+
+    def run(self, **kwargs: object) -> ParsedModelResponse:
+        del kwargs
+        raise AssertionError("prompt-tool provider should use run_text()")
+
+    async def run_async(self, **kwargs: object) -> ParsedModelResponse:
+        del kwargs
+        raise AssertionError("prompt-tool provider should use run_text_async()")
+
+    def run_text(self, **kwargs: object) -> str:
+        messages = kwargs["messages"]
+        assert isinstance(messages, list)
+        self.sync_messages.append([dict(message) for message in messages])
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        assert isinstance(response, str)
+        return response
+
+    async def run_text_async(self, **kwargs: object) -> str:
+        messages = kwargs["messages"]
+        assert isinstance(messages, list)
+        self.async_messages.append([dict(message) for message in messages])
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        assert isinstance(response, str)
+        return response
+
+
+class _FallbackPromptToolProvider(_PromptToolProvider):
+    def __init__(self, responses: list[object], *, staged: bool) -> None:
+        super().__init__(responses)
+        self._staged = staged
+        self.run_calls = 0
+        self.async_run_calls = 0
+        self.structured_calls = 0
+        self.async_structured_calls = 0
+
+    def uses_prompt_tool_protocol(self) -> bool:
+        return False
+
+    def uses_staged_schema_protocol(self) -> bool:
+        return self._staged
+
+    def can_fallback_to_prompt_tools(self, exc: Exception) -> bool:
+        del exc
+        return True
+
+    def run(self, **kwargs: object) -> ParsedModelResponse:
+        del kwargs
+        self.run_calls += 1
+        raise RuntimeError("native parse failed")
+
+    async def run_async(self, **kwargs: object) -> ParsedModelResponse:
+        del kwargs
+        self.async_run_calls += 1
+        raise RuntimeError("native async parse failed")
+
+    def run_structured(self, **kwargs: object) -> object:
+        del kwargs
+        self.structured_calls += 1
+        raise RuntimeError("staged parse failed")
+
+    async def run_structured_async(self, **kwargs: object) -> object:
+        del kwargs
+        self.async_structured_calls += 1
+        raise RuntimeError("staged async parse failed")
 
 
 def _prepared_research_interaction(
@@ -813,3 +895,291 @@ def test_direct_research_provider_raises_after_second_staged_failure() -> None:
         assert str(exc) == "boom again"
     else:  # pragma: no cover - defensive assertion
         raise AssertionError("Expected repeated staged failure to propagate")
+
+
+def test_direct_research_provider_prompt_tools_repairs_decision_and_tool_stage() -> (
+    None
+):
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    provider = _PromptToolProvider(
+        [
+            "not a decision block",
+            "```decision\nMODE: tool\nTOOL_NAME: read_file\n```",
+            "```tool\nTOOL_NAME: read_file\nBEGIN_ARG: path\nREADME.md\n```",
+            ("```tool\nTOOL_NAME: read_file\nBEGIN_ARG: path\nREADME.md\nEND_ARG\n```"),
+        ]
+    )
+    harness_provider = provider_module.AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+
+    parsed = harness_provider.run(
+        state=object(),
+        selected_task_ids=["task-5"],
+        context=ToolContext(invocation_id="research-prompt-sync", metadata={}),
+        adapter=ActionEnvelopeAdapter(),
+        prepared_interaction=_prepared_research_interaction(),
+    )
+
+    assert parsed.invocations[0].tool_name == "read_file"
+    assert parsed.invocations[0].arguments["path"] == "README.md"
+    assert len(provider.sync_messages) == 4
+    assert (
+        "The previous decision response was invalid."
+        in (provider.sync_messages[1][-1]["content"])
+    )
+    tool_repair = provider.sync_messages[3][-1]["content"]
+    assert "The previous tool:read_file response was invalid." in tool_repair
+    assert "Exact tool block shape:" in tool_repair
+
+
+def test_direct_research_provider_prompt_tools_async_repairs_final_response() -> None:
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    error = RuntimeError("transport response missing")
+    error.invalid_payload = "bad async final"  # type: ignore[attr-defined]
+    provider = _PromptToolProvider(
+        [
+            "```decision\nMODE: finalize\n```",
+            error,
+            "```final\nANSWER:\n```",
+            "```final\nANSWER:\nDone async.\n```",
+        ]
+    )
+    harness_provider = provider_module.AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+
+    parsed = asyncio.run(
+        harness_provider.run_async(
+            state=object(),
+            selected_task_ids=["task-6"],
+            context=ToolContext(invocation_id="research-prompt-async", metadata={}),
+            adapter=ActionEnvelopeAdapter(),
+            prepared_interaction=_prepared_research_interaction(),
+        )
+    )
+
+    assert parsed.final_response == "Done async."
+    assert len(provider.async_messages) == 4
+    assert "bad async final" in provider.async_messages[2][-1]["content"]
+    assert "Finalization rules:" in provider.async_messages[3][-1]["content"]
+
+
+def test_direct_research_provider_prompt_tools_requires_text_transport() -> None:
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    class _MissingTextTransport:
+        def prefers_simplified_json_schema_contract(self) -> bool:
+            return False
+
+        def uses_prompt_tool_protocol(self) -> bool:
+            return True
+
+    harness_provider = provider_module.AssistantHarnessTurnProvider(
+        provider=_MissingTextTransport(),  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+
+    try:
+        harness_provider.run(
+            state=object(),
+            selected_task_ids=["task-7"],
+            context=ToolContext(invocation_id="research-prompt-missing", metadata={}),
+            adapter=ActionEnvelopeAdapter(),
+            prepared_interaction=_prepared_research_interaction(),
+        )
+    except RuntimeError as exc:
+        assert "supports run_text" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("Expected prompt-tool text transport error")
+
+
+def test_direct_research_provider_prompt_tools_requires_async_text_transport() -> None:
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    class _MissingAsyncTextTransport:
+        def prefers_simplified_json_schema_contract(self) -> bool:
+            return False
+
+        def uses_prompt_tool_protocol(self) -> bool:
+            return True
+
+        def run_text(self, **kwargs: object) -> str:
+            del kwargs
+            return "unused"
+
+    harness_provider = provider_module.AssistantHarnessTurnProvider(
+        provider=_MissingAsyncTextTransport(),  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+
+    try:
+        asyncio.run(
+            harness_provider.run_async(
+                state=object(),
+                selected_task_ids=["task-8"],
+                context=ToolContext(
+                    invocation_id="research-prompt-missing-async",
+                    metadata={},
+                ),
+                adapter=ActionEnvelopeAdapter(),
+                prepared_interaction=_prepared_research_interaction(),
+            )
+        )
+    except RuntimeError as exc:
+        assert "supports run_text_async" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("Expected prompt-tool async text transport error")
+
+
+def test_direct_research_provider_falls_back_to_prompt_tools_from_sync_modes() -> None:
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    for staged in [True, False]:
+        provider = _FallbackPromptToolProvider(
+            [
+                "```decision\nMODE: finalize\n```",
+                f"```final\nANSWER:\nFallback staged={staged}.\n```",
+            ],
+            staged=staged,
+        )
+        harness_provider = provider_module.AssistantHarnessTurnProvider(
+            provider=provider,  # type: ignore[arg-type]
+            temperature=0.1,
+            system_prompt="research-system",
+        )
+
+        parsed = harness_provider.run(
+            state=object(),
+            selected_task_ids=["task-fallback"],
+            context=ToolContext(invocation_id=f"fallback-{staged}", metadata={}),
+            adapter=ActionEnvelopeAdapter(),
+            prepared_interaction=_prepared_research_interaction(),
+        )
+
+        assert parsed.final_response == f"Fallback staged={staged}."
+        assert len(provider.sync_messages) == 2
+        assert provider.structured_calls == (2 if staged else 0)
+        assert provider.run_calls == int(not staged)
+
+
+def test_direct_research_provider_falls_back_to_prompt_tools_from_async_modes() -> None:
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    for staged in [True, False]:
+        provider = _FallbackPromptToolProvider(
+            [
+                "```decision\nMODE: finalize\n```",
+                f"```final\nANSWER:\nAsync fallback staged={staged}.\n```",
+            ],
+            staged=staged,
+        )
+        harness_provider = provider_module.AssistantHarnessTurnProvider(
+            provider=provider,  # type: ignore[arg-type]
+            temperature=0.1,
+            system_prompt="research-system",
+        )
+
+        parsed = asyncio.run(
+            harness_provider.run_async(
+                state=object(),
+                selected_task_ids=["task-fallback-async"],
+                context=ToolContext(
+                    invocation_id=f"fallback-async-{staged}",
+                    metadata={},
+                ),
+                adapter=ActionEnvelopeAdapter(),
+                prepared_interaction=_prepared_research_interaction(),
+            )
+        )
+
+        assert parsed.final_response == f"Async fallback staged={staged}."
+        assert len(provider.async_messages) == 2
+        assert provider.async_structured_calls == (2 if staged else 0)
+        assert provider.async_run_calls == int(not staged)
+
+
+def test_direct_research_provider_rejects_unprepared_staged_and_prompt_tools() -> None:
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    staged_provider = _StagedProvider([{"mode": "tool", "tool_name": "read_file"}])
+    prompt_provider = _PromptToolProvider(
+        ["```decision\nMODE: tool\nTOOL_NAME: read_file\n```"]
+    )
+    prepared = _prepared_research_interaction()
+    prepared_without_input = replace(prepared, input_models={})
+
+    staged_harness = provider_module.AssistantHarnessTurnProvider(
+        provider=staged_provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+    prompt_harness = provider_module.AssistantHarnessTurnProvider(
+        provider=prompt_provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+
+    try:
+        staged_harness.run(
+            state=object(),
+            selected_task_ids=["task-staged-missing"],
+            context=ToolContext(invocation_id="staged-missing", metadata={}),
+            adapter=ActionEnvelopeAdapter(),
+            prepared_interaction=prepared_without_input,
+        )
+    except ValueError as exc:
+        assert "was not prepared" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("Expected staged missing input model error")
+
+    try:
+        prompt_harness.run(
+            state=object(),
+            selected_task_ids=["task-prompt-missing"],
+            context=ToolContext(invocation_id="prompt-missing", metadata={}),
+            adapter=ActionEnvelopeAdapter(),
+            prepared_interaction=prepared_without_input,
+        )
+    except ValueError as exc:
+        assert "was not prepared" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("Expected prompt-tool missing input model error")
+
+
+def test_direct_research_provider_prompt_tools_raise_after_two_repairs() -> None:
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    provider = _PromptToolProvider(
+        [
+            "not a decision block",
+            "still wrong",
+            "wrong again",
+        ]
+    )
+    harness_provider = provider_module.AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+
+    try:
+        harness_provider.run(
+            state=object(),
+            selected_task_ids=["task-prompt-fail"],
+            context=ToolContext(invocation_id="prompt-fail", metadata={}),
+            adapter=ActionEnvelopeAdapter(),
+            prepared_interaction=_prepared_research_interaction(),
+        )
+    except ValueError as exc:
+        assert "Missing fenced decision block" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("Expected prompt-tool repair exhaustion")

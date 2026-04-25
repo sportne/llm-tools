@@ -9,6 +9,7 @@ from enum import Enum
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from pydantic import BaseModel
 
 import llm_tools.llm_providers.openai_compatible as provider_module
@@ -131,6 +132,10 @@ class _MarkdownCarrier(BaseModel):
     status: str
     count: int
     items: list[str]
+
+
+class _ChoiceCarrier(BaseModel):
+    choices: list[Any]
 
 
 def test_provider_helper_methods_cover_listing_and_parameter_merging() -> None:
@@ -323,6 +328,67 @@ def test_ollama_json_mode_uses_native_json_schema_payload_async(
     assert completions.calls[0]["response_format"]["type"] == "json_schema"
 
 
+def test_prompt_tools_preflight_success_and_failure() -> None:
+    ok_completions = _NativeSyncCompletions(_native_response("PROMPT_TOOLS_OK"))
+    ok_provider = OpenAICompatibleProvider(
+        model="demo-model",
+        client=_BareClient(
+            chat=SimpleNamespace(completions=ok_completions),
+            models=SimpleNamespace(list=lambda: [SimpleNamespace(id="demo-model")]),
+        ),
+        mode_strategy=ProviderModeStrategy.PROMPT_TOOLS,
+    )
+
+    ok_result = ok_provider.preflight(request_params={"temperature": 0})
+
+    assert ok_result.ok is True
+    assert ok_result.resolved_mode is ProviderModeStrategy.PROMPT_TOOLS
+    assert ok_completions.calls[0]["temperature"] == 0
+
+    bad_completions = _NativeSyncCompletions(_native_response("NOPE"))
+    bad_provider = OpenAICompatibleProvider(
+        model="demo-model",
+        client=_BareClient(
+            chat=SimpleNamespace(completions=bad_completions),
+            models=SimpleNamespace(list=lambda: [SimpleNamespace(id="demo-model")]),
+        ),
+        mode_strategy=ProviderModeStrategy.PROMPT_TOOLS,
+    )
+
+    bad_result = bad_provider.preflight()
+
+    assert bad_result.ok is False
+    assert bad_result.resolved_mode is None
+    assert "did not return the expected text" in (bad_result.error_message or "")
+
+
+def test_provider_mode_preferences_and_retry_helpers() -> None:
+    assert (
+        OpenAICompatibleProvider.for_ollama(
+            model="demo", mode_strategy=ProviderModeStrategy.JSON
+        ).prefers_simplified_json_schema_contract()
+        is True
+    )
+    assert (
+        OpenAICompatibleProvider(
+            model="demo", mode_strategy=ProviderModeStrategy.PROMPT_TOOLS
+        ).uses_staged_schema_protocol()
+        is False
+    )
+    assert (
+        OpenAICompatibleProvider(
+            model="demo", mode_strategy=ProviderModeStrategy.AUTO
+        ).can_fallback_to_prompt_tools(ValueError("not retryable"))
+        is False
+    )
+    assert (
+        OpenAICompatibleProvider(
+            model="demo", mode_strategy=ProviderModeStrategy.AUTO
+        ).can_fallback_to_prompt_tools(json.JSONDecodeError("bad json", "", 0))
+        is True
+    )
+
+
 def test_md_json_mode_extracts_json_from_markdown_content() -> None:
     completions = _NativeSyncCompletions(
         _native_response(
@@ -416,6 +482,30 @@ def test_md_json_mode_extracts_json_from_markdown_content_async() -> None:
     _assert_schema_prompt_was_appended(completions.calls[0])
 
 
+def test_prompt_tools_structured_mode_uses_schema_prompt_async() -> None:
+    completions = _NativeAsyncCompletions(
+        _native_response(
+            '```json\n{"status":"ok","count":3,"items":["alpha","beta","gamma"]}\n```'
+        )
+    )
+    provider = OpenAICompatibleProvider(
+        model="demo-model",
+        async_client=_BareClient(chat=SimpleNamespace(completions=completions)),
+        mode_strategy=ProviderModeStrategy.PROMPT_TOOLS,
+    )
+
+    payload = asyncio.run(
+        provider.run_structured_async(
+            messages=[{"role": "user", "content": "Return structured data."}],
+            response_model=_ProbeModel,
+        )
+    )
+
+    assert payload.model_dump()["status"] == "ok"
+    assert "response_model" not in completions.calls[0]
+    _assert_schema_prompt_was_appended(completions.calls[0])
+
+
 def test_md_json_mode_bypasses_instructor_sync_client(monkeypatch: Any) -> None:
     base_completions = _NativeSyncCompletions(
         _native_response(
@@ -488,6 +578,75 @@ def test_parse_markdown_json_response_accepts_structured_payloads() -> None:
         "count": 4,
         "items": ["beta"],
     }
+
+
+def test_parse_markdown_json_response_reports_invalid_payload_edges() -> None:
+    with pytest.raises(provider_module.StructuredOutputValidationError) as plain_exc:
+        OpenAICompatibleProvider._parse_markdown_json_response(
+            response=_ChoiceCarrier(
+                choices=[{"message": {"content": "not json at all"}}]
+            ),
+            response_model=_ProbeModel,
+        )
+    assert plain_exc.value.invalid_payload == "not json at all"
+
+    with pytest.raises(provider_module.StructuredOutputValidationError) as fenced_exc:
+        OpenAICompatibleProvider._parse_markdown_json_response(
+            response=_ChoiceCarrier(
+                choices=[
+                    {
+                        "message": {
+                            "content": (
+                                '```json\n{"status":"ok","count":"bad","items":[]}\n```'
+                            )
+                        }
+                    }
+                ]
+            ),
+            response_model=_ProbeModel,
+        )
+    assert '"count":"bad"' in str(fenced_exc.value.invalid_payload)
+
+    with pytest.raises(provider_module.StructuredOutputValidationError) as dict_exc:
+        OpenAICompatibleProvider._parse_markdown_json_response(
+            response={"status": "ok"},
+            response_model=_ProbeModel,
+        )
+    assert dict_exc.value.invalid_payload == {"status": "ok"}
+
+
+def test_structured_response_text_and_json_slice_edges() -> None:
+    assert (
+        OpenAICompatibleProvider._structured_response_text(
+            {"choices": [{"message": {"content": [{"text": "  "}, {"text": "done"}]}}]}
+        )
+        == "done"
+    )
+    assert (
+        OpenAICompatibleProvider._extract_markdown_json_candidate(
+            "```json\nnot-json\n```"
+        )
+        == "not-json"
+    )
+    assert (
+        OpenAICompatibleProvider._extract_markdown_json_candidate(
+            'prefix {"status": "ok", "count": 1, "items": ["a"]} suffix'
+        )
+        == '{"status": "ok", "count": 1, "items": ["a"]}'
+    )
+    assert OpenAICompatibleProvider._find_balanced_json_slice("no json") is None
+    assert OpenAICompatibleProvider._balanced_json_from_index("{]", 0) is None
+    assert OpenAICompatibleProvider._balanced_json_from_index('{"a":"b\\"c"}', 0) == (
+        '{"a":"b\\"c"}'
+    )
+
+    for response, message in [
+        ({}, "did not include choices"),
+        ({"choices": [{}]}, "did not include a message"),
+        ({"choices": [{"message": {"content": ""}}]}, "did not include JSON content"),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            OpenAICompatibleProvider._structured_response_text(response)
 
 
 def test_parse_markdown_json_response_reports_invalid_structured_payload() -> None:

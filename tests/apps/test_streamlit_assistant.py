@@ -4387,7 +4387,12 @@ def test_research_controller_approval_resume_write_flow(
     tmp_path: Path,
 ) -> None:
     config = StreamlitAssistantConfig().model_copy(
-        update={"research": AssistantResearchConfig(include_replay_by_default=True)}
+        update={
+            "research": AssistantResearchConfig(
+                include_replay_by_default=True,
+                store_dir=str(tmp_path / "research-store"),
+            )
+        }
     )
     runtime = _MODULES.models.StreamlitRuntimeConfig(
         provider=config.llm.provider,
