@@ -22,7 +22,6 @@ except Exception:  # pragma: no cover - import-time fallback path
 class _InstructorModeShim(str, Enum):  # noqa: UP042
     TOOLS = "TOOLS"
     JSON = "JSON"
-    MD_JSON = "MD_JSON"
 
 
 class _InstructorShim:
@@ -45,7 +44,6 @@ class ProviderModeStrategy(str, Enum):  # noqa: UP042
     AUTO = "auto"
     TOOLS = "tools"
     JSON = "json"
-    MD_JSON = "md_json"
     PROMPT_TOOLS = "prompt_tools"
 
 
@@ -193,7 +191,6 @@ class OpenAICompatibleProvider:
             return True
         return self.mode_strategy in {
             ProviderModeStrategy.JSON,
-            ProviderModeStrategy.MD_JSON,
         }
 
     def uses_prompt_tool_protocol(self) -> bool:
@@ -575,13 +572,6 @@ class OpenAICompatibleProvider:
                 response_model=response_model,
                 request_params=request_params,
             )
-        if self._should_use_local_md_json(mode):
-            return self._create_local_md_json_sync(
-                client=client,
-                messages=messages,
-                response_model=response_model,
-                request_params=request_params,
-            )
         return client.chat.completions.create(
             model=self.model,
             messages=list(messages),
@@ -606,13 +596,6 @@ class OpenAICompatibleProvider:
             )
         if self._should_use_prompt_tools(mode):
             return await self._create_prompt_tools_structured_async(
-                messages=messages,
-                response_model=response_model,
-                request_params=request_params,
-            )
-        if self._should_use_local_md_json(mode):
-            return await self._create_local_md_json_async(
-                client=client,
                 messages=messages,
                 response_model=response_model,
                 request_params=request_params,
@@ -648,30 +631,6 @@ class OpenAICompatibleProvider:
             response_model=response_model,
         )
 
-    def _create_local_md_json_sync(
-        self,
-        *,
-        client: Any,
-        messages: Sequence[dict[str, Any]],
-        response_model: type[BaseModel],
-        request_params: dict[str, Any] | None,
-    ) -> BaseModel:
-        response = cast(Any, client.chat.completions).create(
-            model=self.model,
-            messages=cast(
-                Any,
-                self._structured_json_prompt_messages(
-                    messages=messages,
-                    response_model=response_model,
-                ),
-            ),
-            **self._merged_request_params(request_params),
-        )
-        return self._parse_markdown_json_response(
-            response=response,
-            response_model=response_model,
-        )
-
     def _create_prompt_tools_structured_sync(
         self,
         *,
@@ -690,7 +649,7 @@ class OpenAICompatibleProvider:
             ),
             **self._merged_request_params(request_params),
         )
-        return self._parse_markdown_json_response(
+        return self._parse_prompted_json_response(
             response=response,
             response_model=response_model,
         )
@@ -719,30 +678,6 @@ class OpenAICompatibleProvider:
             response_model=response_model,
         )
 
-    async def _create_local_md_json_async(
-        self,
-        *,
-        client: Any,
-        messages: Sequence[dict[str, Any]],
-        response_model: type[BaseModel],
-        request_params: dict[str, Any] | None,
-    ) -> BaseModel:
-        response = await cast(Any, client.chat.completions).create(
-            model=self.model,
-            messages=cast(
-                Any,
-                self._structured_json_prompt_messages(
-                    messages=messages,
-                    response_model=response_model,
-                ),
-            ),
-            **self._merged_request_params(request_params),
-        )
-        return self._parse_markdown_json_response(
-            response=response,
-            response_model=response_model,
-        )
-
     async def _create_prompt_tools_structured_async(
         self,
         *,
@@ -761,7 +696,7 @@ class OpenAICompatibleProvider:
             ),
             **self._merged_request_params(request_params),
         )
-        return self._parse_markdown_json_response(
+        return self._parse_prompted_json_response(
             response=response,
             response_model=response_model,
         )
@@ -841,13 +776,12 @@ class OpenAICompatibleProvider:
             if self.provider_family == "ollama":
                 return [
                     ProviderModeStrategy.JSON,
-                    ProviderModeStrategy.MD_JSON,
-                    ProviderModeStrategy.TOOLS,
+                    ProviderModeStrategy.PROMPT_TOOLS,
                 ]
             return [
                 ProviderModeStrategy.TOOLS,
                 ProviderModeStrategy.JSON,
-                ProviderModeStrategy.MD_JSON,
+                ProviderModeStrategy.PROMPT_TOOLS,
             ]
         return [self.mode_strategy]
 
@@ -855,27 +789,19 @@ class OpenAICompatibleProvider:
         return self.provider_family == "ollama" and mode is ProviderModeStrategy.JSON
 
     @staticmethod
-    def _should_use_local_md_json(mode: ProviderModeStrategy) -> bool:
-        return mode is ProviderModeStrategy.MD_JSON
-
-    @staticmethod
     def _should_use_prompt_tools(mode: ProviderModeStrategy) -> bool:
         return mode is ProviderModeStrategy.PROMPT_TOOLS
 
     def _sync_execution_client(self, mode: ProviderModeStrategy) -> Any:
-        if (
-            self._should_use_native_json_schema(mode)
-            or self._should_use_local_md_json(mode)
-            or self._should_use_prompt_tools(mode)
+        if self._should_use_native_json_schema(mode) or self._should_use_prompt_tools(
+            mode
         ):
             return self._sync_client
         return self._instructor_sync_client(mode)
 
     def _async_execution_client(self, mode: ProviderModeStrategy) -> Any:
-        if (
-            self._should_use_native_json_schema(mode)
-            or self._should_use_local_md_json(mode)
-            or self._should_use_prompt_tools(mode)
+        if self._should_use_native_json_schema(mode) or self._should_use_prompt_tools(
+            mode
         ):
             return self._async_client_instance
         return self._instructor_async_client(mode)
@@ -921,7 +847,6 @@ class OpenAICompatibleProvider:
         mode_name = {
             ProviderModeStrategy.TOOLS: "TOOLS",
             ProviderModeStrategy.JSON: "JSON",
-            ProviderModeStrategy.MD_JSON: "MD_JSON",
         }[mode]
         try:
             return getattr(instructor_module.Mode, mode_name)
@@ -1167,7 +1092,7 @@ class OpenAICompatibleProvider:
             ) from exc
 
     @classmethod
-    def _parse_markdown_json_response(
+    def _parse_prompted_json_response(
         cls,
         *,
         response: Any,
@@ -1179,7 +1104,7 @@ class OpenAICompatibleProvider:
                 try:
                     return response_model.model_validate_json(raw_text)
                 except ValidationError as exc:
-                    candidate = cls._extract_markdown_json_candidate(raw_text)
+                    candidate = cls._extract_prompted_json_candidate(raw_text)
                     if candidate is None or candidate.strip() == raw_text.strip():
                         raise StructuredOutputValidationError(
                             str(exc),
@@ -1217,7 +1142,7 @@ class OpenAICompatibleProvider:
         try:
             return response_model.model_validate_json(raw_text)
         except ValidationError as exc:
-            candidate = cls._extract_markdown_json_candidate(raw_text)
+            candidate = cls._extract_prompted_json_candidate(raw_text)
             if candidate is None or candidate.strip() == raw_text.strip():
                 raise StructuredOutputValidationError(
                     str(exc),
@@ -1275,7 +1200,7 @@ class OpenAICompatibleProvider:
         return OpenAICompatibleProvider._structured_response_text(response)
 
     @classmethod
-    def _extract_markdown_json_candidate(cls, text: str) -> str | None:
+    def _extract_prompted_json_candidate(cls, text: str) -> str | None:
         for match in reversed(
             list(
                 re.finditer(r"```(?:json)?\s*(.*?)```", text, re.IGNORECASE | re.DOTALL)

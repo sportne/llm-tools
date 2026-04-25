@@ -36,7 +36,6 @@ DEFAULT_TIMEOUT_SECONDS = 60.0
 DEFAULT_PROVIDER_MODES = [
     ProviderModeStrategy.TOOLS,
     ProviderModeStrategy.JSON,
-    ProviderModeStrategy.MD_JSON,
     ProviderModeStrategy.PROMPT_TOOLS,
 ]
 DEFAULT_ENABLED_TOOLS = [

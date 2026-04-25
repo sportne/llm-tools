@@ -319,11 +319,17 @@ class ChatSessionTurnRunner:
                 yield prompt_event
                 return
 
+            decision_context = self._decision_tool_use_context(
+                round_count=round_count,
+                executed_tool_call_count=executed_tool_call_count,
+                tool_results=tool_results,
+            )
             if self._uses_prompt_tool_protocol():
                 parsed = yield from self._run_prompt_tool_round(
                     round_index=round_index,
                     messages=serialized_messages,
                     prepared=prepared,
+                    decision_context=decision_context,
                 )
             elif self._uses_staged_schema_protocol():
                 try:
@@ -331,6 +337,7 @@ class ChatSessionTurnRunner:
                         round_index=round_index,
                         messages=serialized_messages,
                         prepared=prepared,
+                        decision_context=decision_context,
                     )
                 except Exception as exc:
                     if not self._can_fallback_to_prompt_tools(exc):
@@ -340,6 +347,7 @@ class ChatSessionTurnRunner:
                         round_index=round_index,
                         messages=serialized_messages,
                         prepared=prepared,
+                        decision_context=decision_context,
                     )
             else:
                 yield ChatWorkflowInspectorEvent(
@@ -362,6 +370,7 @@ class ChatSessionTurnRunner:
                         round_index=round_index,
                         messages=serialized_messages,
                         prepared=prepared,
+                        decision_context=decision_context,
                     )
             parsed = self._apply_response_protection(
                 parsed=parsed,
@@ -450,13 +459,23 @@ class ChatSessionTurnRunner:
                 return
 
             round_count += 1
-            round_limit_event = self._round_trip_limit_event(
-                round_count=round_count,
-                new_messages=new_messages,
-                tool_results=tool_results,
-            )
-            if round_limit_event is not None:
-                yield round_limit_event
+            if round_count >= self._session_config.max_tool_round_trips:
+                forced_final_event = yield from self._force_final_response_at_limit(
+                    round_index=round_count + 1,
+                    messages=messages,
+                    new_messages=new_messages,
+                    tool_results=tool_results,
+                )
+                if forced_final_event is not None:
+                    yield forced_final_event
+                    return
+                round_limit_event = self._round_trip_limit_event(
+                    round_count=round_count,
+                    new_messages=new_messages,
+                    tool_results=tool_results,
+                )
+                if round_limit_event is not None:
+                    yield round_limit_event
                 return
 
             yield ChatWorkflowStatusEvent(status="thinking")
@@ -496,6 +515,97 @@ class ChatSessionTurnRunner:
             serialized_messages,
             provenance,
         )
+
+    def _decision_tool_use_context(
+        self,
+        *,
+        round_count: int,
+        executed_tool_call_count: int,
+        tool_results: list[ToolResult],
+    ) -> str:
+        max_rounds = self._session_config.max_tool_round_trips
+        remaining_before_decision = max(max_rounds - round_count, 0)
+        remaining_after_tool = max(max_rounds - round_count - 1, 0)
+        max_total_calls = self._session_config.max_total_tool_calls_per_turn
+        remaining_total_calls = max(max_total_calls - executed_tool_call_count, 0)
+        lines = [
+            "Tool budget for this turn:",
+            f"- Tool rounds used: {round_count} of {max_rounds}.",
+            (
+                "- Tool rounds remaining before this decision: "
+                f"{remaining_before_decision}."
+            ),
+            (
+                "- Tool rounds remaining after choosing a tool now: "
+                f"{remaining_after_tool}."
+            ),
+            (
+                "- Total tool calls used: "
+                f"{executed_tool_call_count} of {max_total_calls}."
+            ),
+            f"- Total tool calls remaining: {remaining_total_calls}.",
+            "",
+            "Tool calls already made this turn:",
+        ]
+        if tool_results:
+            for index, tool_result in enumerate(tool_results, start=1):
+                lines.append(f"{index}. {self._tool_call_summary(tool_result)}")
+        else:
+            lines.append("- None yet.")
+        lines.extend(
+            [
+                "",
+                "Decision guidance:",
+                "- Choose the next necessary action.",
+                (
+                    "- Do not repeat an exact prior successful tool call unless "
+                    "there is a concrete reason the same call will now return "
+                    "different information."
+                ),
+                "- Compare tool arguments against the prior calls before choosing a tool.",
+                (
+                    "- It is fine to call the same tool again with different "
+                    "arguments when that gathers new evidence."
+                ),
+                (
+                    "- Finalize only when the available evidence is sufficient "
+                    "for the requested answer."
+                ),
+            ]
+        )
+        return "\n".join(lines)
+
+    @classmethod
+    def _tool_call_summary(cls, tool_result: ToolResult) -> str:
+        execution_record = tool_result.metadata.get("execution_record")
+        request = (
+            execution_record.get("request")
+            if isinstance(execution_record, dict)
+            else None
+        )
+        request_payload = request if isinstance(request, dict) else {}
+        tool_name = request_payload.get("tool_name")
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            tool_name = tool_result.tool_name
+        arguments = request_payload.get("arguments")
+        if not isinstance(arguments, dict):
+            arguments = {}
+        status = "success" if tool_result.ok else "error"
+        if tool_result.error is not None:
+            status = f"error:{tool_result.error.code.value}"
+        return f"{tool_name}({cls._compact_json(arguments)}) -> {status}"
+
+    @staticmethod
+    def _compact_json(payload: object, *, max_chars: int = 500) -> str:
+        rendered = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        if len(rendered) <= max_chars:
+            return rendered
+        return f"{rendered[:max_chars]}...(truncated)"
 
     def _uses_staged_schema_protocol(self) -> bool:
         preference = getattr(
@@ -540,6 +650,7 @@ class ChatSessionTurnRunner:
         round_index: int,
         messages: list[dict[str, Any]],
         prepared: PreparedModelInteraction,
+        decision_context: str | None,
     ) -> Generator[
         ChatWorkflowStatusEvent | ChatWorkflowInspectorEvent | ChatWorkflowResultEvent,
         None,
@@ -554,6 +665,7 @@ class ChatSessionTurnRunner:
             messages=self._staged_tool_runner.decision_stage_messages(
                 base_messages=messages,
                 tool_specs=prepared.tool_specs,
+                decision_context=decision_context,
             ),
             response_model=decision_model,
             parser=lambda payload: decision_model.model_validate(payload),
@@ -658,12 +770,147 @@ class ChatSessionTurnRunner:
                     },
                 ]
 
+    def _force_final_response_at_limit(
+        self,
+        *,
+        round_index: int,
+        messages: list[ChatMessage],
+        new_messages: list[ChatMessage],
+        tool_results: list[ToolResult],
+    ) -> Generator[
+        ChatWorkflowStatusEvent | ChatWorkflowInspectorEvent | ChatWorkflowResultEvent,
+        None,
+        ChatWorkflowResultEvent | None,
+    ]:
+        """Force a final answer from gathered evidence when no tool rounds remain."""
+        if not tool_results:
+            return None
+        serialized_messages = [_serialize_chat_message(message) for message in messages]
+        serialized_messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "The tool round budget for this turn is exhausted. "
+                    "Do not call any more tools. Produce the best final answer "
+                    "using only the evidence already available in the transcript. "
+                    "Mention uncertainty or missing information when the evidence "
+                    "is incomplete."
+                ),
+            }
+        )
+        provenance = _collect_chat_provenance(
+            session_state=self._session_state,
+            current_tool_results=tool_results,
+        )
+        yield ChatWorkflowStatusEvent(status="drafting answer")
+        if self._uses_prompt_tool_protocol():
+            parsed = yield from self._run_prompt_tool_final_response(
+                round_index=round_index,
+                messages=serialized_messages,
+            )
+        elif self._uses_staged_schema_protocol():
+            try:
+                parsed = yield from self._run_staged_final_response(
+                    round_index=round_index,
+                    messages=serialized_messages,
+                )
+            except Exception as exc:
+                if not self._can_fallback_to_prompt_tools(exc):
+                    raise
+                yield ChatWorkflowStatusEvent(status="using prompt tools")
+                parsed = yield from self._run_prompt_tool_final_response(
+                    round_index=round_index,
+                    messages=serialized_messages,
+                )
+        else:
+            return None
+        parsed = self._apply_response_protection(
+            parsed=parsed,
+            provenance=provenance,
+        )
+        yield ChatWorkflowInspectorEvent(
+            round_index=round_index,
+            kind="parsed_response",
+            payload=_sanitize_parsed_response_for_inspector(
+                parsed,
+                redaction_config=self._redaction_config,
+            ),
+        )
+        self._append_assistant_message(
+            messages=messages,
+            new_messages=new_messages,
+            parsed=parsed,
+        )
+        return self._maybe_finalize_from_response(
+            parsed=parsed,
+            new_messages=new_messages,
+            tool_results=tool_results,
+        )
+
+    def _run_staged_final_response(
+        self,
+        *,
+        round_index: int,
+        messages: list[dict[str, Any]],
+    ) -> Generator[
+        ChatWorkflowStatusEvent | ChatWorkflowInspectorEvent | ChatWorkflowResultEvent,
+        None,
+        ParsedModelResponse,
+    ]:
+        provider = self._structured_provider()
+        final_response_model = self._adapter.build_final_response_step_model(
+            final_response_model=ChatFinalResponse
+        )
+        return (
+            yield from self._run_staged_step(
+                provider=provider,
+                round_index=round_index,
+                stage_name="final_response",
+                messages=self._staged_tool_runner.final_response_stage_messages(
+                    base_messages=messages,
+                    response_model=final_response_model,
+                ),
+                response_model=final_response_model,
+                parser=lambda payload: self._adapter.parse_final_response_step(
+                    payload,
+                    response_model=final_response_model,
+                ),
+            )
+        )
+
+    def _run_prompt_tool_final_response(
+        self,
+        *,
+        round_index: int,
+        messages: list[dict[str, Any]],
+    ) -> Generator[
+        ChatWorkflowStatusEvent | ChatWorkflowInspectorEvent | ChatWorkflowResultEvent,
+        None,
+        ParsedModelResponse,
+    ]:
+        return (
+            yield from self._run_prompt_tool_step(
+                round_index=round_index,
+                stage_name="final_response",
+                messages=self._prompt_tool_adapter.final_response_stage_messages(
+                    base_messages=messages,
+                    final_response_model=ChatFinalResponse,
+                ),
+                parser=lambda text: self._prompt_tool_adapter.parse_final_response(
+                    text,
+                    final_response_model=ChatFinalResponse,
+                ),
+                repair_context={"final_response_model": ChatFinalResponse},
+            )
+        )
+
     def _run_prompt_tool_round(
         self,
         *,
         round_index: int,
         messages: list[dict[str, Any]],
         prepared: PreparedModelInteraction,
+        decision_context: str | None,
     ) -> Generator[
         ChatWorkflowStatusEvent | ChatWorkflowInspectorEvent | ChatWorkflowResultEvent,
         None,
@@ -675,6 +922,7 @@ class ChatSessionTurnRunner:
             messages=self._prompt_tool_adapter.decision_stage_messages(
                 base_messages=messages,
                 tool_specs=prepared.tool_specs,
+                decision_context=decision_context,
             ),
             parser=lambda text: self._prompt_tool_adapter.parse_decision(
                 text,

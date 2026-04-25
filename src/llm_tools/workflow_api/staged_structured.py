@@ -328,12 +328,18 @@ class StagedStructuredToolRunner:
         *,
         base_messages: Sequence[dict[str, Any]],
         tool_specs: list[ToolSpec],
+        decision_context: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return the small decision-stage prompt."""
         tool_catalog = json.dumps(
             self._adapter.export_compact_tool_catalog(tool_specs),
             indent=2,
             sort_keys=True,
+        )
+        context_text = (
+            f"\n\nCurrent turn tool-use context:\n{decision_context}"
+            if decision_context
+            else ""
         )
         return [
             *base_messages,
@@ -344,6 +350,7 @@ class StagedStructuredToolRunner:
                     "Return mode='tool' with exactly one tool_name, or mode='finalize'.\n"
                     "Do not provide tool arguments or a final answer in this step.\n"
                     f"Available tools:\n{tool_catalog}"
+                    f"{context_text}"
                 ),
             },
         ]

@@ -10,8 +10,10 @@ import pytest
 from llm_tools.llm_adapters import ParsedModelResponse
 from llm_tools.llm_adapters.prompt_tools import PromptToolProtocolError
 from llm_tools.tool_api import (
+    ErrorCode,
     SideEffectClass,
     ToolContext,
+    ToolError,
     ToolInvocationRequest,
     ToolPolicy,
     ToolRegistry,
@@ -770,6 +772,52 @@ def test_chat_session_runner_stage_helpers_cover_remaining_edges(
         parsed=ParsedModelResponse(final_response={"answer": "draft"}),
         tool_results=[],
     )
+    decision_context = runner._decision_tool_use_context(
+        round_count=2,
+        executed_tool_call_count=1,
+        tool_results=[
+            ToolResult(
+                ok=True,
+                tool_name="read_file",
+                tool_version="0.1.0",
+                metadata={
+                    "execution_record": {
+                        "request": {
+                            "tool_name": "read_file",
+                            "arguments": {"path": "README.md", "limit": 20},
+                        }
+                    }
+                },
+            )
+        ],
+    )
+    assert "Tool rounds used: 2 of 8." in decision_context
+    assert "Tool rounds remaining after choosing a tool now: 5." in decision_context
+    assert "Total tool calls used: 1 of 12." in decision_context
+    assert 'read_file({"limit":20,"path":"README.md"}) -> success' in decision_context
+    assert "same tool again with different arguments" in decision_context
+    assert (
+        runner._tool_call_summary(
+            ToolResult(
+                ok=False,
+                tool_name="read_file",
+                tool_version="0.1.0",
+                error=ToolError(
+                    code=ErrorCode.RUNTIME_ERROR,
+                    message="failed",
+                ),
+                metadata={
+                    "execution_record": {
+                        "request": {"tool_name": "", "arguments": "invalid"}
+                    }
+                },
+            )
+        )
+        == "read_file({}) -> error:runtime_error"
+    )
+    assert runner._compact_json({"path": "a" * 100}, max_chars=20).endswith(
+        "...(truncated)"
+    )
     try:
         runner._tool_spec([], "missing")
     except ValueError as exc:
@@ -1038,6 +1086,59 @@ def test_chat_session_runner_returns_continuation_for_round_trip_budget(
     assert isinstance(result_event, ChatWorkflowResultEvent)
     assert result_event.result.status == "needs_continuation"
     assert "more tool rounds" in (result_event.result.continuation_reason or "")
+
+
+def test_chat_session_runner_forces_staged_final_response_at_round_budget(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    provider = _FakeStagedProvider(
+        [
+            {"mode": "tool", "tool_name": "list_directory"},
+            {
+                "mode": "tool",
+                "tool_name": "list_directory",
+                "arguments": {"path": "."},
+            },
+            {
+                "mode": "finalize",
+                "final_response": {
+                    "answer": "The workspace contains src/app.py.",
+                    "citations": [{"source_path": "src/app.py"}],
+                },
+            },
+        ]
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Inspect once",
+        session_state=ChatSessionState(),
+        executor=_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(max_tool_round_trips=1),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    events = list(runner)
+
+    result_event = events[-1]
+    assert isinstance(result_event, ChatWorkflowResultEvent)
+    assert result_event.result.status == "completed"
+    assert result_event.result.final_response is not None
+    assert result_event.result.final_response.answer == (
+        "The workspace contains src/app.py."
+    )
+    assert provider.response_model_names == [
+        "DecisionStep",
+        "ListDirectoryInvocationStep",
+        "FinalResponseStep",
+    ]
+    assert "tool round budget" in provider.calls[-1][-2]["content"]
+    assert "Current step: finalize the answer." in provider.calls[-1][-1]["content"]
 
 
 def test_chat_session_runner_cancelled_while_waiting_for_approval(

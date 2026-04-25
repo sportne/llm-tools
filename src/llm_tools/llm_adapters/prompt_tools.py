@@ -42,7 +42,13 @@ class PromptToolAdapter:
         *,
         base_messages: list[dict[str, Any]],
         tool_specs: list[ToolSpec],
+        decision_context: str | None = None,
     ) -> list[dict[str, Any]]:
+        context_text = (
+            f"\n\nCurrent turn tool-use context:\n{decision_context}\n\n"
+            if decision_context
+            else ""
+        )
         return [
             *base_messages,
             {
@@ -54,6 +60,7 @@ class PromptToolAdapter:
                     "When MODE is tool, TOOL_NAME must be one exact available tool name.\n"
                     "Do not provide tool arguments or a final answer in this step.\n\n"
                     f"Available tools:\n{self._tool_catalog(tool_specs)}\n\n"
+                    f"{context_text}"
                     "Required formats:\n"
                     "```decision\nMODE: tool\nTOOL_NAME: tool_name\n```\n"
                     "or\n"

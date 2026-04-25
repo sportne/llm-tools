@@ -171,13 +171,13 @@ def test_chat_runtime_provider_factory_and_executor_defaults(
             ollama_config,
             api_key=None,
             model_name="gemma4:26b",
-            mode_strategy="md_json",
+            mode_strategy="json",
         )
         == "ollama-provider"
     )
     assert ollama_calls[0]["base_url"] == "http://127.0.0.1:11434/v1"
     assert ollama_calls[0]["api_key"] == "ollama"
-    assert ollama_calls[0]["mode_strategy"] == "md_json"
+    assert ollama_calls[0]["mode_strategy"] == "json"
 
     custom_config = config.model_copy(
         update={

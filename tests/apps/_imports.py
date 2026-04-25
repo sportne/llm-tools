@@ -19,7 +19,6 @@ class _FakeProviderModeStrategy(StrEnum):
     AUTO = "auto"
     TOOLS = "tools"
     JSON = "json"
-    MD_JSON = "md_json"
     PROMPT_TOOLS = "prompt_tools"
 
 
@@ -162,7 +161,6 @@ class _FakeOpenAICompatibleProvider:
     def uses_staged_schema_protocol(self) -> bool:
         return self.mode_strategy in {
             _FakeProviderModeStrategy.JSON,
-            _FakeProviderModeStrategy.MD_JSON,
         }
 
     def uses_prompt_tool_protocol(self) -> bool:

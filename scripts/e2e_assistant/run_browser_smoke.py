@@ -60,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--provider-modes",
-        help="Comma-separated provider modes: tools,json,md_json,prompt_tools.",
+        help="Comma-separated provider modes: tools,json,prompt_tools.",
     )
     parser.add_argument("--port", type=int)
     parser.add_argument(

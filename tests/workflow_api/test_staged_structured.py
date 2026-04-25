@@ -101,6 +101,25 @@ def test_staged_runner_runs_tool_stage_with_small_models() -> None:
     )
 
 
+def test_staged_runner_decision_stage_accepts_tool_use_context() -> None:
+    adapter = ActionEnvelopeAdapter()
+    messages = StagedStructuredToolRunner(
+        adapter=adapter,
+        temperature=0,
+    ).decision_stage_messages(
+        base_messages=[{"role": "user", "content": "inspect"}],
+        tool_specs=[ToolSpec(name="lookup", description="Read one path.")],
+        decision_context=(
+            "Tool calls already made this turn:\n"
+            '1. lookup({"path":"README.md"}) -> success'
+        ),
+    )
+
+    content = str(messages[-1]["content"])
+    assert "Current turn tool-use context:" in content
+    assert 'lookup({"path":"README.md"}) -> success' in content
+
+
 def test_staged_runner_runs_final_stage_async() -> None:
     adapter = ActionEnvelopeAdapter()
     provider = _FakeProvider(

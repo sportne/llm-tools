@@ -50,6 +50,21 @@ def test_parse_decision_tool_and_finalize() -> None:
     assert final.tool_name is None
 
 
+def test_decision_stage_messages_include_tool_use_context() -> None:
+    messages = PromptToolAdapter().decision_stage_messages(
+        base_messages=[{"role": "user", "content": "inspect"}],
+        tool_specs=_tool_specs(),
+        decision_context=(
+            "Tool calls already made this turn:\n"
+            '1. read_file({"path":"README.md"}) -> success'
+        ),
+    )
+
+    content = messages[-1]["content"]
+    assert "Current turn tool-use context:" in content
+    assert 'read_file({"path":"README.md"}) -> success' in content
+
+
 def test_parse_decision_rejects_unknown_tools_and_duplicate_blocks() -> None:
     adapter = PromptToolAdapter()
 
