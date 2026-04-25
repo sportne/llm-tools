@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable, Generator, Iterator
 from datetime import UTC, datetime
 from threading import Condition
@@ -15,6 +16,7 @@ from llm_tools.llm_adapters import (
     ActionEnvelopeAdapter,
     ParsedModelResponse,
     PromptToolAdapter,
+    PromptToolCategory,
 )
 from llm_tools.tool_api import (
     ProtectionProvenanceSnapshot,
@@ -139,6 +141,11 @@ _GIT_GROUNDING_HINTS = (
 )
 
 _StagedStepT = TypeVar("_StagedStepT")
+_PROMPT_TOOL_STRATEGY_ENV = "LLM_TOOLS_PROMPT_TOOL_STRATEGY"
+_PROMPT_TOOL_CATEGORY_THRESHOLD_ENV = "LLM_TOOLS_PROMPT_TOOL_CATEGORY_THRESHOLD"
+_JSON_AGENT_STRATEGY_ENV = "LLM_TOOLS_JSON_AGENT_STRATEGY"
+_DEFAULT_PROMPT_TOOL_CATEGORY_THRESHOLD = 7
+_PROMPT_TOOL_SINGLE_ACTION_STRATEGIES = {"single_action", "single-action", "single"}
 
 
 class ModelTurnProvider(Protocol):
@@ -350,15 +357,19 @@ class ChatSessionTurnRunner:
                         decision_context=decision_context,
                     )
             else:
+                native_messages = self._native_tool_round_messages(
+                    messages=serialized_messages,
+                    decision_context=decision_context,
+                )
                 yield ChatWorkflowInspectorEvent(
                     round_index=round_index,
                     kind="provider_messages",
-                    payload=serialized_messages,
+                    payload=native_messages,
                 )
                 try:
                     parsed = self._provider.run(
                         adapter=self._adapter,
-                        messages=serialized_messages,
+                        messages=native_messages,
                         response_model=prepared.response_model,
                         request_params={"temperature": self._temperature},
                     )
@@ -368,7 +379,7 @@ class ChatSessionTurnRunner:
                     yield ChatWorkflowStatusEvent(status="using prompt tools")
                     parsed = yield from self._run_prompt_tool_round(
                         round_index=round_index,
-                        messages=serialized_messages,
+                        messages=self._prompt_tool_base_messages(serialized_messages),
                         prepared=prepared,
                         decision_context=decision_context,
                     )
@@ -503,7 +514,7 @@ class ChatSessionTurnRunner:
             final_response_model=ChatFinalResponse,
         )
         round_index = round_count + 1
-        serialized_messages = [_serialize_chat_message(message) for message in messages]
+        serialized_messages = self._serialize_messages_for_model(messages)
         provenance = _collect_chat_provenance(
             session_state=self._session_state,
             current_tool_results=tool_results,
@@ -515,6 +526,82 @@ class ChatSessionTurnRunner:
             serialized_messages,
             provenance,
         )
+
+    def _serialize_messages_for_model(
+        self,
+        messages: list[ChatMessage],
+        *,
+        force_final: bool = False,
+    ) -> list[dict[str, Any]]:
+        protocol = self._model_visible_protocol(force_final=force_final)
+        return [
+            self._serialize_chat_message_for_protocol(message, protocol=protocol)
+            for message in messages
+        ]
+
+    def _model_visible_protocol(self, *, force_final: bool = False) -> str:
+        if force_final:
+            return "final_only"
+        if self._uses_prompt_tool_protocol():
+            return "prompt_tools"
+        if self._uses_staged_schema_protocol():
+            return "staged_json"
+        return "native_tools"
+
+    def _serialize_chat_message_for_protocol(
+        self,
+        message: ChatMessage,
+        *,
+        protocol: str,
+    ) -> dict[str, str]:
+        if message.role != "assistant":
+            return _serialize_chat_message(message)
+        if protocol not in {
+            "prompt_tools",
+            "staged_json",
+            "native_tools",
+            "final_only",
+        }:
+            return _serialize_chat_message(message)
+        summary = self._assistant_message_summary(message.content)
+        if summary is None:
+            return _serialize_chat_message(message)
+        return {"role": "assistant", "content": summary}
+
+    @classmethod
+    def _assistant_message_summary(cls, content: str) -> str | None:
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        invocations = payload.get("actions")
+        final_response = payload.get("final_response")
+        if isinstance(invocations, list) and invocations:
+            lines = []
+            for invocation in invocations:
+                if not isinstance(invocation, dict):
+                    continue
+                tool_name = invocation.get("tool_name")
+                arguments = invocation.get("arguments")
+                if not isinstance(tool_name, str):
+                    continue
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                lines.append(
+                    "Prior tool call record: "
+                    f"name={tool_name}, arguments={cls._compact_json(arguments)}."
+                )
+            return "\n".join(lines) if lines else None
+        if final_response is not None:
+            if isinstance(final_response, dict):
+                answer = final_response.get("answer")
+                if isinstance(answer, str) and answer.strip():
+                    return f"Assistant final answer: {answer}"
+            if isinstance(final_response, str) and final_response.strip():
+                return f"Assistant final answer: {final_response}"
+        return None
 
     def _decision_tool_use_context(
         self,
@@ -596,6 +683,41 @@ class ChatSessionTurnRunner:
         return f"{tool_name}({cls._compact_json(arguments)}) -> {status}"
 
     @staticmethod
+    def _native_tool_round_messages(
+        *,
+        messages: list[dict[str, Any]],
+        decision_context: str,
+    ) -> list[dict[str, Any]]:
+        return [
+            *messages,
+            {
+                "role": "system",
+                "content": (
+                    "Current native-tool step.\n"
+                    f"{decision_context}\n\n"
+                    "Use another native tool call only if it is necessary and within budget. "
+                    "If available evidence is sufficient, return the final answer now."
+                ),
+            },
+        ]
+
+    @staticmethod
+    def _prompt_tool_base_messages(
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return [
+            *messages,
+            {
+                "role": "system",
+                "content": (
+                    "Switching to prompt-tool protocol. Ignore earlier native tool-call "
+                    "or structured JSON response instructions. Follow only the fenced "
+                    "prompt-tool instructions in the next system message."
+                ),
+            },
+        ]
+
+    @staticmethod
     def _compact_json(payload: object, *, max_chars: int = 500) -> str:
         rendered = json.dumps(
             payload,
@@ -627,6 +749,16 @@ class ChatSessionTurnRunner:
             return False
         return bool(preference())
 
+    def _uses_json_single_action_strategy(self) -> bool:
+        strategy_value = getattr(self._provider, "json_agent_strategy", None)
+        if callable(strategy_value):
+            strategy = str(strategy_value())
+        elif isinstance(strategy_value, str):
+            strategy = strategy_value
+        else:
+            strategy = os.environ.get(_JSON_AGENT_STRATEGY_ENV, "single_action")
+        return strategy.strip().lower() not in {"staged", "split", "decision"}
+
     def _can_fallback_to_prompt_tools(self, exc: Exception) -> bool:
         run_text = getattr(self._provider, "run_text", None)
         if not callable(run_text):
@@ -657,6 +789,35 @@ class ChatSessionTurnRunner:
         ParsedModelResponse,
     ]:
         provider = self._structured_provider()
+        if self._uses_json_single_action_strategy():
+            response_model = self._adapter.build_single_action_step_model(
+                prepared.tool_specs,
+                final_response_model=ChatFinalResponse,
+            )
+            parsed_response = yield from self._run_staged_step(
+                provider=provider,
+                round_index=round_index,
+                stage_name="single_action",
+                messages=self._staged_tool_runner.single_action_stage_messages(
+                    base_messages=messages,
+                    tool_specs=prepared.tool_specs,
+                    response_model=response_model,
+                    decision_context=decision_context,
+                ),
+                response_model=response_model,
+                parser=lambda payload: self._adapter.parse_single_action_step(
+                    payload,
+                    response_model=response_model,
+                    tool_specs=prepared.tool_specs,
+                    input_models=prepared.input_models,
+                ),
+            )
+            if parsed_response.invocations:
+                yield ChatWorkflowStatusEvent(
+                    status=f"preparing {parsed_response.invocations[0].tool_name}"
+                )
+            return parsed_response
+
         decision_model = self._adapter.build_decision_step_model(prepared.tool_specs)
         decision_payload = yield from self._run_staged_step(
             provider=provider,
@@ -785,7 +946,10 @@ class ChatSessionTurnRunner:
         """Force a final answer from gathered evidence when no tool rounds remain."""
         if not tool_results:
             return None
-        serialized_messages = [_serialize_chat_message(message) for message in messages]
+        serialized_messages = self._serialize_messages_for_model(
+            messages,
+            force_final=True,
+        )
         serialized_messages.append(
             {
                 "role": "system",
@@ -823,7 +987,10 @@ class ChatSessionTurnRunner:
                     messages=serialized_messages,
                 )
         else:
-            return None
+            parsed = yield from self._run_native_final_response(
+                round_index=round_index,
+                messages=serialized_messages,
+            )
         parsed = self._apply_response_protection(
             parsed=parsed,
             provenance=provenance,
@@ -845,6 +1012,58 @@ class ChatSessionTurnRunner:
             parsed=parsed,
             new_messages=new_messages,
             tool_results=tool_results,
+        )
+
+    def _run_native_final_response(
+        self,
+        *,
+        round_index: int,
+        messages: list[dict[str, Any]],
+    ) -> Generator[
+        ChatWorkflowStatusEvent | ChatWorkflowInspectorEvent | ChatWorkflowResultEvent,
+        None,
+        ParsedModelResponse,
+    ]:
+        yield ChatWorkflowInspectorEvent(
+            round_index=round_index,
+            kind="provider_messages",
+            payload=messages,
+        )
+        run_structured = getattr(self._provider, "run_structured", None)
+        if callable(run_structured):
+            try:
+                payload = run_structured(
+                    messages=messages,
+                    response_model=ChatFinalResponse,
+                    request_params={"temperature": self._temperature},
+                )
+                final_response = (
+                    payload.model_dump(mode="json")
+                    if isinstance(payload, BaseModel)
+                    else ChatFinalResponse.model_validate(payload).model_dump(
+                        mode="json"
+                    )
+                )
+                return ParsedModelResponse(final_response=final_response)
+            except Exception as exc:
+                if not is_repairable_stage_error(exc):
+                    raise
+        run_text = getattr(self._provider, "run_text", None)
+        if not callable(run_text):
+            raise RuntimeError(
+                "Native forced finalization requires run_structured() or run_text()."
+            )
+        text = run_text(
+            messages=messages,
+            request_params={"temperature": self._temperature},
+        )
+        yield ChatWorkflowInspectorEvent(
+            round_index=round_index,
+            kind="provider_response",
+            payload={"stage_name": "native_final_response", "text": text},
+        )
+        return ParsedModelResponse(
+            final_response=ChatFinalResponse(answer=text).model_dump(mode="json")
         )
 
     def _run_staged_final_response(
@@ -916,6 +1135,47 @@ class ChatSessionTurnRunner:
         None,
         ParsedModelResponse,
     ]:
+        if self._uses_prompt_tool_category_strategy(prepared.tool_specs):
+            return (
+                yield from self._run_prompt_tool_category_round(
+                    round_index=round_index,
+                    messages=messages,
+                    prepared=prepared,
+                    decision_context=decision_context,
+                )
+            )
+        if self._uses_prompt_tool_single_action_strategy():
+            return (
+                yield from self._run_prompt_tool_single_action_round(
+                    round_index=round_index,
+                    messages=messages,
+                    prepared=prepared,
+                    decision_context=decision_context,
+                    tool_specs=prepared.tool_specs,
+                    selected_category=None,
+                )
+            )
+        return (
+            yield from self._run_prompt_tool_split_round(
+                round_index=round_index,
+                messages=messages,
+                prepared=prepared,
+                decision_context=decision_context,
+            )
+        )
+
+    def _run_prompt_tool_split_round(
+        self,
+        *,
+        round_index: int,
+        messages: list[dict[str, Any]],
+        prepared: PreparedModelInteraction,
+        decision_context: str | None,
+    ) -> Generator[
+        ChatWorkflowStatusEvent | ChatWorkflowInspectorEvent | ChatWorkflowResultEvent,
+        None,
+        ParsedModelResponse,
+    ]:
         decision = yield from self._run_prompt_tool_step(
             round_index=round_index,
             stage_name="decision",
@@ -956,7 +1216,6 @@ class ChatSessionTurnRunner:
             raise ValueError(
                 f"Selected tool '{tool_name}' was not prepared for this interaction."
             )
-        yield ChatWorkflowStatusEvent(status=f"preparing {tool_name}")
         return (
             yield from self._run_prompt_tool_step(
                 round_index=round_index,
@@ -977,6 +1236,118 @@ class ChatSessionTurnRunner:
                 },
             )
         )
+
+    def _run_prompt_tool_category_round(
+        self,
+        *,
+        round_index: int,
+        messages: list[dict[str, Any]],
+        prepared: PreparedModelInteraction,
+        decision_context: str | None,
+    ) -> Generator[
+        ChatWorkflowStatusEvent | ChatWorkflowInspectorEvent | ChatWorkflowResultEvent,
+        None,
+        ParsedModelResponse,
+    ]:
+        categories = self._prompt_tool_adapter.derive_tool_categories(
+            prepared.tool_specs
+        )
+        category_decision = yield from self._run_prompt_tool_step(
+            round_index=round_index,
+            stage_name="category",
+            messages=self._prompt_tool_adapter.category_decision_stage_messages(
+                base_messages=messages,
+                categories=categories,
+                final_response_model=ChatFinalResponse,
+                decision_context=decision_context,
+            ),
+            parser=lambda text: self._prompt_tool_adapter.parse_category_decision(
+                text,
+                categories=categories,
+            ),
+            repair_context={
+                "categories": categories,
+                "final_response_model": ChatFinalResponse,
+            },
+        )
+        if category_decision.mode == "finalize":
+            return (
+                yield from self._run_prompt_tool_step(
+                    round_index=round_index,
+                    stage_name="final_response",
+                    messages=self._prompt_tool_adapter.final_response_stage_messages(
+                        base_messages=messages,
+                        final_response_model=ChatFinalResponse,
+                    ),
+                    parser=lambda text: self._prompt_tool_adapter.parse_final_response(
+                        text,
+                        final_response_model=ChatFinalResponse,
+                    ),
+                    repair_context={"final_response_model": ChatFinalResponse},
+                )
+            )
+
+        category_name = category_decision.category
+        if not isinstance(category_name, str) or category_name.strip() == "":
+            raise ValueError("Prompt-tool category step did not select a category.")
+        category_tool_specs = self._prompt_tool_adapter.category_tool_specs(
+            categories,
+            category_name,
+        )
+        yield ChatWorkflowStatusEvent(status=f"using {category_name} tools")
+        return (
+            yield from self._run_prompt_tool_single_action_round(
+                round_index=round_index,
+                messages=messages,
+                prepared=prepared,
+                decision_context=decision_context,
+                tool_specs=category_tool_specs,
+                selected_category=category_name,
+            )
+        )
+
+    def _run_prompt_tool_single_action_round(
+        self,
+        *,
+        round_index: int,
+        messages: list[dict[str, Any]],
+        prepared: PreparedModelInteraction,
+        decision_context: str | None,
+        tool_specs: list[ToolSpec],
+        selected_category: str | None,
+    ) -> Generator[
+        ChatWorkflowStatusEvent | ChatWorkflowInspectorEvent | ChatWorkflowResultEvent,
+        None,
+        ParsedModelResponse,
+    ]:
+        parsed = yield from self._run_prompt_tool_step(
+            round_index=round_index,
+            stage_name="action",
+            messages=self._prompt_tool_adapter.single_action_stage_messages(
+                base_messages=messages,
+                tool_specs=tool_specs,
+                input_models=prepared.input_models,
+                final_response_model=ChatFinalResponse,
+                decision_context=decision_context,
+                selected_category=selected_category,
+            ),
+            parser=lambda text: self._prompt_tool_adapter.parse_single_action(
+                text,
+                tool_specs=tool_specs,
+                input_models=prepared.input_models,
+                final_response_model=ChatFinalResponse,
+            ),
+            repair_context={
+                "tool_specs": tool_specs,
+                "input_models": prepared.input_models,
+                "final_response_model": ChatFinalResponse,
+            },
+        )
+        if parsed.invocations:
+            yield ChatWorkflowStatusEvent(
+                status=f"preparing {parsed.invocations[0].tool_name}"
+            )
+        return parsed
 
     def _run_prompt_tool_step(
         self,
@@ -1010,9 +1381,14 @@ class ChatSessionTurnRunner:
                     messages=attempt_messages,
                     request_params={"temperature": self._temperature},
                 )
+                yield ChatWorkflowInspectorEvent(
+                    round_index=round_index,
+                    kind="provider_response",
+                    payload={"stage_name": stage_name, "text": text},
+                )
                 return parser(text)
             except Exception as exc:
-                if repair_attempts >= 2:
+                if repair_attempts >= 2 or not is_repairable_stage_error(exc):
                     raise
                 repair_attempts += 1
                 yield ChatWorkflowStatusEvent(status=f"repairing {stage_name}")
@@ -1020,6 +1396,8 @@ class ChatSessionTurnRunner:
                 if invalid_payload is None:
                     invalid_payload = getattr(exc, "invalid_payload", None)
                 tool_specs_value = repair_context.get("tool_specs")
+                input_models_value = repair_context.get("input_models")
+                categories_value = repair_context.get("categories")
                 selected_tool_value = repair_context.get("selected_tool")
                 input_model_value = repair_context.get("input_model")
                 attempt_messages = [
@@ -1033,6 +1411,16 @@ class ChatSessionTurnRunner:
                             tool_specs=(
                                 cast(list[ToolSpec], tool_specs_value)
                                 if isinstance(tool_specs_value, list)
+                                else None
+                            ),
+                            input_models=(
+                                cast(dict[str, type[BaseModel]], input_models_value)
+                                if isinstance(input_models_value, dict)
+                                else None
+                            ),
+                            categories=(
+                                cast(list[PromptToolCategory], categories_value)
+                                if isinstance(categories_value, list)
                                 else None
                             ),
                             selected_tool=(
@@ -1051,6 +1439,29 @@ class ChatSessionTurnRunner:
                         ),
                     },
                 ]
+
+    @classmethod
+    def _uses_prompt_tool_category_strategy(cls, tool_specs: list[ToolSpec]) -> bool:
+        if os.environ.get(_PROMPT_TOOL_STRATEGY_ENV, "").strip().lower() != "category":
+            return False
+        if len(tool_specs) < cls._prompt_tool_category_threshold():
+            return False
+        return len(PromptToolAdapter.derive_tool_categories(tool_specs)) > 1
+
+    @staticmethod
+    def _uses_prompt_tool_single_action_strategy() -> bool:
+        strategy = os.environ.get(_PROMPT_TOOL_STRATEGY_ENV, "").strip().lower()
+        return strategy in _PROMPT_TOOL_SINGLE_ACTION_STRATEGIES
+
+    @staticmethod
+    def _prompt_tool_category_threshold() -> int:
+        raw_value = os.environ.get(_PROMPT_TOOL_CATEGORY_THRESHOLD_ENV)
+        if raw_value is None:
+            return _DEFAULT_PROMPT_TOOL_CATEGORY_THRESHOLD
+        try:
+            return max(int(raw_value), 1)
+        except ValueError:
+            return _DEFAULT_PROMPT_TOOL_CATEGORY_THRESHOLD
 
     @staticmethod
     def _validation_error_summary(error: Exception) -> str:

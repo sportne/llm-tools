@@ -14,7 +14,6 @@ from typing import Any
 
 import common
 
-
 DEFAULT_MODEL_PROFILES = [
     {
         "model": "gemma4:e2b",
@@ -37,12 +36,18 @@ DEFAULT_MODEL_PROFILES = [
         "rationale": "Large recent Gemma-family model.",
     },
 ]
-DEFAULT_PROVIDER_MODES = ["json", "prompt_tools"]
+DEFAULT_PROVIDER_MODES = [
+    "json",
+    "prompt_tools",
+    "prompt_tools_single_action",
+    "prompt_tools_category",
+]
 DEFAULT_SCENARIOS = ["chat_repo_lookup"]
 DEFAULT_ROUND_CAP = 8
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the Ollama agent eval CLI."""
     parser = argparse.ArgumentParser(
         description=(
             "Run a compact Ollama agent modality evaluation and summarize the artifacts."
@@ -93,6 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run or summarize the repeatable Ollama agent evaluation."""
     args = build_parser().parse_args(argv)
     output_dir = _output_dir(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -259,6 +265,7 @@ def _summarize_artifact(
                 "quality_passed": False,
             },
             "failure": "No artifact was written.",
+            "failure_type": "missing_artifact",
         }
     payload = json.loads(artifact.read_text(encoding="utf-8"))
     tool_calls = _tool_calls(payload)
@@ -274,6 +281,9 @@ def _summarize_artifact(
         **base,
         "status": payload.get("status"),
         "summary": payload.get("summary"),
+        "continuation_refusal_attempted": bool(
+            payload.get("continuation_refusal_attempted")
+        ),
         "resolved_mode": (payload.get("provider_health") or {}).get("resolved_mode"),
         "checks": payload.get("checks"),
         "tool_sequence": payload.get("tool_sequence") or [],
@@ -290,6 +300,7 @@ def _summarize_artifact(
         "final_answer_chars": len(answer),
         "answer_quality": quality,
         "failure": (payload.get("failure") or {}).get("message"),
+        "failure_type": (payload.get("failure") or {}).get("type"),
     }
 
 
@@ -309,6 +320,7 @@ def _tool_calls(payload: dict[str, Any]) -> list[dict[str, Any]]:
                     {
                         "tool_name": tool_name,
                         "arguments": arguments if isinstance(arguments, dict) else {},
+                        "tool_call_id": invocation.get("tool_call_id"),
                     }
                 )
     if calls:

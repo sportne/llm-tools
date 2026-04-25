@@ -45,4 +45,5 @@ coverage.json
 .llm-tools/
 .llm-tools-harness/
 .llm_tools/
+google-ai-studio-api-key.txt
 .DS_Store

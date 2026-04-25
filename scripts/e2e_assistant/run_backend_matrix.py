@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import queue
 import threading
 from collections import Counter
@@ -57,6 +58,16 @@ ALL_SCENARIOS = [
     "research_repo_investigation",
     "research_followup_or_inspect",
 ]
+PROMPT_TOOL_VARIANT_MODES = {
+    "prompt_tools_split": "split",
+    "prompt_tools_single_action": "single_action",
+    "prompt_tools_category": "category",
+}
+CONTINUATION_REFUSAL_PROMPT = (
+    "Do not continue with more tool use. Use only the local tool evidence already "
+    "available in this chat session and answer now. Mention uncertainty if the "
+    "evidence is incomplete."
+)
 
 SAFE_PROTECTION_REPLACEMENT = (
     "I can't provide the proprietary material directly. I can offer a safe summary "
@@ -151,8 +162,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--workspace", type=Path, default=common.REPO_ROOT)
     parser.add_argument(
+        "--provider",
+        default="ollama",
+        help="Assistant provider preset, such as ollama or custom_openai_compatible.",
+    )
+    parser.add_argument(
         "--ollama-base-url",
         default=common.DEFAULT_OLLAMA_BASE_URL,
+    )
+    parser.add_argument(
+        "--api-base-url",
+        help="OpenAI-compatible API base URL. Overrides --ollama-base-url.",
+    )
+    parser.add_argument(
+        "--api-key-env-var",
+        help="Environment variable used by custom OpenAI-compatible providers.",
     )
     parser.add_argument("--model", default=common.DEFAULT_MODEL)
     parser.add_argument("--output-dir")
@@ -179,9 +203,54 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--provider-modes",
-        help="Comma-separated provider modes: tools,json,prompt_tools.",
+        help=(
+            "Comma-separated provider modes: tools,json,prompt_tools,"
+            "prompt_tools_single_action,prompt_tools_category."
+        ),
     )
     return parser
+
+
+def _select_provider_mode_variants(
+    *,
+    mode_args: list[str],
+    modes_csv: str | None,
+) -> list[tuple[str, ProviderModeStrategy, str | None]]:
+    raw_values: list[str] = []
+    for raw in mode_args:
+        value = raw.strip()
+        if value:
+            raw_values.append(value)
+    if modes_csv:
+        raw_values.extend(part.strip() for part in modes_csv.split(",") if part.strip())
+    if not raw_values:
+        raw_values = [mode.value for mode in common.DEFAULT_PROVIDER_MODES]
+
+    selected: list[tuple[str, ProviderModeStrategy, str | None]] = []
+    seen: set[str] = set()
+    valid_values = [
+        *(mode.value for mode in common.DEFAULT_PROVIDER_MODES),
+        *PROMPT_TOOL_VARIANT_MODES,
+    ]
+    for raw in raw_values:
+        if raw in PROMPT_TOOL_VARIANT_MODES:
+            label = raw
+            mode = ProviderModeStrategy.PROMPT_TOOLS
+            strategy = PROMPT_TOOL_VARIANT_MODES[raw]
+        else:
+            try:
+                mode = ProviderModeStrategy(raw)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Unknown provider mode '{raw}'. Expected one of: {', '.join(valid_values)}"
+                ) from exc
+            label = mode.value
+            strategy = None
+        if label in seen:
+            continue
+        selected.append((label, mode, strategy))
+        seen.add(label)
+    return selected
 
 
 def _chat_prompt_for(name: str) -> str:
@@ -236,6 +305,7 @@ def _run_chat_turn(
     status_events: list[str] = []
     inspector_payloads: dict[str, list[dict[str, Any]]] = {
         "provider_messages": [],
+        "provider_responses": [],
         "parsed_responses": [],
         "tool_executions": [],
     }
@@ -280,6 +350,7 @@ def _run_chat_turn(
             if isinstance(event, ChatWorkflowInspectorEvent):
                 target = {
                     "provider_messages": "provider_messages",
+                    "provider_response": "provider_responses",
                     "parsed_response": "parsed_responses",
                     "tool_execution": "tool_executions",
                 }[event.kind]
@@ -313,6 +384,7 @@ def _run_chat_turn(
                     )
     except Exception as exc:
         failure_payload = common.failure_payload(exc)
+        failure_payload["stage"] = status_events[-1] if status_events else None
         transcript_entries.append(
             common.transcript_entry(
                 "system",
@@ -359,6 +431,52 @@ def _serialize_chat_turn(
         runtime=runtime,
         session_state=ChatSessionState(),
     )
+
+
+def _run_chat_turn_with_continuation_refusal(
+    *,
+    scenario_name: str,
+    prompt: str,
+    config: Any,
+    runtime: Any,
+) -> dict[str, Any]:
+    session_id = f"e2e-{scenario_name}-{uuid4().hex[:8]}"
+    first_turn = _run_chat_turn(
+        scenario_name=scenario_name,
+        session_id=session_id,
+        prompt=prompt,
+        config=config,
+        runtime=runtime,
+        session_state=ChatSessionState(),
+    )
+    result_payload = first_turn.get("result") or {}
+    if result_payload.get("status") != "needs_continuation":
+        return first_turn
+    session_state_payload = first_turn.get("session_state")
+    if session_state_payload is None:
+        return first_turn
+
+    second_turn = _run_chat_turn(
+        scenario_name=f"{scenario_name}-continuation-refusal",
+        session_id=session_id,
+        prompt=CONTINUATION_REFUSAL_PROMPT,
+        config=config,
+        runtime=runtime,
+        session_state=ChatSessionState.model_validate(session_state_payload),
+    )
+    combined = dict(second_turn)
+    combined["initial_turn"] = first_turn
+    combined["continuation_refusal_prompt"] = CONTINUATION_REFUSAL_PROMPT
+    combined["tool_sequence"] = [
+        *first_turn.get("tool_sequence", []),
+        *second_turn.get("tool_sequence", []),
+    ]
+    combined["transcript_entries"] = [
+        *first_turn.get("transcript_entries", []),
+        *second_turn.get("transcript_entries", []),
+    ]
+    combined["continuation_refusal_attempted"] = True
+    return combined
 
 
 def _evaluate_chat_repo_lookup(
@@ -792,7 +910,7 @@ def _run_chat_scenario(
             runtime=runtime,
         )
 
-    chat_turn = _serialize_chat_turn(
+    chat_turn = _run_chat_turn_with_continuation_refusal(
         scenario_name=name,
         prompt=prompt,
         config=config,
@@ -1158,7 +1276,7 @@ def main(argv: list[str] | None = None) -> int:
         scenario_args=args.scenario,
         scenarios_csv=args.scenarios,
     )
-    selected_modes = common.select_provider_modes(
+    selected_modes = _select_provider_mode_variants(
         mode_args=args.provider_mode,
         modes_csv=args.provider_modes,
     )
@@ -1166,8 +1284,14 @@ def main(argv: list[str] | None = None) -> int:
     results: list[dict[str, Any]] = []
     provider_health_reports: list[dict[str, Any]] = []
     per_mode_runs: list[dict[str, Any]] = []
-    for provider_mode in selected_modes:
-        mode_output_dir = common.mode_output_dir(output_dir, provider_mode)
+    for provider_mode_label, provider_mode, prompt_tool_strategy in selected_modes:
+        mode_output_dir = (output_dir / provider_mode_label).resolve()
+        mode_output_dir.mkdir(parents=True, exist_ok=True)
+        old_prompt_tool_strategy = os.environ.get("LLM_TOOLS_PROMPT_TOOL_STRATEGY")
+        if prompt_tool_strategy is not None:
+            os.environ["LLM_TOOLS_PROMPT_TOOL_STRATEGY"] = prompt_tool_strategy
+        else:
+            os.environ.pop("LLM_TOOLS_PROMPT_TOOL_STRATEGY", None)
         config = common.build_assistant_config(
             workspace=workspace,
             output_dir=mode_output_dir,
@@ -1175,86 +1299,101 @@ def main(argv: list[str] | None = None) -> int:
             model=args.model,
             provider_mode=provider_mode,
             timeout_seconds=args.timeout_seconds,
+            provider=args.provider,
+            api_base_url=args.api_base_url,
+            api_key_env_var=args.api_key_env_var,
         )
         runtime = common.build_runtime_config(config, workspace=workspace)
         provider_health = common.build_provider_health(config, runtime)
-        provider_health["provider_mode"] = provider_mode.value
+        provider_health["provider_mode"] = provider_mode_label
+        provider_health["provider_mode_strategy"] = provider_mode.value
+        if prompt_tool_strategy is not None:
+            provider_health["prompt_tool_strategy"] = prompt_tool_strategy
         provider_health_reports.append(provider_health)
 
         mode_results: list[dict[str, Any]] = []
         known_session_id: str | None = None
-        for name in selected:
-            try:
-                if name.startswith("chat_"):
-                    result = _run_with_timeout(
-                        timeout_seconds=args.timeout_seconds,
-                        fn=partial(
-                            _run_chat_scenario,
-                            name=name,
-                            provider_mode=provider_mode,
-                            provider_health=provider_health,
-                            config=config,
-                            runtime=runtime,
-                            mode_output_dir=mode_output_dir,
-                        ),
-                    )
-                elif name == "research_repo_investigation":
-                    result = _run_with_timeout(
-                        timeout_seconds=args.timeout_seconds,
-                        fn=partial(
-                            _run_research_launch,
-                            provider_mode=provider_mode,
-                            provider_health=provider_health,
-                            config=config,
-                            runtime=runtime,
-                        ),
-                    )
-                    if result.get("status") == common.SCENARIO_STATUS_PASSED:
-                        known_session_id = str(result.get("session_id"))
-                elif name == "research_approval_resume_write_flow":
-                    result = _run_with_timeout(
-                        timeout_seconds=args.timeout_seconds,
-                        fn=partial(
-                            _run_research_approval_resume_write_flow,
-                            provider_mode=provider_mode,
-                            provider_health=provider_health,
-                            config=config,
-                            runtime=runtime,
-                            mode_output_dir=mode_output_dir,
-                        ),
-                    )
-                else:
-                    result = _run_with_timeout(
-                        timeout_seconds=args.timeout_seconds,
-                        fn=partial(
-                            _run_research_followup,
-                            provider_mode=provider_mode,
-                            provider_health=provider_health,
-                            config=config,
-                            runtime=runtime,
-                            known_session_id=known_session_id,
-                        ),
-                    )
-            except Exception as exc:  # pragma: no cover - probe failure path
-                result = {
-                    "name": name,
-                    "kind": "chat" if name.startswith("chat_") else "research",
-                    "provider_mode": provider_mode.value,
-                    "provider_health": provider_health,
-                    "status": common.SCENARIO_STATUS_FAILED,
-                    "summary": "Scenario execution raised an exception.",
-                    "failure": common.failure_payload(exc),
-                }
-            mode_results.append(result)
-            results.append(result)
-            common.write_json(mode_output_dir / f"{name}.json", result)
+        try:
+            for name in selected:
+                try:
+                    if name.startswith("chat_"):
+                        result = _run_with_timeout(
+                            timeout_seconds=args.timeout_seconds,
+                            fn=partial(
+                                _run_chat_scenario,
+                                name=name,
+                                provider_mode=provider_mode,
+                                provider_health=provider_health,
+                                config=config,
+                                runtime=runtime,
+                                mode_output_dir=mode_output_dir,
+                            ),
+                        )
+                    elif name == "research_repo_investigation":
+                        result = _run_with_timeout(
+                            timeout_seconds=args.timeout_seconds,
+                            fn=partial(
+                                _run_research_launch,
+                                provider_mode=provider_mode,
+                                provider_health=provider_health,
+                                config=config,
+                                runtime=runtime,
+                            ),
+                        )
+                        if result.get("status") == common.SCENARIO_STATUS_PASSED:
+                            known_session_id = str(result.get("session_id"))
+                    elif name == "research_approval_resume_write_flow":
+                        result = _run_with_timeout(
+                            timeout_seconds=args.timeout_seconds,
+                            fn=partial(
+                                _run_research_approval_resume_write_flow,
+                                provider_mode=provider_mode,
+                                provider_health=provider_health,
+                                config=config,
+                                runtime=runtime,
+                                mode_output_dir=mode_output_dir,
+                            ),
+                        )
+                    else:
+                        result = _run_with_timeout(
+                            timeout_seconds=args.timeout_seconds,
+                            fn=partial(
+                                _run_research_followup,
+                                provider_mode=provider_mode,
+                                provider_health=provider_health,
+                                config=config,
+                                runtime=runtime,
+                                known_session_id=known_session_id,
+                            ),
+                        )
+                except Exception as exc:  # pragma: no cover - probe failure path
+                    result = {
+                        "name": name,
+                        "kind": "chat" if name.startswith("chat_") else "research",
+                        "provider_mode": provider_mode_label,
+                        "provider_health": provider_health,
+                        "status": common.SCENARIO_STATUS_FAILED,
+                        "summary": "Scenario execution raised an exception.",
+                        "failure": common.failure_payload(exc),
+                    }
+                result["provider_mode"] = provider_mode_label
+                mode_results.append(result)
+                results.append(result)
+                common.write_json(mode_output_dir / f"{name}.json", result)
+        finally:
+            if old_prompt_tool_strategy is None:
+                os.environ.pop("LLM_TOOLS_PROMPT_TOOL_STRATEGY", None)
+            else:
+                os.environ["LLM_TOOLS_PROMPT_TOOL_STRATEGY"] = old_prompt_tool_strategy
 
         mode_payload = {
             "run_kind": "backend_matrix",
             "workspace": str(workspace),
             "output_dir": str(mode_output_dir),
             "selected_scenarios": selected,
-            "provider_mode": provider_mode.value,
+            "provider_mode": provider_mode_label,
+            "provider_mode_strategy": provider_mode.value,
+            "prompt_tool_strategy": prompt_tool_strategy,
             "provider_health": provider_health,
             "results": mode_results,
         }
@@ -1263,7 +1402,7 @@ def main(argv: list[str] | None = None) -> int:
         common.write_text(
             mode_output_dir / "summary.md",
             common.results_markdown(
-                title=f"Backend Assistant E2E Probe ({provider_mode.value})",
+                title=f"Backend Assistant E2E Probe ({provider_mode_label})",
                 results=mode_results,
                 provider_health=provider_health,
             ),
@@ -1274,7 +1413,7 @@ def main(argv: list[str] | None = None) -> int:
         "workspace": str(workspace),
         "output_dir": str(output_dir),
         "selected_scenarios": selected,
-        "selected_provider_modes": [mode.value for mode in selected_modes],
+        "selected_provider_modes": [label for label, _, _ in selected_modes],
         "provider_health": provider_health_reports,
         "mode_runs": per_mode_runs,
         "results": results,

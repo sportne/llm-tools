@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable, Sequence
 from typing import TypeVar, cast
 
@@ -21,6 +22,7 @@ from llm_tools.llm_adapters import (
     ActionEnvelopeAdapter,
     ParsedModelResponse,
     PromptToolAdapter,
+    PromptToolCategory,
 )
 from llm_tools.llm_providers import OpenAICompatibleProvider, ProviderModeStrategy
 from llm_tools.tool_api import ToolContext, ToolRegistry, ToolSpec
@@ -29,12 +31,17 @@ from llm_tools.workflow_api.protection import ProtectionController
 from llm_tools.workflow_api.staged_structured import (
     StagedStructuredToolRunner,
     format_invalid_payload,
+    is_repairable_stage_error,
     repair_stage_guidance,
     tool_spec_by_name,
     validation_error_summary,
 )
 
 _StagedStepT = TypeVar("_StagedStepT")
+_PROMPT_TOOL_STRATEGY_ENV = "LLM_TOOLS_PROMPT_TOOL_STRATEGY"
+_PROMPT_TOOL_CATEGORY_THRESHOLD_ENV = "LLM_TOOLS_PROMPT_TOOL_CATEGORY_THRESHOLD"
+_DEFAULT_PROMPT_TOOL_CATEGORY_THRESHOLD = 7
+_PROMPT_TOOL_SINGLE_ACTION_STRATEGIES = {"single_action", "single-action", "single"}
 
 
 class AssistantHarnessTurnProvider:
@@ -323,6 +330,29 @@ class AssistantHarnessTurnProvider:
         messages: list[dict[str, str]],
         prepared_interaction: PreparedModelInteraction,
     ) -> ParsedModelResponse:
+        if self._uses_prompt_tool_category_strategy(prepared_interaction.tool_specs):
+            return self._run_prompt_tool_category(
+                messages=messages,
+                prepared_interaction=prepared_interaction,
+            )
+        if self._uses_prompt_tool_single_action_strategy():
+            return self._run_prompt_tool_single_action(
+                messages=messages,
+                prepared_interaction=prepared_interaction,
+                tool_specs=prepared_interaction.tool_specs,
+                selected_category=None,
+            )
+        return self._run_prompt_tool_split(
+            messages=messages,
+            prepared_interaction=prepared_interaction,
+        )
+
+    def _run_prompt_tool_split(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        prepared_interaction: PreparedModelInteraction,
+    ) -> ParsedModelResponse:
         decision = self._run_prompt_tool_step(
             stage_name="decision",
             messages=self._prompt_tool_adapter.decision_stage_messages(
@@ -376,7 +406,109 @@ class AssistantHarnessTurnProvider:
             },
         )
 
+    def _run_prompt_tool_category(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        prepared_interaction: PreparedModelInteraction,
+    ) -> ParsedModelResponse:
+        categories = self._prompt_tool_adapter.derive_tool_categories(
+            prepared_interaction.tool_specs
+        )
+        category_decision = self._run_prompt_tool_step(
+            stage_name="category",
+            messages=self._prompt_tool_adapter.category_decision_stage_messages(
+                base_messages=messages,
+                categories=categories,
+                final_response_model=str,
+            ),
+            parser=lambda text: self._prompt_tool_adapter.parse_category_decision(
+                text,
+                categories=categories,
+            ),
+            repair_context={"categories": categories, "final_response_model": str},
+        )
+        if category_decision.mode == "finalize":
+            return self._run_prompt_tool_step(
+                stage_name="final_response",
+                messages=self._prompt_tool_adapter.final_response_stage_messages(
+                    base_messages=messages,
+                    final_response_model=str,
+                ),
+                parser=lambda text: self._prompt_tool_adapter.parse_final_response(
+                    text,
+                    final_response_model=str,
+                ),
+                repair_context={"final_response_model": str},
+            )
+
+        category_name = category_decision.category
+        if not isinstance(category_name, str) or category_name.strip() == "":
+            raise ValueError("Prompt-tool category step did not select a category.")
+        return self._run_prompt_tool_single_action(
+            messages=messages,
+            prepared_interaction=prepared_interaction,
+            tool_specs=self._prompt_tool_adapter.category_tool_specs(
+                categories,
+                category_name,
+            ),
+            selected_category=category_name,
+        )
+
+    def _run_prompt_tool_single_action(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        prepared_interaction: PreparedModelInteraction,
+        tool_specs: list[ToolSpec],
+        selected_category: str | None,
+    ) -> ParsedModelResponse:
+        return self._run_prompt_tool_step(
+            stage_name="action",
+            messages=self._prompt_tool_adapter.single_action_stage_messages(
+                base_messages=messages,
+                tool_specs=tool_specs,
+                input_models=prepared_interaction.input_models,
+                final_response_model=str,
+                selected_category=selected_category,
+            ),
+            parser=lambda text: self._prompt_tool_adapter.parse_single_action(
+                text,
+                tool_specs=tool_specs,
+                input_models=prepared_interaction.input_models,
+                final_response_model=str,
+            ),
+            repair_context={
+                "tool_specs": tool_specs,
+                "input_models": prepared_interaction.input_models,
+                "final_response_model": str,
+            },
+        )
+
     async def _run_prompt_tool_async(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        prepared_interaction: PreparedModelInteraction,
+    ) -> ParsedModelResponse:
+        if self._uses_prompt_tool_category_strategy(prepared_interaction.tool_specs):
+            return await self._run_prompt_tool_category_async(
+                messages=messages,
+                prepared_interaction=prepared_interaction,
+            )
+        if self._uses_prompt_tool_single_action_strategy():
+            return await self._run_prompt_tool_single_action_async(
+                messages=messages,
+                prepared_interaction=prepared_interaction,
+                tool_specs=prepared_interaction.tool_specs,
+                selected_category=None,
+            )
+        return await self._run_prompt_tool_split_async(
+            messages=messages,
+            prepared_interaction=prepared_interaction,
+        )
+
+    async def _run_prompt_tool_split_async(
         self,
         *,
         messages: list[dict[str, str]],
@@ -435,6 +567,85 @@ class AssistantHarnessTurnProvider:
             },
         )
 
+    async def _run_prompt_tool_category_async(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        prepared_interaction: PreparedModelInteraction,
+    ) -> ParsedModelResponse:
+        categories = self._prompt_tool_adapter.derive_tool_categories(
+            prepared_interaction.tool_specs
+        )
+        category_decision = await self._run_prompt_tool_step_async(
+            stage_name="category",
+            messages=self._prompt_tool_adapter.category_decision_stage_messages(
+                base_messages=messages,
+                categories=categories,
+                final_response_model=str,
+            ),
+            parser=lambda text: self._prompt_tool_adapter.parse_category_decision(
+                text,
+                categories=categories,
+            ),
+            repair_context={"categories": categories, "final_response_model": str},
+        )
+        if category_decision.mode == "finalize":
+            return await self._run_prompt_tool_step_async(
+                stage_name="final_response",
+                messages=self._prompt_tool_adapter.final_response_stage_messages(
+                    base_messages=messages,
+                    final_response_model=str,
+                ),
+                parser=lambda text: self._prompt_tool_adapter.parse_final_response(
+                    text,
+                    final_response_model=str,
+                ),
+                repair_context={"final_response_model": str},
+            )
+
+        category_name = category_decision.category
+        if not isinstance(category_name, str) or category_name.strip() == "":
+            raise ValueError("Prompt-tool category step did not select a category.")
+        return await self._run_prompt_tool_single_action_async(
+            messages=messages,
+            prepared_interaction=prepared_interaction,
+            tool_specs=self._prompt_tool_adapter.category_tool_specs(
+                categories,
+                category_name,
+            ),
+            selected_category=category_name,
+        )
+
+    async def _run_prompt_tool_single_action_async(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        prepared_interaction: PreparedModelInteraction,
+        tool_specs: list[ToolSpec],
+        selected_category: str | None,
+    ) -> ParsedModelResponse:
+        return await self._run_prompt_tool_step_async(
+            stage_name="action",
+            messages=self._prompt_tool_adapter.single_action_stage_messages(
+                base_messages=messages,
+                tool_specs=tool_specs,
+                input_models=prepared_interaction.input_models,
+                final_response_model=str,
+                selected_category=selected_category,
+            ),
+            parser=lambda text: self._prompt_tool_adapter.parse_single_action(
+                text,
+                tool_specs=tool_specs,
+                input_models=prepared_interaction.input_models,
+                final_response_model=str,
+            ),
+            repair_context={
+                "tool_specs": tool_specs,
+                "input_models": prepared_interaction.input_models,
+                "final_response_model": str,
+            },
+        )
+
     def _run_prompt_tool_step(
         self,
         *,
@@ -459,7 +670,7 @@ class AssistantHarnessTurnProvider:
                 )
                 return parser(text)
             except Exception as exc:
-                if repair_attempts >= 2:
+                if repair_attempts >= 2 or not is_repairable_stage_error(exc):
                     raise
                 repair_attempts += 1
                 invalid_payload: object | None = text
@@ -502,7 +713,7 @@ class AssistantHarnessTurnProvider:
                 )
                 return parser(text)
             except Exception as exc:
-                if repair_attempts >= 2:
+                if repair_attempts >= 2 or not is_repairable_stage_error(exc):
                     raise
                 repair_attempts += 1
                 invalid_payload: object | None = text
@@ -530,6 +741,8 @@ class AssistantHarnessTurnProvider:
         repair_context: dict[str, object],
     ) -> str:
         tool_specs_value = repair_context.get("tool_specs")
+        input_models_value = repair_context.get("input_models")
+        categories_value = repair_context.get("categories")
         selected_tool_value = repair_context.get("selected_tool")
         input_model_value = repair_context.get("input_model")
         return self._prompt_tool_adapter.repair_stage_message(
@@ -539,6 +752,16 @@ class AssistantHarnessTurnProvider:
             tool_specs=(
                 cast(list[ToolSpec], tool_specs_value)
                 if isinstance(tool_specs_value, list)
+                else None
+            ),
+            input_models=(
+                cast(dict[str, type[BaseModel]], input_models_value)
+                if isinstance(input_models_value, dict)
+                else None
+            ),
+            categories=(
+                cast(list[PromptToolCategory], categories_value)
+                if isinstance(categories_value, list)
                 else None
             ),
             selected_tool=(
@@ -569,6 +792,29 @@ class AssistantHarnessTurnProvider:
     @staticmethod
     def _tool_spec(tool_specs: list[ToolSpec], tool_name: str) -> ToolSpec:
         return tool_spec_by_name(tool_specs, tool_name)
+
+    @classmethod
+    def _uses_prompt_tool_category_strategy(cls, tool_specs: list[ToolSpec]) -> bool:
+        if os.environ.get(_PROMPT_TOOL_STRATEGY_ENV, "").strip().lower() != "category":
+            return False
+        if len(tool_specs) < cls._prompt_tool_category_threshold():
+            return False
+        return len(PromptToolAdapter.derive_tool_categories(tool_specs)) > 1
+
+    @staticmethod
+    def _uses_prompt_tool_single_action_strategy() -> bool:
+        strategy = os.environ.get(_PROMPT_TOOL_STRATEGY_ENV, "").strip().lower()
+        return strategy in _PROMPT_TOOL_SINGLE_ACTION_STRATEGIES
+
+    @staticmethod
+    def _prompt_tool_category_threshold() -> int:
+        raw_value = os.environ.get(_PROMPT_TOOL_CATEGORY_THRESHOLD_ENV)
+        if raw_value is None:
+            return _DEFAULT_PROMPT_TOOL_CATEGORY_THRESHOLD
+        try:
+            return max(int(raw_value), 1)
+        except ValueError:
+            return _DEFAULT_PROMPT_TOOL_CATEGORY_THRESHOLD
 
 
 def build_live_harness_provider(

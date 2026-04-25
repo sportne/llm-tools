@@ -22,6 +22,7 @@ from llm_tools.apps.assistant_config import (  # noqa: E402
     StreamlitAssistantConfig,
     load_streamlit_assistant_config,
 )
+from llm_tools.apps.chat_config import ProviderPreset  # noqa: E402
 from llm_tools.apps.streamlit_assistant.runtime import (  # noqa: E402
     _create_provider_for_runtime,
     _llm_config_for_runtime,
@@ -90,8 +91,13 @@ def build_assistant_config(
     model: str,
     provider_mode: ProviderModeStrategy,
     timeout_seconds: float,
+    provider: str = "ollama",
+    api_base_url: str | None = None,
+    api_key_env_var: str | None = None,
 ) -> StreamlitAssistantConfig:
     """Build the local-only assistant config used by the probe scripts."""
+    effective_base_url = api_base_url or ollama_base_url
+    provider_preset = ProviderPreset(provider)
     template = load_streamlit_assistant_config(
         REPO_ROOT / "examples" / "assistant_configs" / "harness-research-chat.yaml"
     )
@@ -99,10 +105,12 @@ def build_assistant_config(
         update={
             "llm": template.llm.model_copy(
                 update={
-                    "api_base_url": ollama_base_url,
+                    "provider": provider_preset,
+                    "api_base_url": effective_base_url,
                     "model_name": model,
                     "provider_mode_strategy": provider_mode,
                     "timeout_seconds": timeout_seconds,
+                    "api_key_env_var": api_key_env_var,
                 }
             ),
             "policy": template.policy.model_copy(

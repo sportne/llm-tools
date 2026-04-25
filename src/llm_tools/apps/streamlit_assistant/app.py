@@ -1532,6 +1532,7 @@ def _build_assistant_runner(
             enabled_tool_names=exposed_tool_names,
             workspace_enabled=root is not None,
             staged_schema_protocol=_uses_staged_schema_protocol(provider),
+            interaction_protocol=_assistant_interaction_protocol(provider),
         ),
         base_context=build_assistant_context(
             root_path=root,
@@ -1553,6 +1554,15 @@ def _uses_staged_schema_protocol(provider: ModelTurnProvider) -> bool:
     if not callable(preference):
         return False
     return bool(preference())
+
+
+def _assistant_interaction_protocol(provider: ModelTurnProvider) -> str:
+    prompt_tool_preference = getattr(provider, "uses_prompt_tool_protocol", None)
+    if callable(prompt_tool_preference) and bool(prompt_tool_preference()):
+        return "prompt_tools"
+    if _uses_staged_schema_protocol(provider):
+        return "staged_json"
+    return "native_tools"
 
 
 def _serialize_workflow_event(

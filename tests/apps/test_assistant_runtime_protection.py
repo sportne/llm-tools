@@ -7,6 +7,8 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from llm_tools.apps.assistant_config import StreamlitAssistantConfig
 from llm_tools.apps.assistant_runtime import (
     AssistantHarnessTurnProvider,
@@ -234,6 +236,25 @@ def _prepared_research_interaction(
         tool_names=[binding.spec.name],
         tool_specs=[binding.spec],
         input_models={binding.spec.name: binding.input_model},
+    )
+
+
+def _prepared_research_interaction_for_tools(
+    tool_names: list[str],
+) -> PreparedModelInteraction:
+    registry = build_assistant_registry()
+    bindings = [
+        item for item in registry.list_bindings() if item.spec.name in set(tool_names)
+    ]
+    bindings.sort(key=lambda item: tool_names.index(item.spec.name))
+    adapter = ActionEnvelopeAdapter()
+    response_model = adapter.build_final_response_step_model(final_response_model=str)
+    return PreparedModelInteraction(
+        response_model=response_model,
+        schema=adapter.export_schema(response_model),
+        tool_names=[binding.spec.name for binding in bindings],
+        tool_specs=[binding.spec for binding in bindings],
+        input_models={binding.spec.name: binding.input_model for binding in bindings},
     )
 
 
@@ -929,7 +950,6 @@ def test_direct_research_provider_prompt_tools_repairs_decision_and_tool_stage()
 
     provider = _PromptToolProvider(
         [
-            "not a decision block",
             "```decision\nMODE: tool\nTOOL_NAME: read_file\n```",
             "```tool\nTOOL_NAME: read_file\nBEGIN_ARG: path\nREADME.md\n```",
             ("```tool\nTOOL_NAME: read_file\nBEGIN_ARG: path\nREADME.md\nEND_ARG\n```"),
@@ -951,25 +971,22 @@ def test_direct_research_provider_prompt_tools_repairs_decision_and_tool_stage()
 
     assert parsed.invocations[0].tool_name == "read_file"
     assert parsed.invocations[0].arguments["path"] == "README.md"
-    assert len(provider.sync_messages) == 4
+    assert parsed.invocations[0].tool_call_id is not None
+    assert len(provider.sync_messages) == 3
     assert (
-        "The previous decision response was invalid."
-        in (provider.sync_messages[1][-1]["content"])
+        "The previous tool:read_file response was invalid."
+        in (provider.sync_messages[2][-1]["content"])
     )
-    tool_repair = provider.sync_messages[3][-1]["content"]
-    assert "The previous tool:read_file response was invalid." in tool_repair
-    assert "Exact tool block shape:" in tool_repair
+    tool_repair = provider.sync_messages[2][-1]["content"]
+    assert "Selected tool schema:" in tool_repair
 
 
 def test_direct_research_provider_prompt_tools_async_repairs_final_response() -> None:
     import llm_tools.apps.assistant_research_provider as provider_module
 
-    error = RuntimeError("transport response missing")
-    error.invalid_payload = "bad async final"  # type: ignore[attr-defined]
     provider = _PromptToolProvider(
         [
             "```decision\nMODE: finalize\n```",
-            error,
             "```final\nANSWER:\n```",
             "```final\nANSWER:\nDone async.\n```",
         ]
@@ -991,9 +1008,224 @@ def test_direct_research_provider_prompt_tools_async_repairs_final_response() ->
     )
 
     assert parsed.final_response == "Done async."
-    assert len(provider.async_messages) == 4
-    assert "bad async final" in provider.async_messages[2][-1]["content"]
-    assert "Finalization rules:" in provider.async_messages[3][-1]["content"]
+    assert len(provider.async_messages) == 3
+    assert "Finalization rules:" in provider.async_messages[2][-1]["content"]
+
+
+def test_direct_research_provider_prompt_tools_single_action_env_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "single_action")
+    provider = _PromptToolProvider(
+        [
+            "```tool\nTOOL_NAME: read_file\nBEGIN_ARG: path\nREADME.md\nEND_ARG\n```",
+        ]
+    )
+    harness_provider = provider_module.AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+
+    parsed = harness_provider.run(
+        state=object(),
+        selected_task_ids=["task-single-action"],
+        context=ToolContext(invocation_id="research-single-action", metadata={}),
+        adapter=ActionEnvelopeAdapter(),
+        prepared_interaction=_prepared_research_interaction(),
+    )
+
+    assert parsed.invocations[0].tool_name == "read_file"
+    assert "Prompt-tool output contract:" in provider.sync_messages[0][-1]["content"]
+
+
+def test_direct_research_provider_prompt_tools_async_split_tool_flow() -> None:
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    provider = _PromptToolProvider(
+        [
+            "```decision\nMODE: tool\nTOOL_NAME: read_file\n```",
+            "```tool\nTOOL_NAME: read_file\nBEGIN_ARG: path\nREADME.md\nEND_ARG\n```",
+        ]
+    )
+    harness_provider = provider_module.AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+
+    parsed = asyncio.run(
+        harness_provider.run_async(
+            state=object(),
+            selected_task_ids=["task-split-async-tool"],
+            context=ToolContext(invocation_id="research-split-async-tool", metadata={}),
+            adapter=ActionEnvelopeAdapter(),
+            prepared_interaction=_prepared_research_interaction(),
+        )
+    )
+
+    assert parsed.invocations[0].tool_name == "read_file"
+    assert len(provider.async_messages) == 2
+    assert (
+        "The selected tool is fixed: read_file"
+        in provider.async_messages[1][-1]["content"]
+    )
+
+
+def test_direct_research_provider_prompt_tools_category_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "category")
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_CATEGORY_THRESHOLD", "1")
+    provider = _PromptToolProvider(
+        [
+            "```category\nMODE: category\nCATEGORY: text\n```",
+            (
+                "```tool\n"
+                "TOOL_NAME: search_text\n"
+                "BEGIN_ARG: path\n.\nEND_ARG\n"
+                "BEGIN_ARG: query\nneedle\nEND_ARG\n"
+                "```"
+            ),
+        ]
+    )
+    harness_provider = provider_module.AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+
+    parsed = harness_provider.run(
+        state=object(),
+        selected_task_ids=["task-category"],
+        context=ToolContext(invocation_id="research-category", metadata={}),
+        adapter=ActionEnvelopeAdapter(),
+        prepared_interaction=_prepared_research_interaction_for_tools(
+            ["read_file", "search_text"]
+        ),
+    )
+
+    assert parsed.invocations[0].tool_name == "search_text"
+    assert parsed.invocations[0].arguments == {"path": ".", "query": "needle"}
+    assert "Available categories:" in provider.sync_messages[0][-1]["content"]
+    assert "Current tool category: text" in provider.sync_messages[1][-1]["content"]
+
+
+def test_direct_research_provider_prompt_tools_category_finalize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "category")
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_CATEGORY_THRESHOLD", "1")
+    provider = _PromptToolProvider(
+        [
+            "```category\nMODE: finalize\n```",
+            "```final\nANSWER:\nDone category.\n```",
+        ]
+    )
+    harness_provider = provider_module.AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+
+    parsed = harness_provider.run(
+        state=object(),
+        selected_task_ids=["task-category-final"],
+        context=ToolContext(invocation_id="research-category-final", metadata={}),
+        adapter=ActionEnvelopeAdapter(),
+        prepared_interaction=_prepared_research_interaction_for_tools(
+            ["read_file", "search_text"]
+        ),
+    )
+
+    assert parsed.final_response == "Done category."
+    assert "```category" in provider.sync_messages[0][-1]["content"]
+    assert "```final" in provider.sync_messages[1][-1]["content"]
+
+
+def test_direct_research_provider_prompt_tools_category_async_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "category")
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_CATEGORY_THRESHOLD", "bad")
+    assert (
+        provider_module.AssistantHarnessTurnProvider._prompt_tool_category_threshold()
+        == 7
+    )
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_CATEGORY_THRESHOLD", "1")
+    provider = _PromptToolProvider(
+        [
+            "```category\nMODE: category\nCATEGORY: filesystem\n```",
+            ("```tool\nTOOL_NAME: read_file\nBEGIN_ARG: path\nREADME.md\nEND_ARG\n```"),
+        ]
+    )
+    harness_provider = provider_module.AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+
+    parsed = asyncio.run(
+        harness_provider.run_async(
+            state=object(),
+            selected_task_ids=["task-category-async"],
+            context=ToolContext(invocation_id="research-category-async", metadata={}),
+            adapter=ActionEnvelopeAdapter(),
+            prepared_interaction=_prepared_research_interaction_for_tools(
+                ["read_file", "search_text"]
+            ),
+        )
+    )
+
+    assert parsed.invocations[0].tool_name == "read_file"
+    assert parsed.invocations[0].arguments["path"] == "README.md"
+    assert len(provider.async_messages) == 2
+
+
+def test_direct_research_provider_prompt_tools_category_async_finalize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import llm_tools.apps.assistant_research_provider as provider_module
+
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "category")
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_CATEGORY_THRESHOLD", "1")
+    provider = _PromptToolProvider(
+        [
+            "```category\nMODE: finalize\n```",
+            "```final\nANSWER:\nDone async category.\n```",
+        ]
+    )
+    harness_provider = provider_module.AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+
+    parsed = asyncio.run(
+        harness_provider.run_async(
+            state=object(),
+            selected_task_ids=["task-category-async-final"],
+            context=ToolContext(
+                invocation_id="research-category-async-final",
+                metadata={},
+            ),
+            adapter=ActionEnvelopeAdapter(),
+            prepared_interaction=_prepared_research_interaction_for_tools(
+                ["read_file", "search_text"]
+            ),
+        )
+    )
+
+    assert parsed.final_response == "Done async category."
+    assert "MODE is not a category name" in provider.async_messages[0][-1]["content"]
 
 
 def test_direct_research_provider_prompt_tools_requires_text_transport() -> None:
@@ -1137,7 +1369,9 @@ def test_direct_research_provider_rejects_unprepared_staged_and_prompt_tools() -
 
     staged_provider = _StagedProvider([{"mode": "tool", "tool_name": "read_file"}])
     prompt_provider = _PromptToolProvider(
-        ["```decision\nMODE: tool\nTOOL_NAME: read_file\n```"]
+        [
+            "```decision\nMODE: tool\nTOOL_NAME: read_file\n```",
+        ]
     )
     prepared = _prepared_research_interaction()
     prepared_without_input = replace(prepared, input_models={})
@@ -1185,7 +1419,7 @@ def test_direct_research_provider_prompt_tools_raise_after_two_repairs() -> None
 
     provider = _PromptToolProvider(
         [
-            "not a decision block",
+            "not an action block",
             "still wrong",
             "wrong again",
         ]

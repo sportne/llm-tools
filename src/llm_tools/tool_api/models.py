@@ -104,6 +104,7 @@ class ToolInvocationRequest(BaseModel):
 
     tool_name: str = Field(min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
+    tool_call_id: str | None = None
 
 
 class RetryableToolExecutionError(RuntimeError):

@@ -391,6 +391,48 @@ class StagedStructuredToolRunner:
             },
         ]
 
+    def single_action_stage_messages(
+        self,
+        *,
+        base_messages: Sequence[dict[str, Any]],
+        tool_specs: list[ToolSpec],
+        response_model: type[BaseModel],
+        decision_context: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return the single-stage structured tool-or-final prompt."""
+        tool_catalog = json.dumps(
+            self._adapter.export_compact_tool_catalog(tool_specs),
+            indent=2,
+            sort_keys=True,
+        )
+        schema = json.dumps(
+            self._adapter.export_schema(response_model),
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+        context_text = (
+            f"\n\nCurrent turn tool-use context:\n{decision_context}"
+            if decision_context
+            else ""
+        )
+        return [
+            *base_messages,
+            {
+                "role": "system",
+                "content": (
+                    "Current step: choose exactly one next action.\n"
+                    "Return mode='tool' with one tool_name and arguments, or "
+                    "mode='finalize' with final_response.\n"
+                    "Do not return multiple tool calls. Do not mix tool and final response.\n"
+                    f"Available tools:\n{tool_catalog}"
+                    f"{context_text}\n\n"
+                    "The response must satisfy this schema exactly:\n"
+                    f"{schema}"
+                ),
+            },
+        ]
+
     def final_response_stage_messages(
         self,
         *,
@@ -432,7 +474,10 @@ class StagedStructuredToolRunner:
             sort_keys=True,
             default=str,
         )
-        invalid_payload_text = format_invalid_payload(invalid_payload)
+        invalid_payload_text = format_invalid_payload(
+            invalid_payload,
+            stage_name=stage_name,
+        )
         return (
             f"The previous {stage_name} response was invalid.\n"
             "Correct the response for the same stage only.\n"
@@ -512,6 +557,8 @@ def is_repairable_stage_error(error: Exception) -> bool:
             return False
         if module_name.startswith("pydantic"):
             return True
+        if module_name == "llm_tools.llm_adapters.prompt_tools":
+            return True
 
         class_name = candidate_type.__name__.lower()
         if isinstance(candidate, ValueError) and (
@@ -570,19 +617,49 @@ def repair_stage_guidance(stage_name: str) -> str:
             "Finalization stage rules: return only mode='finalize' and final_response. "
             "Do not include tool_name or arguments."
         )
+    if stage_name == "single_action":
+        return (
+            "Single-action rules: return mode='tool' with one tool_name and arguments, "
+            "or mode='finalize' with final_response. Do not include an actions list."
+        )
     return "Return only the fields required for this stage."
 
 
-def format_invalid_payload(invalid_payload: object | None) -> str:
+def format_invalid_payload(
+    invalid_payload: object | None,
+    *,
+    stage_name: str | None = None,
+) -> str:
     """Return a compact representation of the invalid payload."""
     if invalid_payload is None:
         return "(unavailable)"
     if isinstance(invalid_payload, str):
-        return invalid_payload
+        return _summarize_invalid_payload(invalid_payload, stage_name=stage_name)
     try:
-        return json.dumps(invalid_payload, indent=2, sort_keys=True, default=str)
+        rendered = json.dumps(invalid_payload, indent=2, sort_keys=True, default=str)
     except TypeError:
-        return str(invalid_payload)
+        rendered = str(invalid_payload)
+    return _summarize_invalid_payload(rendered, stage_name=stage_name)
+
+
+def _summarize_invalid_payload(payload: str, *, stage_name: str | None) -> str:
+    lowered = payload.lower()
+    envelope_like = '"actions"' in lowered or (
+        '"final_response"' in lowered and '"mode"' not in lowered
+    )
+    if envelope_like:
+        return (
+            "Previous output used a structured action-envelope shape. "
+            f"The current {stage_name or 'stage'} requires only its active schema."
+        )
+    if "```" in payload:
+        return (
+            "Previous output included fenced text. "
+            f"The current {stage_name or 'stage'} requires structured JSON only."
+        )
+    if len(payload) > 800:
+        return payload[:800] + "...(truncated)"
+    return payload
 
 
 def tool_spec_by_name(tool_specs: list[ToolSpec], tool_name: str) -> ToolSpec:

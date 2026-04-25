@@ -24,6 +24,7 @@ from llm_tools.tools import register_filesystem_tools, register_text_tools
 from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import (
     ChatFinalResponse,
+    ChatMessage,
     ChatSessionConfig,
     ChatSessionState,
     ChatWorkflowApprovalEvent,
@@ -38,6 +39,7 @@ from llm_tools.workflow_api import (
     WorkflowExecutor,
     run_interactive_chat_session_turn,
 )
+from llm_tools.workflow_api.chat_runner import ChatSessionTurnRunner
 from llm_tools.workflow_api.models import (
     ApprovalRequest,
     WorkflowInvocationOutcome,
@@ -57,11 +59,53 @@ class _FakeProvider:
         return self._responses.pop(0)
 
 
+class _FakeNativeLimitProvider:
+    def __init__(self, first_response: ParsedModelResponse, final_answer: str) -> None:
+        self._first_response = first_response
+        self._final_answer = final_answer
+        self.run_messages: list[list[dict[str, object]]] = []
+        self.structured_messages: list[list[dict[str, object]]] = []
+        self.response_model_names: list[str] = []
+
+    def run(self, **kwargs) -> ParsedModelResponse:
+        messages = kwargs["messages"]
+        assert isinstance(messages, list)
+        self.run_messages.append([dict(message) for message in messages])
+        return self._first_response
+
+    def run_structured(self, **kwargs) -> ChatFinalResponse:
+        messages = kwargs["messages"]
+        assert isinstance(messages, list)
+        self.structured_messages.append([dict(message) for message in messages])
+        self.response_model_names.append(kwargs["response_model"].__name__)
+        return ChatFinalResponse(answer=self._final_answer)
+
+
+class _FakeNativeTextFinalProvider(_FakeNativeLimitProvider):
+    def __init__(self, first_response: ParsedModelResponse, final_answer: str) -> None:
+        super().__init__(first_response, final_answer)
+        self.text_messages: list[list[dict[str, object]]] = []
+
+    def run_structured(self, **kwargs) -> object:
+        messages = kwargs["messages"]
+        assert isinstance(messages, list)
+        self.structured_messages.append([dict(message) for message in messages])
+        self.response_model_names.append(kwargs["response_model"].__name__)
+        raise ValueError("invalid json")
+
+    def run_text(self, **kwargs) -> str:
+        messages = kwargs["messages"]
+        assert isinstance(messages, list)
+        self.text_messages.append([dict(message) for message in messages])
+        return self._final_answer
+
+
 class _FakeStagedProvider:
     def __init__(self, responses: list[object]) -> None:
         self._responses = list(responses)
         self.calls: list[list[dict[str, object]]] = []
         self.response_model_names: list[str] = []
+        self.json_agent_strategy = "staged"
 
     def run(self, **kwargs) -> ParsedModelResponse:
         del kwargs
@@ -81,8 +125,14 @@ class _FakeStagedProvider:
         return True
 
 
+class _FakeSingleActionStagedProvider(_FakeStagedProvider):
+    def __init__(self, responses: list[object]) -> None:
+        super().__init__(responses)
+        self.json_agent_strategy = "single_action"
+
+
 class _FakePromptToolProvider:
-    def __init__(self, responses: list[str]) -> None:
+    def __init__(self, responses: list[str | Exception]) -> None:
         self._responses = list(responses)
         self.calls: list[list[dict[str, object]]] = []
 
@@ -98,7 +148,10 @@ class _FakePromptToolProvider:
         messages = kwargs["messages"]
         assert isinstance(messages, list)
         self.calls.append([dict(message) for message in messages])
-        return self._responses.pop(0)
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
     def uses_prompt_tool_protocol(self) -> bool:
         return True
@@ -122,6 +175,27 @@ class _FallbackPromptToolProvider(_FakePromptToolProvider):
         return exc is self.failure
 
 
+class _FallbackStagedPromptToolProvider(_FakePromptToolProvider):
+    def __init__(self, responses: list[str], *, failure: Exception) -> None:
+        super().__init__(responses)
+        self.failure = failure
+        self.structured_calls = 0
+
+    def run_structured(self, **kwargs) -> object:
+        del kwargs
+        self.structured_calls += 1
+        raise self.failure
+
+    def uses_prompt_tool_protocol(self) -> bool:
+        return False
+
+    def uses_staged_schema_protocol(self) -> bool:
+        return True
+
+    def can_fallback_to_prompt_tools(self, exc: Exception) -> bool:
+        return exc is self.failure
+
+
 class _CancelOnRunProvider:
     def __init__(self, response: ParsedModelResponse) -> None:
         self._response = response
@@ -132,6 +206,11 @@ class _CancelOnRunProvider:
         assert self.runner is not None
         self.runner.cancel()
         return self._response
+
+
+class _CallableJsonStrategyProvider(_FakeStagedProvider):
+    def json_agent_strategy(self) -> str:
+        return "decision"
 
 
 def _executor() -> WorkflowExecutor:
@@ -182,6 +261,147 @@ def _approval_request(
         requested_at="2026-01-01T00:00:00Z",
         expires_at=expires_at,
     )
+
+
+def test_chat_session_runner_summarizes_model_visible_assistant_history(
+    tmp_path: Path,
+) -> None:
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(),
+        executor=_empty_executor(),
+        provider=_FakePromptToolProvider(["```final\nANSWER:\nDone.\n```"]),
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+    tool_message = ChatMessage(
+        role="assistant",
+        content=(
+            '{"actions": ['
+            '{"tool_name": "read_file", "arguments": {"path": "README.md"}},'
+            '{"tool_name": 3, "arguments": []}'
+            "]}"
+        ),
+    )
+    final_message = ChatMessage(
+        role="assistant",
+        content='{"final_response": {"answer": "Done."}}',
+    )
+
+    serialized = runner._serialize_messages_for_model([tool_message, final_message])
+
+    assert serialized[0]["content"] == (
+        'Prior tool call record: name=read_file, arguments={"path":"README.md"}.'
+    )
+    assert serialized[1]["content"] == "Assistant final answer: Done."
+    assert ChatSessionTurnRunner._assistant_message_summary("not json") is None
+    assert ChatSessionTurnRunner._assistant_message_summary("[1, 2]") is None
+    assert (
+        ChatSessionTurnRunner._assistant_message_summary(
+            '{"actions": [{"arguments": {}}]}'
+        )
+        is None
+    )
+    assert (
+        ChatSessionTurnRunner._assistant_message_summary(
+            '{"final_response": "Plain final."}'
+        )
+        == "Assistant final answer: Plain final."
+    )
+
+
+def test_chat_session_runner_strategy_helpers_use_env_defaults(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(),
+        executor=_empty_executor(),
+        provider=_FakeStagedProvider([]),
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+    delattr(runner._provider, "json_agent_strategy")
+
+    monkeypatch.delenv("LLM_TOOLS_JSON_AGENT_STRATEGY", raising=False)
+    assert runner._uses_json_single_action_strategy() is True
+    monkeypatch.setenv("LLM_TOOLS_JSON_AGENT_STRATEGY", "decision")
+    assert runner._uses_json_single_action_strategy() is False
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_CATEGORY_THRESHOLD", "bad")
+    assert ChatSessionTurnRunner._prompt_tool_category_threshold() == 7
+
+
+def test_chat_session_runner_helper_error_branches(tmp_path: Path) -> None:
+    native_runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(),
+        executor=_empty_executor(),
+        provider=_FakeProvider([]),
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+    assistant_message = ChatMessage(
+        role="assistant",
+        content='{"final_response": ""}',
+    )
+
+    assert native_runner._serialize_chat_message_for_protocol(
+        assistant_message,
+        protocol="unknown",
+    ) == {"role": "assistant", "content": '{"final_response": ""}'}
+    assert native_runner._serialize_chat_message_for_protocol(
+        ChatMessage(role="assistant", content="{}"),
+        protocol="native_tools",
+    ) == {"role": "assistant", "content": "{}"}
+    with pytest.raises(RuntimeError, match="run_structured"):
+        native_runner._structured_provider()
+
+    prompt_step = native_runner._run_prompt_tool_step(
+        round_index=1,
+        stage_name="decision",
+        messages=[],
+        parser=lambda text: text,
+        repair_context={},
+    )
+    with pytest.raises(RuntimeError, match="run_text"):
+        next(prompt_step)
+
+    staged_runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(),
+        executor=_empty_executor(),
+        provider=_CallableJsonStrategyProvider([]),
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+    assert staged_runner._uses_json_single_action_strategy() is False
+
+    forced_final = native_runner._force_final_response_at_limit(
+        round_index=1,
+        messages=[ChatMessage(role="user", content="Answer plainly.")],
+        new_messages=[],
+        tool_results=[],
+    )
+    with pytest.raises(StopIteration) as exc_info:
+        next(forced_final)
+    assert exc_info.value.value is None
 
 
 def test_chat_session_runner_executes_tool_then_returns_final_response(
@@ -264,6 +484,17 @@ def test_chat_session_runner_executes_prompt_tool_rounds(tmp_path: Path) -> None
     events = list(runner)
 
     assert len(provider.calls) == 4
+    assistant_history = [
+        message["content"]
+        for message in provider.calls[2]
+        if message.get("role") == "assistant"
+    ]
+    assert assistant_history
+    assert all('"actions"' not in str(content) for content in assistant_history)
+    assert any(
+        "Prior tool call record: name=search_text" in str(content)
+        for content in assistant_history
+    )
     assert any(
         isinstance(event, ChatWorkflowStatusEvent) and event.status == "searching text"
         for event in events
@@ -335,6 +566,80 @@ def test_chat_session_runner_prompt_tool_path_honors_approval_gates(
     assert result_event.result.status == "completed"
     assert result_event.result.final_response is not None
     assert result_event.result.final_response.answer == "It is defined in src/app.py."
+
+
+def test_chat_session_runner_prompt_tool_category_strategy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "category")
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_CATEGORY_THRESHOLD", "1")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("needle = 1\n", encoding="utf-8")
+    provider = _FakePromptToolProvider(
+        [
+            "```category\nMODE: category\nCATEGORY: text\n```",
+            (
+                "```tool\n"
+                "TOOL_NAME: search_text\n"
+                "BEGIN_ARG: path\n.\nEND_ARG\n"
+                "BEGIN_ARG: query\nneedle\nEND_ARG\n"
+                "```"
+            ),
+            "```category\nMODE: finalize\n```",
+            "```final\nANSWER:\nIt is defined in src/app.py.\n```",
+        ]
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Where is needle defined?",
+        session_state=ChatSessionState(),
+        executor=_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(max_tool_result_chars=500),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    events = list(runner)
+
+    assert len(provider.calls) == 4
+    assert "Available categories:" in provider.calls[0][-1]["content"]
+    assert "Current tool category: text" in provider.calls[1][-1]["content"]
+    assert any(
+        isinstance(event, ChatWorkflowStatusEvent)
+        and event.status == "using text tools"
+        for event in events
+    )
+    result_event = events[-1]
+    assert isinstance(result_event, ChatWorkflowResultEvent)
+    assert result_event.result.final_response is not None
+    assert result_event.result.final_response.answer == "It is defined in src/app.py."
+
+
+def test_chat_session_runner_prompt_tool_does_not_repair_transport_failure(
+    tmp_path: Path,
+) -> None:
+    provider = _FakePromptToolProvider([RuntimeError("connection refused")])
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(),
+        executor=_empty_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(max_tool_result_chars=500),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    with pytest.raises(RuntimeError, match="connection refused"):
+        list(runner)
+
+    assert len(provider.calls) == 1
 
 
 def test_chat_session_runner_repairs_prompt_tool_final_response(
@@ -445,6 +750,97 @@ def test_chat_session_runner_auto_falls_back_to_prompt_tools(
     assert isinstance(result_event, ChatWorkflowResultEvent)
     assert result_event.result.final_response is not None
     assert result_event.result.final_response.answer == "Fallback answer."
+
+
+def test_chat_session_runner_staged_failure_falls_back_to_prompt_tools(
+    tmp_path: Path,
+) -> None:
+    failure = ValueError("invalid json schema response")
+    provider = _FallbackStagedPromptToolProvider(
+        [
+            "```decision\nMODE: finalize\n```",
+            "```final\nANSWER:\nFallback answer.\n```",
+        ],
+        failure=failure,
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(),
+        executor=_empty_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(max_tool_result_chars=500),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    events = list(runner)
+
+    assert provider.structured_calls == 3
+    assert len(provider.calls) == 2
+    assert any(
+        isinstance(event, ChatWorkflowStatusEvent)
+        and event.status == "using prompt tools"
+        for event in events
+    )
+    result_event = events[-1]
+    assert isinstance(result_event, ChatWorkflowResultEvent)
+    assert result_event.result.final_response is not None
+    assert result_event.result.final_response.answer == "Fallback answer."
+
+
+def test_chat_session_runner_executes_json_single_action_rounds(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("needle = 1\n", encoding="utf-8")
+    provider = _FakeSingleActionStagedProvider(
+        [
+            {
+                "mode": "tool",
+                "tool_name": "search_text",
+                "arguments": {"path": ".", "query": "needle"},
+            },
+            {
+                "mode": "finalize",
+                "final_response": {
+                    "answer": "It is defined in src/app.py.",
+                    "citations": [{"source_path": "src/app.py", "line_start": 1}],
+                },
+            },
+        ]
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Where is needle defined?",
+        session_state=ChatSessionState(),
+        executor=_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(max_tool_result_chars=500),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    events = list(runner)
+
+    assert provider.response_model_names == ["SingleActionStep", "SingleActionStep"]
+    assert (
+        "Current step: choose exactly one next action."
+        in provider.calls[0][-1]["content"]
+    )
+    assert any(
+        isinstance(event, ChatWorkflowStatusEvent)
+        and event.status == "preparing search_text"
+        for event in events
+    )
+    result_event = events[-1]
+    assert isinstance(result_event, ChatWorkflowResultEvent)
+    assert result_event.result.final_response is not None
+    assert result_event.result.final_response.answer == "It is defined in src/app.py."
 
 
 def test_chat_session_runner_retries_ungrounded_repo_answer_with_tools(
@@ -623,7 +1019,7 @@ def test_chat_session_runner_repairs_invalid_staged_final_response(
     assert isinstance(repair_message, str)
     assert "The previous final_response response was invalid." in repair_message
     assert "Validation summary:" in repair_message
-    assert '"citations": [' in repair_message
+    assert '"answer": "done"' in repair_message
 
 
 def test_chat_session_runner_with_no_tools_repairs_invalid_tool_decision(
@@ -1056,24 +1452,22 @@ def test_chat_session_runner_returns_continuation_for_total_tool_budget(
     assert "tool-call budget" in (result_event.result.continuation_reason or "")
 
 
-def test_chat_session_runner_returns_continuation_for_round_trip_budget(
+def test_chat_session_runner_forces_native_final_response_at_round_budget(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    provider = _FakeNativeLimitProvider(
+        ParsedModelResponse(
+            invocations=[{"tool_name": "list_directory", "arguments": {"path": "."}}]
+        ),
+        "The workspace contains src/app.py.",
+    )
     runner = run_interactive_chat_session_turn(
         user_message="Inspect once",
         session_state=ChatSessionState(),
         executor=_executor(),
-        provider=_FakeProvider(
-            [
-                ParsedModelResponse(
-                    invocations=[
-                        {"tool_name": "list_directory", "arguments": {"path": "."}}
-                    ]
-                )
-            ]
-        ),
+        provider=provider,
         system_prompt="You are helpful.",
         base_context=_context(tmp_path),
         session_config=ChatSessionConfig(max_tool_round_trips=1),
@@ -1082,10 +1476,57 @@ def test_chat_session_runner_returns_continuation_for_round_trip_budget(
         temperature=0.1,
     )
 
-    result_event = list(runner)[-1]
+    events = list(runner)
+    result_event = events[-1]
     assert isinstance(result_event, ChatWorkflowResultEvent)
-    assert result_event.result.status == "needs_continuation"
-    assert "more tool rounds" in (result_event.result.continuation_reason or "")
+    assert result_event.result.status == "completed"
+    assert result_event.result.final_response is not None
+    assert result_event.result.final_response.answer == (
+        "The workspace contains src/app.py."
+    )
+    assert (
+        "Tool rounds remaining after choosing a tool now: 0."
+        in provider.run_messages[0][-1]["content"]
+    )
+    assert provider.response_model_names == ["ChatFinalResponse"]
+    assert "tool round budget" in provider.structured_messages[0][-1]["content"]
+
+
+def test_chat_session_runner_forced_native_final_response_can_fall_back_to_text(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    provider = _FakeNativeTextFinalProvider(
+        ParsedModelResponse(
+            invocations=[{"tool_name": "list_directory", "arguments": {"path": "."}}]
+        ),
+        "The workspace contains src/app.py.",
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Inspect once",
+        session_state=ChatSessionState(),
+        executor=_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(max_tool_round_trips=1),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    events = list(runner)
+
+    result_event = events[-1]
+    assert isinstance(result_event, ChatWorkflowResultEvent)
+    assert result_event.result.status == "completed"
+    assert result_event.result.final_response is not None
+    assert result_event.result.final_response.answer == (
+        "The workspace contains src/app.py."
+    )
+    assert provider.response_model_names == ["ChatFinalResponse"]
+    assert len(provider.text_messages) == 1
 
 
 def test_chat_session_runner_forces_staged_final_response_at_round_budget(

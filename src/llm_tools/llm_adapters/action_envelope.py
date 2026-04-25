@@ -88,6 +88,33 @@ class _FinalResponseStepMixin(BaseModel):
     mode: Literal["finalize"] = "finalize"
 
 
+class _SingleActionStepMixin(BaseModel):
+    """Single-stage structured agent step."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["tool", "finalize"]
+    tool_name: str | None = None
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    final_response: Any | None = None
+
+    @model_validator(mode="after")
+    def _validate_mode(self) -> _SingleActionStepMixin:
+        if self.mode == "tool":
+            if self.tool_name is None:
+                raise ValueError("tool_name is required when mode='tool'.")
+            if self.final_response is not None:
+                raise ValueError("final_response is not allowed when mode='tool'.")
+            return self
+        if self.tool_name is not None:
+            raise ValueError("tool_name is only allowed when mode='tool'.")
+        if self.arguments:
+            raise ValueError("arguments are only allowed when mode='tool'.")
+        if self.final_response is None:
+            raise ValueError("final_response is required when mode='finalize'.")
+        return self
+
+
 class _EnvelopeModeMixin(BaseModel):
     """Enforce one-turn output mode consistency."""
 
@@ -257,6 +284,31 @@ class ActionEnvelopeAdapter:
         model.__module__ = __name__
         return model
 
+    def build_single_action_step_model(
+        self,
+        specs: list[ToolSpec],
+        *,
+        final_response_model: object,
+    ) -> type[BaseModel]:
+        """Build a single-stage one-tool-or-final response model."""
+        allowed_tool_names = [spec.name for spec in specs]
+        tool_name_annotation = (
+            _literal_annotation(allowed_tool_names, allow_none=True)
+            if allowed_tool_names
+            else type(None)
+        )
+        model = cast(
+            type[BaseModel],
+            create_model(
+                "SingleActionStep",
+                __base__=_SingleActionStepMixin,
+                tool_name=(tool_name_annotation, None),
+                final_response=(_optional_annotation(final_response_model), None),
+            ),
+        )
+        model.__module__ = __name__
+        return model
+
     def parse_tool_invocation_step(
         self,
         payload: object,
@@ -295,6 +347,44 @@ class ActionEnvelopeAdapter:
             final_response=self._normalize_final_response(
                 getattr(step, "final_response", None)
             )
+        )
+
+    def parse_single_action_step(
+        self,
+        payload: object,
+        *,
+        response_model: type[BaseModel],
+        tool_specs: list[ToolSpec],
+        input_models: dict[str, type[BaseModel]],
+    ) -> ParsedModelResponse:
+        """Parse one single-stage structured tool-or-final payload."""
+        normalized = self._normalize_payload(payload)
+        try:
+            step = response_model.model_validate(normalized)
+        except ValidationError as exc:
+            raise ValueError("Invalid single-action step payload.") from exc
+        step_payload = cast(Any, step)
+        if step_payload.mode == "finalize":
+            return ParsedModelResponse(
+                final_response=self._normalize_final_response(
+                    step_payload.final_response
+                )
+            )
+
+        tool_name = step_payload.tool_name
+        allowed_tool_names = {spec.name for spec in tool_specs}
+        if tool_name not in allowed_tool_names:
+            raise ValueError(f"Unknown tool selected: {tool_name}")
+        input_model = input_models.get(tool_name)
+        if input_model is None:
+            raise ValueError(f"Selected tool '{tool_name}' was not prepared.")
+        arguments = input_model.model_validate(
+            self._normalize_arguments(step_payload.arguments)
+        ).model_dump(mode="json")
+        return ParsedModelResponse(
+            invocations=[
+                ToolInvocationRequest(tool_name=tool_name, arguments=arguments)
+            ]
         )
 
     @staticmethod

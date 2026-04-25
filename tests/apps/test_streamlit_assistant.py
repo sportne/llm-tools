@@ -998,6 +998,20 @@ def test_assistant_prompts_cover_normal_and_research_modes() -> None:
         workspace_enabled=True,
         staged_schema_protocol=True,
     )
+    prompt_tools_prompt = build_assistant_system_prompt(
+        tool_registry=registry,
+        tool_limits=StreamlitAssistantConfig().tool_limits,
+        enabled_tool_names=enabled,
+        workspace_enabled=True,
+        interaction_protocol="prompt_tools",
+    )
+    native_tools_prompt = build_assistant_system_prompt(
+        tool_registry=registry,
+        tool_limits=StreamlitAssistantConfig().tool_limits,
+        enabled_tool_names=enabled,
+        workspace_enabled=True,
+        interaction_protocol="native_tools",
+    )
     staged_research_prompt = build_research_system_prompt(
         tool_registry=registry,
         tool_limits=StreamlitAssistantConfig().tool_limits,
@@ -1018,6 +1032,12 @@ def test_assistant_prompts_cover_normal_and_research_modes() -> None:
         in staged_assistant_prompt
     )
     assert "Required action format:" not in staged_assistant_prompt
+    assert "fenced prompt-tool blocks" in prompt_tools_prompt
+    assert "structured action envelope" not in prompt_tools_prompt
+    assert "final_response" not in prompt_tools_prompt
+    assert "Native tool protocol:" in native_tools_prompt
+    assert "structured action envelope" not in native_tools_prompt
+    assert "final_response" not in native_tools_prompt
     assert "Structured interaction protocol:" in staged_research_prompt
     assert "Final response fields:" not in staged_assistant_prompt
 

@@ -6,6 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
 
@@ -29,13 +30,146 @@ class PromptToolDecision:
     tool_name: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PromptToolCategoryDecision:
+    """Parsed category step from a prompt-tool response."""
+
+    mode: str
+    category: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PromptToolCategory:
+    """Model-facing group of related tools."""
+
+    name: str
+    description: str
+    tool_specs: list[ToolSpec]
+
+
 class PromptToolAdapter:
     """Format and parse the fenced prompt-tool protocol."""
+
+    CATEGORY_ORDER = ("filesystem", "text", "git", "gitlab", "atlassian", "other")
+    CATEGORY_DESCRIPTIONS = {
+        "filesystem": "Read, list, inspect, or write local workspace files.",
+        "text": "Search readable local file contents for literal text.",
+        "git": "Inspect local git status, diffs, and history.",
+        "gitlab": "Search and read GitLab project data.",
+        "atlassian": "Search and read Jira, Confluence, and Bitbucket data.",
+        "other": "Tools that do not fit another category.",
+    }
 
     _BLOCK_RE = re.compile(
         r"```(?P<kind>[A-Za-z_][A-Za-z0-9_-]*)\s*\n(?P<body>.*?)```",
         re.DOTALL,
     )
+
+    def single_action_stage_messages(
+        self,
+        *,
+        base_messages: list[dict[str, Any]],
+        tool_specs: list[ToolSpec],
+        input_models: dict[str, type[BaseModel]],
+        final_response_model: object,
+        decision_context: str | None = None,
+        selected_category: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return the default prompt-tool round prompt."""
+        context_text = (
+            f"\n\nCurrent turn tool-use context:\n{decision_context}\n"
+            if decision_context
+            else ""
+        )
+        category_text = (
+            f"Current tool category: {selected_category}\n"
+            if selected_category is not None
+            else ""
+        )
+        if tool_specs:
+            action_formats = (
+                "Required tool format:\n"
+                "```tool\n"
+                "TOOL_NAME: exact_tool_name\n"
+                "BEGIN_ARG: argument_name\n"
+                "argument value\n"
+                "END_ARG\n"
+                "```\n"
+            )
+        else:
+            action_formats = "No tools are available in this step.\n"
+        protocol_override = (
+            "Prompt-tool output contract:\n"
+            "- The only valid output is exactly one fenced ```tool block or exactly "
+            "one fenced ```final block.\n"
+            "- In a tool block, the first non-empty line must be exactly "
+            "TOOL_NAME: one_exact_available_tool_name.\n"
+            "- Do not write name:, library_name:, function:, tool:, tool_name in "
+            "lowercase, a bare tool name, or the tool name followed by a colon.\n"
+            "- Each argument marker must be one line: BEGIN_ARG: argument_name.\n"
+            "- Do not put the argument name on the next line after BEGIN_ARG:.\n"
+        )
+        return [
+            *base_messages,
+            {
+                "role": "system",
+                "content": (
+                    "Current step: choose exactly one next action.\n"
+                    f"{protocol_override}"
+                    "Return exactly one fenced block and no prose outside it.\n"
+                    "Use a ```tool block when another tool call is necessary.\n"
+                    "Use a ```final block only when the available evidence is sufficient.\n"
+                    "One model round may call at most one tool.\n"
+                    "The fenced block must be the final substantive content.\n"
+                    f"{category_text}"
+                    f"{context_text}\n"
+                    f"Available tools and argument schemas:\n"
+                    f"{self._tool_action_catalog(tool_specs, input_models)}\n\n"
+                    f"{action_formats}"
+                    "Required final format:\n"
+                    "```final\nANSWER:\nPlain markdown answer here.\n```\n"
+                    f"{self._final_schema_text(final_response_model)}"
+                ),
+            },
+        ]
+
+    def category_decision_stage_messages(
+        self,
+        *,
+        base_messages: list[dict[str, Any]],
+        categories: list[PromptToolCategory],
+        final_response_model: object,
+        decision_context: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return the optional prompt-tool category selection prompt."""
+        context_text = (
+            f"\n\nCurrent turn tool-use context:\n{decision_context}\n"
+            if decision_context
+            else ""
+        )
+        return [
+            *base_messages,
+            {
+                "role": "system",
+                "content": (
+                    "Current step: choose a tool category or finalize.\n"
+                    "Use the prompt-tool category output contract for this step.\n"
+                    "The only valid output is one fenced ```category block.\n"
+                    "MODE is not a category name; MODE must be exactly category or "
+                    "finalize.\n"
+                    "Return exactly one fenced category block and no prose.\n"
+                    "Choose a category only when another tool call is necessary.\n"
+                    "Do not provide a tool name, tool arguments, or final answer in this step.\n"
+                    f"{context_text}\n"
+                    f"Available categories:\n{self._category_catalog(categories)}\n\n"
+                    "Required formats:\n"
+                    "```category\nMODE: category\nCATEGORY: category_name\n```\n"
+                    "or\n"
+                    "```category\nMODE: finalize\n```\n"
+                    f"{self._final_schema_text(final_response_model)}"
+                ),
+            },
+        ]
 
     def decision_stage_messages(
         self,
@@ -139,11 +273,29 @@ class PromptToolAdapter:
         error: Exception,
         invalid_payload: object | None,
         tool_specs: list[ToolSpec] | None = None,
+        input_models: dict[str, type[BaseModel]] | None = None,
+        categories: list[PromptToolCategory] | None = None,
         selected_tool: ToolSpec | None = None,
         input_model: type[BaseModel] | None = None,
         final_response_model: object | None = None,
     ) -> str:
         guidance = {
+            "action": (
+                "Action rules: return exactly one ```tool block or one ```final block. "
+                "A tool block must include TOOL_NAME and all required arguments. "
+                "The first non-empty line inside a tool block must be exactly "
+                "TOOL_NAME: one_exact_available_tool_name. "
+                "Do not use name:, library_name:, function:, a bare tool name, "
+                "or the tool name followed by a colon. "
+                "Use BEGIN_ARG: argument_name on one line. "
+                "Do not add prose outside the block."
+            ),
+            "category": (
+                "Category rules: return exactly one ```category block. "
+                "MODE must be exactly category or finalize. "
+                "When MODE is category, CATEGORY must be one exact available category name. "
+                "Do not include tool arguments or a final answer."
+            ),
             "decision": (
                 "Decision rules: return exactly one ```decision block. "
                 "MODE must be exactly tool or finalize. "
@@ -176,8 +328,27 @@ class PromptToolAdapter:
             guidance = "Return only the fields required for this stage."
 
         details = []
+        if categories is not None:
+            details.append(
+                f"Available categories:\n{self._category_catalog(categories)}"
+            )
         if tool_specs is not None:
-            details.append(f"Available tools:\n{self._tool_catalog(tool_specs)}")
+            if input_models is None:
+                details.append(f"Available tools:\n{self._tool_catalog(tool_specs)}")
+            else:
+                details.append(
+                    "Available tools and argument schemas:\n"
+                    f"{self._tool_action_catalog(tool_specs, input_models)}"
+                )
+                details.append(
+                    "Exact tool block shape:\n"
+                    "```tool\n"
+                    "TOOL_NAME: exact_tool_name\n"
+                    "BEGIN_ARG: argument_name\n"
+                    "argument value\n"
+                    "END_ARG\n"
+                    "```"
+                )
         if selected_tool is not None and input_model is not None:
             details.append(
                 "Selected tool schema:\n"
@@ -233,6 +404,86 @@ class PromptToolAdapter:
             )
         return PromptToolDecision(mode="tool", tool_name=tool_name)
 
+    def parse_category_decision(
+        self,
+        text: str,
+        *,
+        categories: list[PromptToolCategory],
+    ) -> PromptToolCategoryDecision:
+        body = self._single_block_body(text, "category")
+        fields = self._parse_key_lines(body)
+        mode = fields.get("MODE", "").strip().lower()
+        allowed_categories = {category.name for category in categories}
+        if mode == "finalize":
+            if "CATEGORY" in fields and fields["CATEGORY"].strip():
+                raise PromptToolProtocolError(
+                    "Category decision with MODE: finalize must not include CATEGORY.",
+                    invalid_payload=text,
+                )
+            return PromptToolCategoryDecision(mode="finalize")
+        if mode != "category":
+            raise PromptToolProtocolError(
+                "Category MODE must be 'category' or 'finalize'.",
+                invalid_payload=text,
+            )
+        category_name = fields.get("CATEGORY", "").strip()
+        if category_name not in allowed_categories:
+            raise PromptToolProtocolError(
+                f"Category decision selected unknown category: {category_name or '(missing)'}.",
+                invalid_payload=text,
+            )
+        return PromptToolCategoryDecision(mode="category", category=category_name)
+
+    def parse_single_action(
+        self,
+        text: str,
+        *,
+        tool_specs: list[ToolSpec],
+        input_models: dict[str, type[BaseModel]],
+        final_response_model: object,
+    ) -> ParsedModelResponse:
+        kind, body = self._single_block(
+            text,
+            allowed_kinds={"tool", "final"},
+            require_final_block=True,
+        )
+        if kind == "final":
+            answer = self._final_answer_from_body(body)
+            return ParsedModelResponse(
+                final_response=self._validate_final_response(
+                    answer,
+                    final_response_model=final_response_model,
+                    invalid_payload=text,
+                )
+            )
+        parsed_name = self._tool_name_from_body(body, invalid_payload=text)
+        allowed_tools = {spec.name for spec in tool_specs}
+        if parsed_name not in allowed_tools:
+            raise PromptToolProtocolError(
+                f"Tool block selected unknown tool: {parsed_name or '(missing)'}.",
+                invalid_payload=text,
+            )
+        input_model = input_models.get(parsed_name)
+        if input_model is None:
+            raise ValueError(
+                f"Tool '{parsed_name}' was not prepared for this interaction.",
+            )
+        raw_arguments = self._parse_argument_blocks(body, invalid_payload=text)
+        arguments = self._validate_arguments(
+            raw_arguments,
+            input_model=input_model,
+            invalid_payload=text,
+        )
+        return ParsedModelResponse(
+            invocations=[
+                ToolInvocationRequest(
+                    tool_name=parsed_name,
+                    arguments=arguments,
+                    tool_call_id=f"prompt-tool-{uuid4().hex}",
+                )
+            ]
+        )
+
     def parse_tool_invocation(
         self,
         text: str,
@@ -255,7 +506,11 @@ class PromptToolAdapter:
         )
         return ParsedModelResponse(
             invocations=[
-                ToolInvocationRequest(tool_name=tool_name, arguments=arguments)
+                ToolInvocationRequest(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    tool_call_id=f"prompt-tool-{uuid4().hex}",
+                )
             ]
         )
 
@@ -321,6 +576,45 @@ class PromptToolAdapter:
                     invalid_payload=text,
                 )
         return matching[0].strip()
+
+    def _single_block(
+        self,
+        text: str,
+        *,
+        allowed_kinds: set[str],
+        require_final_block: bool = False,
+    ) -> tuple[str, str]:
+        blocks = [
+            (match.group("kind").strip().lower(), match.group("body"), match)
+            for match in self._BLOCK_RE.finditer(text)
+        ]
+        if len(blocks) != 1:
+            expected = ", ".join(sorted(allowed_kinds))
+            raise PromptToolProtocolError(
+                f"Expected exactly one fenced block of type: {expected}.",
+                invalid_payload=text,
+            )
+        kind, body, match = blocks[0]
+        if kind not in allowed_kinds:
+            expected = ", ".join(sorted(allowed_kinds))
+            raise PromptToolProtocolError(
+                f"Expected fenced block of type: {expected}.",
+                invalid_payload=text,
+            )
+        if require_final_block:
+            leading = text[: match.start()].strip()
+            if leading:
+                raise PromptToolProtocolError(
+                    f"The fenced {kind} block must be the only substantive content.",
+                    invalid_payload=text,
+                )
+            trailing = text[match.end() :].strip()
+            if trailing:
+                raise PromptToolProtocolError(
+                    f"The fenced {kind} block must be the final substantive content.",
+                    invalid_payload=text,
+                )
+        return kind, body.strip()
 
     @staticmethod
     def _parse_key_lines(body: str) -> dict[str, str]:
@@ -469,13 +763,92 @@ class PromptToolAdapter:
     def _tool_catalog(tool_specs: list[ToolSpec]) -> str:
         return json.dumps(
             [
-                {"name": spec.name, "description": spec.description}
+                {
+                    "name": spec.name,
+                    "description": spec.description,
+                    "tags": list(spec.tags),
+                }
                 for spec in tool_specs
             ],
             indent=2,
             sort_keys=True,
             default=str,
         )
+
+    @classmethod
+    def derive_tool_categories(
+        cls,
+        tool_specs: list[ToolSpec],
+    ) -> list[PromptToolCategory]:
+        """Group tools into stable model-facing categories from ToolSpec tags."""
+        grouped: dict[str, list[ToolSpec]] = {name: [] for name in cls.CATEGORY_ORDER}
+        for spec in tool_specs:
+            tags = set(spec.tags)
+            category = "other"
+            for candidate in cls.CATEGORY_ORDER:
+                if candidate != "other" and candidate in tags:
+                    category = candidate
+                    break
+            grouped[category].append(spec)
+        categories: list[PromptToolCategory] = []
+        for name in cls.CATEGORY_ORDER:
+            specs = grouped[name]
+            if not specs:
+                continue
+            categories.append(
+                PromptToolCategory(
+                    name=name,
+                    description=cls.CATEGORY_DESCRIPTIONS[name],
+                    tool_specs=sorted(specs, key=lambda spec: spec.name),
+                )
+            )
+        return categories
+
+    @staticmethod
+    def category_tool_specs(
+        categories: list[PromptToolCategory],
+        category_name: str,
+    ) -> list[ToolSpec]:
+        """Return the tool specs in one selected category."""
+        for category in categories:
+            if category.name == category_name:
+                return list(category.tool_specs)
+        raise PromptToolProtocolError(f"Unknown prompt-tool category: {category_name}.")
+
+    @staticmethod
+    def _category_catalog(categories: list[PromptToolCategory]) -> str:
+        return json.dumps(
+            [
+                {
+                    "name": category.name,
+                    "description": category.description,
+                    "tool_count": len(category.tool_specs),
+                    "tools": [spec.name for spec in category.tool_specs],
+                }
+                for category in categories
+            ],
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+
+    @staticmethod
+    def _tool_action_catalog(
+        tool_specs: list[ToolSpec],
+        input_models: dict[str, type[BaseModel]],
+    ) -> str:
+        entries: list[dict[str, Any]] = []
+        for spec in tool_specs:
+            input_model = input_models.get(spec.name)
+            entry: dict[str, Any] = {
+                "name": spec.name,
+                "description": spec.description,
+                "tags": list(spec.tags),
+            }
+            if input_model is not None:
+                entry["arguments_schema"] = input_model.model_json_schema()
+            entries.append(entry)
+        return json.dumps(entries, indent=2, sort_keys=True, default=str)
 
     @staticmethod
     def _final_schema_text(final_response_model: object) -> str:
@@ -498,15 +871,34 @@ class PromptToolAdapter:
         if invalid_payload is None:
             return "(unavailable)"
         if isinstance(invalid_payload, str):
-            return invalid_payload
+            return PromptToolAdapter._summarize_invalid_payload(invalid_payload)
         try:
-            return json.dumps(invalid_payload, indent=2, sort_keys=True, default=str)
+            rendered = json.dumps(
+                invalid_payload, indent=2, sort_keys=True, default=str
+            )
         except TypeError:
-            return str(invalid_payload)
+            rendered = str(invalid_payload)
+        return PromptToolAdapter._summarize_invalid_payload(rendered)
+
+    @staticmethod
+    def _summarize_invalid_payload(payload: str) -> str:
+        lowered = payload.lower()
+        if '"actions"' in lowered or '"final_response"' in lowered:
+            return (
+                "Previous output used a structured JSON action-envelope shape. "
+                "The current prompt-tool stage requires the requested fenced block only."
+            )
+        if "```" in payload and len(payload) > 800:
+            return "Previous output included fenced text that did not match this stage."
+        if len(payload) > 800:
+            return payload[:800] + "...(truncated)"
+        return payload
 
 
 __all__ = [
     "PromptToolAdapter",
+    "PromptToolCategory",
+    "PromptToolCategoryDecision",
     "PromptToolDecision",
     "PromptToolProtocolError",
 ]

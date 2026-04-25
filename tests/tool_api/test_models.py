@@ -227,6 +227,7 @@ def test_execution_record_serializes_nested_models_and_error_codes() -> None:
         "request": {
             "tool_name": "fetch_url",
             "arguments": {"url": "https://example.com"},
+            "tool_call_id": None,
         },
         "validated_input": {"url": "https://example.com"},
         "redacted_input": None,

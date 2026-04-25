@@ -443,6 +443,79 @@ def test_final_response_step_model_rejects_invalid_chat_final_response() -> None
         )
 
 
+def test_parse_single_action_step_tool_and_final_response() -> None:
+    adapter = ActionEnvelopeAdapter()
+    response_model = adapter.build_single_action_step_model(
+        _specs(),
+        final_response_model=ChatFinalResponse,
+    )
+
+    parsed_tool = adapter.parse_single_action_step(
+        {
+            "mode": "tool",
+            "tool_name": "read_file",
+            "arguments": {"path": "README.md"},
+        },
+        response_model=response_model,
+        tool_specs=_specs(),
+        input_models=_input_models(),
+    )
+    parsed_final = adapter.parse_single_action_step(
+        {
+            "mode": "finalize",
+            "final_response": {"answer": "done", "citations": []},
+        },
+        response_model=response_model,
+        tool_specs=_specs(),
+        input_models=_input_models(),
+    )
+
+    assert parsed_tool.invocations == [
+        ToolInvocationRequest(
+            tool_name="read_file",
+            arguments={"path": "README.md", "encoding": "utf-8"},
+        )
+    ]
+    assert parsed_final.final_response is not None
+    assert parsed_final.final_response["answer"] == "done"
+    assert parsed_final.final_response["citations"] == []
+
+
+def test_single_action_step_rejects_mixed_or_invalid_tool_payloads() -> None:
+    adapter = ActionEnvelopeAdapter()
+    response_model = adapter.build_single_action_step_model(
+        _specs(),
+        final_response_model=ChatFinalResponse,
+    )
+
+    with pytest.raises(ValueError):
+        adapter.parse_single_action_step(
+            {
+                "mode": "tool",
+                "tool_name": "read_file",
+                "arguments": {"path": "README.md"},
+                "final_response": {"answer": "mixed"},
+            },
+            response_model=response_model,
+            tool_specs=_specs(),
+            input_models=_input_models(),
+        )
+    with pytest.raises(ValueError):
+        adapter.parse_single_action_step(
+            {"mode": "tool", "tool_name": "missing", "arguments": {}},
+            response_model=response_model,
+            tool_specs=_specs(),
+            input_models=_input_models(),
+        )
+    with pytest.raises(ValueError):
+        adapter.parse_single_action_step(
+            {"mode": "tool", "tool_name": "read_file", "arguments": {}},
+            response_model=response_model,
+            tool_specs=_specs(),
+            input_models=_input_models(),
+        )
+
+
 class _LooseAnythingEnvelope(BaseModel):
     actions: list[object] = Field(default_factory=list)
     final_response: str | None = None

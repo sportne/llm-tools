@@ -296,7 +296,11 @@ def test_runtime_executes_successfully_and_attaches_execution_record() -> None:
     assert record["invocation_id"] == "inv-1"
     assert record["tool_name"] == "echo"
     assert record["tool_version"] == "0.1.0"
-    assert record["request"] == {"tool_name": "echo", "arguments": {"value": "hi"}}
+    assert record["request"] == {
+        "tool_name": "echo",
+        "arguments": {"value": "hi"},
+        "tool_call_id": None,
+    }
     assert record.get("validated_input") is None
     assert record["redacted_input"] == {"value": "hi"}
     assert record.get("validated_output") is None

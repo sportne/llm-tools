@@ -225,6 +225,124 @@ def test_parse_tool_invocation_handles_scalar_json_literals_and_bad_json() -> No
     }
 
 
+def test_parse_single_action_tool_and_final_blocks() -> None:
+    adapter = PromptToolAdapter()
+    input_models = {
+        "read_file": _ReadFileInput,
+        "search_text": _ReadFileInput,
+    }
+
+    tool = adapter.parse_single_action(
+        (
+            "```tool\n"
+            "TOOL_NAME: read_file\n"
+            "BEGIN_ARG: path\nREADME.md\nEND_ARG\n"
+            "BEGIN_ARG: limit\n5\nEND_ARG\n"
+            "```"
+        ),
+        tool_specs=_tool_specs(),
+        input_models=input_models,
+        final_response_model=ChatFinalResponse,
+    )
+    final = adapter.parse_single_action(
+        "```final\nANSWER:\nDone\n```",
+        tool_specs=_tool_specs(),
+        input_models=input_models,
+        final_response_model=ChatFinalResponse,
+    )
+
+    assert tool.invocations[0].tool_name == "read_file"
+    assert tool.invocations[0].tool_call_id is not None
+    assert tool.invocations[0].arguments == {
+        "path": "README.md",
+        "limit": 5,
+        "options": {},
+    }
+    assert final.final_response["answer"] == "Done"
+
+
+def test_parse_single_action_rejects_wrong_shape_and_category_constraints() -> None:
+    adapter = PromptToolAdapter()
+    input_models = {"read_file": _ReadFileInput, "search_text": _ReadFileInput}
+    with pytest.raises(PromptToolProtocolError, match="unknown tool"):
+        adapter.parse_single_action(
+            "```tool\nTOOL_NAME: missing\n```",
+            tool_specs=_tool_specs(),
+            input_models=input_models,
+            final_response_model=ChatFinalResponse,
+        )
+    with pytest.raises(PromptToolProtocolError, match="Expected fenced block"):
+        adapter.parse_single_action(
+            "```decision\nMODE: finalize\n```",
+            tool_specs=_tool_specs(),
+            input_models=input_models,
+            final_response_model=ChatFinalResponse,
+        )
+    with pytest.raises(PromptToolProtocolError, match="only substantive"):
+        adapter.parse_single_action(
+            "lead\n```final\nANSWER: Done\n```",
+            tool_specs=_tool_specs(),
+            input_models=input_models,
+            final_response_model=ChatFinalResponse,
+        )
+    with pytest.raises(PromptToolProtocolError, match="unknown tool"):
+        adapter.parse_single_action(
+            (
+                "```tool\n"
+                "TOOL_NAME: search_text\n"
+                "BEGIN_ARG: path\nREADME.md\nEND_ARG\n"
+                "```"
+            ),
+            tool_specs=[_tool_specs()[0]],
+            input_models=input_models,
+            final_response_model=ChatFinalResponse,
+        )
+
+
+def test_category_grouping_and_decision_parsing() -> None:
+    adapter = PromptToolAdapter()
+    specs = [
+        ToolSpec(
+            name="read_file",
+            description="Read a file.",
+            tags=["filesystem", "read"],
+        ),
+        ToolSpec(
+            name="search_text",
+            description="Search text.",
+            tags=["text", "search", "read"],
+        ),
+        ToolSpec(name="custom", description="Custom."),
+    ]
+
+    categories = adapter.derive_tool_categories(specs)
+    assert [category.name for category in categories] == [
+        "filesystem",
+        "text",
+        "other",
+    ]
+    assert [spec.name for spec in adapter.category_tool_specs(categories, "text")] == [
+        "search_text"
+    ]
+
+    parsed = adapter.parse_category_decision(
+        "```category\nMODE: category\nCATEGORY: text\n```",
+        categories=categories,
+    )
+    final = adapter.parse_category_decision(
+        "```category\nMODE: finalize\n```",
+        categories=categories,
+    )
+    assert parsed.mode == "category"
+    assert parsed.category == "text"
+    assert final.mode == "finalize"
+    with pytest.raises(PromptToolProtocolError, match="unknown category"):
+        adapter.parse_category_decision(
+            "```category\nMODE: category\nCATEGORY: missing\n```",
+            categories=categories,
+        )
+
+
 def test_parse_final_response_coerces_plain_text_and_validates_json() -> None:
     adapter = PromptToolAdapter()
 
@@ -288,6 +406,17 @@ def test_prompt_tool_messages_and_repair_guidance_cover_schema_variants() -> Non
     base_messages = [{"role": "user", "content": "work"}]
     tool_spec = _tool_specs()[0]
 
+    single_action_messages = adapter.single_action_stage_messages(
+        base_messages=base_messages,
+        tool_specs=_tool_specs(),
+        input_models={"read_file": _ReadFileInput, "search_text": _ReadFileInput},
+        final_response_model=ChatFinalResponse,
+    )
+    category_messages = adapter.category_decision_stage_messages(
+        base_messages=base_messages,
+        categories=adapter.derive_tool_categories(_tool_specs()),
+        final_response_model=ChatFinalResponse,
+    )
     decision_messages = adapter.decision_stage_messages(
         base_messages=base_messages,
         tool_specs=_tool_specs(),
@@ -319,7 +448,16 @@ def test_prompt_tool_messages_and_repair_guidance_cover_schema_variants() -> Non
         invalid_payload="bad",
         final_response_model=_TypedAnswer,
     )
+    envelope_repair = adapter.repair_stage_message(
+        stage_name="decision",
+        error=RuntimeError("bad envelope"),
+        invalid_payload='{"actions":[{"tool_name":"read_file"}],"final_response":null}',
+        tool_specs=_tool_specs(),
+    )
 
+    assert "Prompt-tool output contract:" in single_action_messages[-1]["content"]
+    assert "Do not write name:, library_name:" in single_action_messages[-1]["content"]
+    assert "MODE is not a category name" in category_messages[-1]["content"]
     assert decision_messages[0] == base_messages[0]
     assert "MODE must be exactly" in decision_messages[-1]["content"]
     assert "BEGIN_ARG: argument_name" in tool_messages[-1]["content"]
@@ -329,3 +467,5 @@ def test_prompt_tool_messages_and_repair_guidance_cover_schema_variants() -> Non
     assert "Return only the fields required" in unknown_repair
     assert "RuntimeError" in unknown_repair
     assert "Final response schema:" in final_repair
+    assert "structured JSON action-envelope shape" in envelope_repair
+    assert '"actions"' not in envelope_repair

@@ -21,6 +21,7 @@ ChatApprovalResolution = Literal[
 ]
 ChatWorkflowInspectorKind = Literal[
     "provider_messages",
+    "provider_response",
     "parsed_response",
     "tool_execution",
 ]
