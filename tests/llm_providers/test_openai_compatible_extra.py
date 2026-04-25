@@ -182,6 +182,14 @@ def test_provider_helper_methods_cover_listing_and_parameter_merging() -> None:
         model="demo-model",
         mode_strategy=ProviderModeStrategy.JSON,
     )._candidate_modes() == [ProviderModeStrategy.JSON]
+    assert OpenAICompatibleProvider(
+        model="demo-model",
+        mode_strategy=ProviderModeStrategy.PROMPT_TOOLS,
+    )._candidate_modes() == [ProviderModeStrategy.PROMPT_TOOLS]
+    assert OpenAICompatibleProvider(
+        model="demo-model",
+        mode_strategy=ProviderModeStrategy.PROMPT_TOOLS,
+    ).uses_prompt_tool_protocol()
     assert provider._merged_request_params(None) == {
         "temperature": 0.2,
         "top_p": 1.0,

@@ -1,8 +1,5 @@
 # llm-tools/.codex/config.toml
 
-model = "gpt-5.4"  # main orchestrator
-model_reasoning_effort = "high"
-
 approval_policy = "never"
 [agents]
 max_threads = 20

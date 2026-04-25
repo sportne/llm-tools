@@ -20,6 +20,7 @@ class _FakeProviderModeStrategy(StrEnum):
     TOOLS = "tools"
     JSON = "json"
     MD_JSON = "md_json"
+    PROMPT_TOOLS = "prompt_tools"
 
 
 class _FakeProviderPreflightResult(BaseModel):
@@ -163,6 +164,9 @@ class _FakeOpenAICompatibleProvider:
             _FakeProviderModeStrategy.JSON,
             _FakeProviderModeStrategy.MD_JSON,
         }
+
+    def uses_prompt_tool_protocol(self) -> bool:
+        return self.mode_strategy is _FakeProviderModeStrategy.PROMPT_TOOLS
 
     def _merged_request_params(
         self, request_params: dict[str, Any] | None

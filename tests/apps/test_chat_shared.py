@@ -38,6 +38,10 @@ def test_chat_config_validation_and_metadata() -> None:
     assert custom_metadata.api_key_env_var == "OPENAI_API_KEY"
     assert custom_metadata.prompt_for_api_key_if_missing is False
     assert custom_config.provider_mode_strategy is ProviderModeStrategy.JSON
+    assert (
+        ChatLLMConfig(provider_mode_strategy="prompt_tools").provider_mode_strategy
+        is ProviderModeStrategy.PROMPT_TOOLS
+    )
 
     ollama_metadata = ChatLLMConfig(api_key_env_var=None).credential_prompt_metadata()
     assert ollama_metadata.api_key_env_var == "API key"
@@ -61,13 +65,13 @@ def test_streamlit_models_validate_and_normalize() -> None:
         api_base_url="  ",
         root_path="  ",
         enabled_tools=[" read_file ", "search_text"],
-        provider_mode_strategy="json",
+        provider_mode_strategy="prompt_tools",
     )
     assert runtime.model_name == "demo"
     assert runtime.api_base_url is None
     assert runtime.root_path is None
     assert runtime.enabled_tools == ["read_file", "search_text"]
-    assert runtime.provider_mode_strategy.value == "json"
+    assert runtime.provider_mode_strategy.value == "prompt_tools"
 
     assert StreamlitRuntimeConfig().protection.enabled is False
 

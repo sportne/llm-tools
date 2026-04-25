@@ -5,7 +5,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from llm_tools.llm_adapters import ParsedModelResponse
+from llm_tools.llm_adapters.prompt_tools import PromptToolProtocolError
 from llm_tools.tool_api import (
     SideEffectClass,
     ToolContext,
@@ -69,6 +72,47 @@ class _FakeStagedProvider:
 
     def uses_staged_schema_protocol(self) -> bool:
         return True
+
+
+class _FakePromptToolProvider:
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = list(responses)
+        self.calls: list[list[dict[str, object]]] = []
+
+    def run(self, **kwargs) -> ParsedModelResponse:
+        del kwargs
+        raise AssertionError("prompt-tool provider should use run_text()")
+
+    def run_structured(self, **kwargs) -> object:
+        del kwargs
+        raise AssertionError("prompt-tool provider should use run_text()")
+
+    def run_text(self, **kwargs) -> str:
+        messages = kwargs["messages"]
+        assert isinstance(messages, list)
+        self.calls.append([dict(message) for message in messages])
+        return self._responses.pop(0)
+
+    def uses_prompt_tool_protocol(self) -> bool:
+        return True
+
+
+class _FallbackPromptToolProvider(_FakePromptToolProvider):
+    def __init__(self, responses: list[str], *, failure: Exception) -> None:
+        super().__init__(responses)
+        self.failure = failure
+        self.native_calls = 0
+
+    def run(self, **kwargs) -> ParsedModelResponse:
+        del kwargs
+        self.native_calls += 1
+        raise self.failure
+
+    def uses_prompt_tool_protocol(self) -> bool:
+        return False
+
+    def can_fallback_to_prompt_tools(self, exc: Exception) -> bool:
+        return exc is self.failure
 
 
 class _CancelOnRunProvider:
@@ -178,6 +222,221 @@ def test_chat_session_runner_executes_tool_then_returns_final_response(
     assert result_event.result.final_response.answer == "It is defined in src/app.py."
     assert result_event.result.session_state is not None
     assert len(result_event.result.session_state.turns) == 1
+
+
+def test_chat_session_runner_executes_prompt_tool_rounds(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("needle = 1\n", encoding="utf-8")
+    provider = _FakePromptToolProvider(
+        [
+            "```decision\nMODE: tool\nTOOL_NAME: search_text\n```",
+            (
+                "```tool\n"
+                "TOOL_NAME: search_text\n"
+                "BEGIN_ARG: path\n.\nEND_ARG\n"
+                "BEGIN_ARG: query\nneedle\nEND_ARG\n"
+                "```"
+            ),
+            "```decision\nMODE: finalize\n```",
+            "```final\nANSWER:\nIt is defined in src/app.py.\n```",
+        ]
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Where is needle defined?",
+        session_state=ChatSessionState(),
+        executor=_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(max_tool_result_chars=500),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    events = list(runner)
+
+    assert len(provider.calls) == 4
+    assert any(
+        isinstance(event, ChatWorkflowStatusEvent) and event.status == "searching text"
+        for event in events
+    )
+    result_event = events[-1]
+    assert isinstance(result_event, ChatWorkflowResultEvent)
+    assert result_event.result.status == "completed"
+    assert result_event.result.final_response is not None
+    assert result_event.result.final_response.answer == "It is defined in src/app.py."
+
+
+def test_chat_session_runner_prompt_tool_path_honors_approval_gates(
+    tmp_path: Path,
+) -> None:
+    registry = ToolRegistry()
+    register_filesystem_tools(registry)
+    register_text_tools(registry)
+    executor = WorkflowExecutor(
+        registry=registry,
+        policy=ToolPolicy(
+            allowed_side_effects={SideEffectClass.NONE, SideEffectClass.LOCAL_READ},
+            require_approval_for={SideEffectClass.LOCAL_READ},
+        ),
+    )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("needle = 1\n", encoding="utf-8")
+    provider = _FakePromptToolProvider(
+        [
+            "```decision\nMODE: tool\nTOOL_NAME: search_text\n```",
+            (
+                "```tool\n"
+                "TOOL_NAME: search_text\n"
+                "BEGIN_ARG: path\n.\nEND_ARG\n"
+                "BEGIN_ARG: query\nneedle\nEND_ARG\n"
+                "```"
+            ),
+            "```decision\nMODE: finalize\n```",
+            "```final\nANSWER:\nIt is defined in src/app.py.\n```",
+        ]
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Where is needle defined?",
+        session_state=ChatSessionState(),
+        executor=executor,
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(max_tool_result_chars=500),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    iterator = iter(runner)
+    approval_event = next(
+        event for event in iterator if isinstance(event, ChatWorkflowApprovalEvent)
+    )
+    assert approval_event.approval.tool_name == "search_text"
+    assert runner.resolve_pending_approval(True) is True
+    remaining = list(iterator)
+
+    assert any(
+        isinstance(event, ChatWorkflowApprovalResolvedEvent)
+        and event.resolution == "approved"
+        for event in remaining
+    )
+    result_event = remaining[-1]
+    assert isinstance(result_event, ChatWorkflowResultEvent)
+    assert result_event.result.status == "completed"
+    assert result_event.result.final_response is not None
+    assert result_event.result.final_response.answer == "It is defined in src/app.py."
+
+
+def test_chat_session_runner_repairs_prompt_tool_final_response(
+    tmp_path: Path,
+) -> None:
+    provider = _FakePromptToolProvider(
+        [
+            "```decision\nMODE: finalize\n```",
+            "```final\nANSWER:\n```",
+            "```final\nANSWER:\nDone after repair.\n```",
+        ]
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(),
+        executor=_empty_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(max_tool_result_chars=500),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    events = list(runner)
+
+    assert len(provider.calls) == 3
+    assert (
+        "previous final_response response was invalid"
+        in provider.calls[-1][-1]["content"]
+    )
+    assert any(
+        isinstance(event, ChatWorkflowStatusEvent)
+        and event.status == "repairing final_response"
+        for event in events
+    )
+    result_event = events[-1]
+    assert isinstance(result_event, ChatWorkflowResultEvent)
+    assert result_event.result.final_response is not None
+    assert result_event.result.final_response.answer == "Done after repair."
+
+
+def test_chat_session_runner_fails_prompt_tool_stage_after_one_repair(
+    tmp_path: Path,
+) -> None:
+    provider = _FakePromptToolProvider(
+        [
+            "```decision\nMODE: finalize\n```",
+            "```final\nANSWER:\n```",
+            "```final\nANSWER:\n```",
+        ]
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(),
+        executor=_empty_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(max_tool_result_chars=500),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    with pytest.raises(PromptToolProtocolError):
+        list(runner)
+
+    assert len(provider.calls) == 3
+
+
+def test_chat_session_runner_auto_falls_back_to_prompt_tools(
+    tmp_path: Path,
+) -> None:
+    failure = RuntimeError("unsupported parameter: tools")
+    provider = _FallbackPromptToolProvider(
+        [
+            "```decision\nMODE: finalize\n```",
+            "```final\nANSWER:\nFallback answer.\n```",
+        ],
+        failure=failure,
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(),
+        executor=_empty_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(max_tool_result_chars=500),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    events = list(runner)
+
+    assert provider.native_calls == 1
+    assert len(provider.calls) == 2
+    assert any(
+        isinstance(event, ChatWorkflowStatusEvent)
+        and event.status == "using prompt tools"
+        for event in events
+    )
+    result_event = events[-1]
+    assert isinstance(result_event, ChatWorkflowResultEvent)
+    assert result_event.result.final_response is not None
+    assert result_event.result.final_response.answer == "Fallback answer."
 
 
 def test_chat_session_runner_retries_ungrounded_repo_answer_with_tools(

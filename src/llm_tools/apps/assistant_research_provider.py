@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Sequence
-from typing import TypeVar
+from typing import TypeVar, cast
 
 from pydantic import BaseModel
 
@@ -17,7 +17,11 @@ from llm_tools.apps.protection_runtime import (
     build_protection_environment,
 )
 from llm_tools.harness_api import collect_state_provenance
-from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
+from llm_tools.llm_adapters import (
+    ActionEnvelopeAdapter,
+    ParsedModelResponse,
+    PromptToolAdapter,
+)
 from llm_tools.llm_providers import OpenAICompatibleProvider, ProviderModeStrategy
 from llm_tools.tool_api import ToolContext, ToolRegistry, ToolSpec
 from llm_tools.workflow_api.executor import PreparedModelInteraction
@@ -41,6 +45,7 @@ class AssistantHarnessTurnProvider:
         self._temperature = temperature
         self._system_prompt = system_prompt
         self._protection_controller = protection_controller
+        self._prompt_tool_adapter = PromptToolAdapter()
 
     def prefers_simplified_json_schema_contract(self) -> bool:
         """Return whether research turns should use the simplified JSON contract."""
@@ -49,6 +54,13 @@ class AssistantHarnessTurnProvider:
     def uses_staged_schema_protocol(self) -> bool:
         """Return whether research turns should use staged strict schemas."""
         preference = getattr(self._provider, "uses_staged_schema_protocol", None)
+        if not callable(preference):
+            return False
+        return bool(preference())
+
+    def uses_prompt_tool_protocol(self) -> bool:
+        """Return whether research turns should use prompt-emitted tool calls."""
+        preference = getattr(self._provider, "uses_prompt_tool_protocol", None)
         if not callable(preference):
             return False
         return bool(preference())
@@ -91,19 +103,40 @@ class AssistantHarnessTurnProvider:
                     "safe_message": safe_message,
                 }
                 return ParsedModelResponse(final_response=safe_message)
-        if self.uses_staged_schema_protocol():
-            parsed = self._run_staged(
+        if self.uses_prompt_tool_protocol():
+            parsed = self._run_prompt_tool(
                 messages=messages,
                 prepared_interaction=prepared_interaction,
-                adapter=adapter,
             )
+        elif self.uses_staged_schema_protocol():
+            try:
+                parsed = self._run_staged(
+                    messages=messages,
+                    prepared_interaction=prepared_interaction,
+                    adapter=adapter,
+                )
+            except Exception as exc:
+                if not self._can_fallback_to_prompt_tools(exc):
+                    raise
+                parsed = self._run_prompt_tool(
+                    messages=messages,
+                    prepared_interaction=prepared_interaction,
+                )
         else:
-            parsed = self._provider.run(
-                adapter=adapter,
-                messages=messages,
-                response_model=prepared_interaction.response_model,
-                request_params={"temperature": self._temperature},
-            )
+            try:
+                parsed = self._provider.run(
+                    adapter=adapter,
+                    messages=messages,
+                    response_model=prepared_interaction.response_model,
+                    request_params={"temperature": self._temperature},
+                )
+            except Exception as exc:
+                if not self._can_fallback_to_prompt_tools(exc):
+                    raise
+                parsed = self._run_prompt_tool(
+                    messages=messages,
+                    prepared_interaction=prepared_interaction,
+                )
         if self._protection_controller is None or parsed.final_response is None:
             return parsed
         response_decision = self._protection_controller.review_response(
@@ -171,19 +204,40 @@ class AssistantHarnessTurnProvider:
                     "safe_message": safe_message,
                 }
                 return ParsedModelResponse(final_response=safe_message)
-        if self.uses_staged_schema_protocol():
-            parsed = await self._run_staged_async(
+        if self.uses_prompt_tool_protocol():
+            parsed = await self._run_prompt_tool_async(
                 messages=messages,
                 prepared_interaction=prepared_interaction,
-                adapter=adapter,
             )
+        elif self.uses_staged_schema_protocol():
+            try:
+                parsed = await self._run_staged_async(
+                    messages=messages,
+                    prepared_interaction=prepared_interaction,
+                    adapter=adapter,
+                )
+            except Exception as exc:
+                if not self._can_fallback_to_prompt_tools(exc):
+                    raise
+                parsed = await self._run_prompt_tool_async(
+                    messages=messages,
+                    prepared_interaction=prepared_interaction,
+                )
         else:
-            parsed = await self._provider.run_async(
-                adapter=adapter,
-                messages=messages,
-                response_model=prepared_interaction.response_model,
-                request_params={"temperature": self._temperature},
-            )
+            try:
+                parsed = await self._provider.run_async(
+                    adapter=adapter,
+                    messages=messages,
+                    response_model=prepared_interaction.response_model,
+                    request_params={"temperature": self._temperature},
+                )
+            except Exception as exc:
+                if not self._can_fallback_to_prompt_tools(exc):
+                    raise
+                parsed = await self._run_prompt_tool_async(
+                    messages=messages,
+                    prepared_interaction=prepared_interaction,
+                )
         if self._protection_controller is None or parsed.final_response is None:
             return parsed
         response_decision = await self._protection_controller.review_response_async(
@@ -212,6 +266,15 @@ class AssistantHarnessTurnProvider:
             }
             return parsed.model_copy(update={"final_response": safe_message})
         return parsed
+
+    def _can_fallback_to_prompt_tools(self, exc: Exception) -> bool:
+        run_text = getattr(self._provider, "run_text", None)
+        if not callable(run_text):
+            return False
+        can_fallback = getattr(self._provider, "can_fallback_to_prompt_tools", None)
+        if not callable(can_fallback):
+            return False
+        return bool(can_fallback(exc))
 
     def _run_staged(
         self,
@@ -381,6 +444,243 @@ class AssistantHarnessTurnProvider:
                 payload,
                 response_model=tool_model,
             ),
+        )
+
+    def _run_prompt_tool(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        prepared_interaction: PreparedModelInteraction,
+    ) -> ParsedModelResponse:
+        decision = self._run_prompt_tool_step(
+            stage_name="decision",
+            messages=self._prompt_tool_adapter.decision_stage_messages(
+                base_messages=messages,
+                tool_specs=prepared_interaction.tool_specs,
+            ),
+            parser=lambda text: self._prompt_tool_adapter.parse_decision(
+                text,
+                tool_specs=prepared_interaction.tool_specs,
+            ),
+            repair_context={"tool_specs": prepared_interaction.tool_specs},
+        )
+        if decision.mode == "finalize":
+            return self._run_prompt_tool_step(
+                stage_name="final_response",
+                messages=self._prompt_tool_adapter.final_response_stage_messages(
+                    base_messages=messages,
+                    final_response_model=str,
+                ),
+                parser=lambda text: self._prompt_tool_adapter.parse_final_response(
+                    text,
+                    final_response_model=str,
+                ),
+                repair_context={"final_response_model": str},
+            )
+
+        tool_name = decision.tool_name
+        if not isinstance(tool_name, str) or tool_name.strip() == "":
+            raise ValueError("Prompt-tool decision did not select a valid tool name.")
+        tool_spec = self._tool_spec(prepared_interaction.tool_specs, tool_name)
+        tool_input_model = prepared_interaction.input_models.get(tool_name)
+        if tool_input_model is None:
+            raise ValueError(
+                f"Selected tool '{tool_name}' was not prepared for this interaction."
+            )
+        return self._run_prompt_tool_step(
+            stage_name=f"tool:{tool_name}",
+            messages=self._prompt_tool_adapter.tool_invocation_stage_messages(
+                base_messages=messages,
+                tool_spec=tool_spec,
+                input_model=tool_input_model,
+            ),
+            parser=lambda text: self._prompt_tool_adapter.parse_tool_invocation(
+                text,
+                tool_name=tool_name,
+                input_model=tool_input_model,
+            ),
+            repair_context={
+                "selected_tool": tool_spec,
+                "input_model": tool_input_model,
+            },
+        )
+
+    async def _run_prompt_tool_async(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        prepared_interaction: PreparedModelInteraction,
+    ) -> ParsedModelResponse:
+        decision = await self._run_prompt_tool_step_async(
+            stage_name="decision",
+            messages=self._prompt_tool_adapter.decision_stage_messages(
+                base_messages=messages,
+                tool_specs=prepared_interaction.tool_specs,
+            ),
+            parser=lambda text: self._prompt_tool_adapter.parse_decision(
+                text,
+                tool_specs=prepared_interaction.tool_specs,
+            ),
+            repair_context={"tool_specs": prepared_interaction.tool_specs},
+        )
+        if decision.mode == "finalize":
+            return await self._run_prompt_tool_step_async(
+                stage_name="final_response",
+                messages=self._prompt_tool_adapter.final_response_stage_messages(
+                    base_messages=messages,
+                    final_response_model=str,
+                ),
+                parser=lambda text: self._prompt_tool_adapter.parse_final_response(
+                    text,
+                    final_response_model=str,
+                ),
+                repair_context={"final_response_model": str},
+            )
+
+        tool_name = decision.tool_name
+        if not isinstance(tool_name, str) or tool_name.strip() == "":
+            raise ValueError("Prompt-tool decision did not select a valid tool name.")
+        tool_spec = self._tool_spec(prepared_interaction.tool_specs, tool_name)
+        tool_input_model = prepared_interaction.input_models.get(tool_name)
+        if tool_input_model is None:
+            raise ValueError(
+                f"Selected tool '{tool_name}' was not prepared for this interaction."
+            )
+        return await self._run_prompt_tool_step_async(
+            stage_name=f"tool:{tool_name}",
+            messages=self._prompt_tool_adapter.tool_invocation_stage_messages(
+                base_messages=messages,
+                tool_spec=tool_spec,
+                input_model=tool_input_model,
+            ),
+            parser=lambda text: self._prompt_tool_adapter.parse_tool_invocation(
+                text,
+                tool_name=tool_name,
+                input_model=tool_input_model,
+            ),
+            repair_context={
+                "selected_tool": tool_spec,
+                "input_model": tool_input_model,
+            },
+        )
+
+    def _run_prompt_tool_step(
+        self,
+        *,
+        stage_name: str,
+        messages: list[dict[str, str]],
+        parser: Callable[[str], _StagedStepT],
+        repair_context: dict[str, object],
+    ) -> _StagedStepT:
+        run_text = getattr(self._provider, "run_text", None)
+        if not callable(run_text):
+            raise RuntimeError(
+                "Prompt-tool protocol requires a provider that supports run_text()."
+            )
+        attempt_messages = list(messages)
+        repair_attempted = False
+        while True:
+            text: str | None = None
+            try:
+                text = run_text(
+                    messages=attempt_messages,
+                    request_params={"temperature": self._temperature},
+                )
+                return parser(text)
+            except Exception as exc:
+                if repair_attempted:
+                    raise
+                repair_attempted = True
+                invalid_payload: object | None = text
+                if invalid_payload is None:
+                    invalid_payload = getattr(exc, "invalid_payload", None)
+                attempt_messages = [
+                    *messages,
+                    {
+                        "role": "system",
+                        "content": self._prompt_tool_repair_message(
+                            stage_name=stage_name,
+                            error=exc,
+                            invalid_payload=invalid_payload,
+                            repair_context=repair_context,
+                        ),
+                    },
+                ]
+
+    async def _run_prompt_tool_step_async(
+        self,
+        *,
+        stage_name: str,
+        messages: list[dict[str, str]],
+        parser: Callable[[str], _StagedStepT],
+        repair_context: dict[str, object],
+    ) -> _StagedStepT:
+        run_text_async = getattr(self._provider, "run_text_async", None)
+        if not callable(run_text_async):
+            raise RuntimeError(
+                "Prompt-tool protocol requires a provider that supports run_text_async()."
+            )
+        attempt_messages = list(messages)
+        repair_attempted = False
+        while True:
+            text: str | None = None
+            try:
+                text = await run_text_async(
+                    messages=attempt_messages,
+                    request_params={"temperature": self._temperature},
+                )
+                return parser(text)
+            except Exception as exc:
+                if repair_attempted:
+                    raise
+                repair_attempted = True
+                invalid_payload: object | None = text
+                if invalid_payload is None:
+                    invalid_payload = getattr(exc, "invalid_payload", None)
+                attempt_messages = [
+                    *messages,
+                    {
+                        "role": "system",
+                        "content": self._prompt_tool_repair_message(
+                            stage_name=stage_name,
+                            error=exc,
+                            invalid_payload=invalid_payload,
+                            repair_context=repair_context,
+                        ),
+                    },
+                ]
+
+    def _prompt_tool_repair_message(
+        self,
+        *,
+        stage_name: str,
+        error: Exception,
+        invalid_payload: object | None,
+        repair_context: dict[str, object],
+    ) -> str:
+        tool_specs_value = repair_context.get("tool_specs")
+        selected_tool_value = repair_context.get("selected_tool")
+        input_model_value = repair_context.get("input_model")
+        return self._prompt_tool_adapter.repair_stage_message(
+            stage_name=stage_name,
+            error=error,
+            invalid_payload=invalid_payload,
+            tool_specs=(
+                cast(list[ToolSpec], tool_specs_value)
+                if isinstance(tool_specs_value, list)
+                else None
+            ),
+            selected_tool=(
+                selected_tool_value
+                if isinstance(selected_tool_value, ToolSpec)
+                else None
+            ),
+            input_model=(
+                cast(type[BaseModel], input_model_value)
+                if isinstance(input_model_value, type)
+                else None
+            ),
+            final_response_model=repair_context.get("final_response_model"),
         )
 
     def _run_staged_step(

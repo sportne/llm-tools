@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from enum import Enum
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -18,6 +19,10 @@ from llm_tools.tool_api import ToolSpec
 
 class EchoInput(BaseModel):
     value: str
+
+
+class SimplePayload(BaseModel):
+    answer: str
 
 
 def _response_model() -> tuple[ActionEnvelopeAdapter, type[BaseModel]]:
@@ -157,6 +162,16 @@ class InstructorSchemaValidationError(RuntimeError):
 InstructorSchemaValidationError.__module__ = "instructor.testing"
 
 
+def _text_response(content: str) -> object:
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=content),
+            )
+        ]
+    )
+
+
 def _wrapped_schema_failure(message: str) -> RuntimeError:
     wrapped = RuntimeError(message)
     wrapped.__cause__ = InstructorSchemaValidationError(message)
@@ -194,6 +209,70 @@ def test_provider_run_prefers_tools_mode_when_available(monkeypatch: Any) -> Non
     call = client.chat.completions.calls[0]
     assert call["model"] == "demo-model"
     assert call["temperature"] == 0
+
+
+def test_provider_run_text_sends_plain_chat_completion() -> None:
+    client = _SyncClient(outcomes={"TOOLS": _text_response("plain text")})
+    provider = OpenAICompatibleProvider(model="demo-model", client=client)
+
+    text = provider.run_text(
+        messages=[{"role": "user", "content": "hello"}],
+        request_params={"temperature": 0.2},
+    )
+
+    assert text == "plain text"
+    assert provider.last_mode_used is ProviderModeStrategy.PROMPT_TOOLS
+    call = client.chat.completions.calls[0]
+    assert call["model"] == "demo-model"
+    assert call["temperature"] == 0.2
+    assert "tools" not in call
+    assert "response_model" not in call
+    assert "response_format" not in call
+
+
+def test_provider_prompt_tools_structured_mode_uses_raw_text_transport() -> None:
+    client = _SyncClient(outcomes={"TOOLS": _text_response('{"answer": "ok"}')})
+    provider = OpenAICompatibleProvider(
+        model="demo-model",
+        client=client,
+        mode_strategy=ProviderModeStrategy.PROMPT_TOOLS,
+    )
+
+    payload = provider.run_structured(
+        messages=[{"role": "user", "content": "hello"}],
+        response_model=SimplePayload,
+    )
+
+    assert payload == SimplePayload(answer="ok")
+    assert provider.last_mode_used is ProviderModeStrategy.PROMPT_TOOLS
+    call = client.chat.completions.calls[0]
+    assert "tools" not in call
+    assert "response_model" not in call
+    assert "response_format" not in call
+    assert call["messages"][-1]["role"] == "system"
+    assert "Return a JSON object" in call["messages"][-1]["content"]
+
+
+def test_provider_run_text_async_sends_plain_chat_completion() -> None:
+    async_client = _AsyncClient(outcomes={"TOOLS": _text_response("plain text")})
+    provider = OpenAICompatibleProvider(
+        model="demo-model",
+        async_client=async_client,
+    )
+
+    text = asyncio.run(
+        provider.run_text_async(
+            messages=[{"role": "user", "content": "hello"}],
+            request_params={"temperature": 0.2},
+        )
+    )
+
+    assert text == "plain text"
+    assert provider.last_mode_used is ProviderModeStrategy.PROMPT_TOOLS
+    call = async_client.chat.completions.calls[0]
+    assert "tools" not in call
+    assert "response_model" not in call
+    assert "response_format" not in call
 
 
 def test_provider_run_auto_falls_back_to_json_for_retryable_schema_errors(
@@ -608,7 +687,7 @@ def test_provider_run_auto_reports_all_retryable_mode_failures(
         "md_json: schema/parse-related (RuntimeError: markdown json validation failed)"
         in message
     )
-    assert [call["__mode"] for call in client.chat.completions.calls] == [
+    assert [call.get("__mode") for call in client.chat.completions.calls] == [
         "TOOLS",
         "JSON",
         "MD_JSON",

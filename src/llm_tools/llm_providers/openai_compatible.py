@@ -46,6 +46,7 @@ class ProviderModeStrategy(str, Enum):  # noqa: UP042
     TOOLS = "tools"
     JSON = "json"
     MD_JSON = "md_json"
+    PROMPT_TOOLS = "prompt_tools"
 
 
 class ProviderPreflightResult(BaseModel):
@@ -183,6 +184,8 @@ class OpenAICompatibleProvider:
 
     def uses_staged_schema_protocol(self) -> bool:
         """Return whether structured interaction should use staged strict schemas."""
+        if self.mode_strategy is ProviderModeStrategy.PROMPT_TOOLS:
+            return False
         if (
             self.mode_strategy is ProviderModeStrategy.AUTO
             and self.provider_family == "ollama"
@@ -192,6 +195,17 @@ class OpenAICompatibleProvider:
             ProviderModeStrategy.JSON,
             ProviderModeStrategy.MD_JSON,
         }
+
+    def uses_prompt_tool_protocol(self) -> bool:
+        """Return whether agent turns should use prompt-emitted tool calls."""
+        return self.mode_strategy is ProviderModeStrategy.PROMPT_TOOLS
+
+    def can_fallback_to_prompt_tools(self, exc: Exception) -> bool:
+        """Return whether a native-mode failure can fall back to prompt tools."""
+        return (
+            self.mode_strategy is ProviderModeStrategy.AUTO
+            and self._should_retry_mode_failure(exc)
+        )
 
     def list_available_models(self) -> list[str]:
         """Return discoverable model ids from the active endpoint."""
@@ -232,6 +246,43 @@ class OpenAICompatibleProvider:
                     request_params=request_params,
                 )
             except Exception as exc:
+                if self.can_fallback_to_prompt_tools(exc):
+                    try:
+                        self._run_prompt_tools_preflight(request_params=request_params)
+                    except Exception as prompt_exc:
+                        connection_succeeded = (
+                            connection_succeeded or self._looks_connected(prompt_exc)
+                        )
+                        error_message = self._exception_summary(prompt_exc)
+                        return ProviderPreflightResult(
+                            ok=False,
+                            connection_succeeded=connection_succeeded,
+                            model_accepted=not self._looks_like_model_error(prompt_exc),
+                            selected_mode_supported=False,
+                            model_listing_supported=model_listing_supported,
+                            available_models=available_models,
+                            resolved_mode=None,
+                            actionable_message=self._preflight_error_message(
+                                prompt_exc,
+                                available_models=available_models,
+                                model_listing_supported=model_listing_supported,
+                            ),
+                            error_message=error_message,
+                        )
+                    return ProviderPreflightResult(
+                        ok=True,
+                        connection_succeeded=True,
+                        model_accepted=True,
+                        selected_mode_supported=True,
+                        model_listing_supported=model_listing_supported,
+                        available_models=available_models,
+                        resolved_mode=ProviderModeStrategy.PROMPT_TOOLS,
+                        actionable_message=(
+                            "Model connection is ready for this session. "
+                            "Resolved provider mode: prompt_tools."
+                        ),
+                        error_message=error_message,
+                    )
                 connection_succeeded = connection_succeeded or self._looks_connected(
                     exc
                 )
@@ -267,6 +318,45 @@ class OpenAICompatibleProvider:
             )
 
         selected_mode = self.mode_strategy
+        if selected_mode is ProviderModeStrategy.PROMPT_TOOLS:
+            try:
+                self._run_prompt_tools_preflight(request_params=request_params)
+            except Exception as exc:
+                connection_succeeded = connection_succeeded or self._looks_connected(
+                    exc
+                )
+                error_message = self._exception_summary(exc)
+                return ProviderPreflightResult(
+                    ok=False,
+                    connection_succeeded=connection_succeeded,
+                    model_accepted=not self._looks_like_model_error(exc),
+                    selected_mode_supported=False,
+                    model_listing_supported=model_listing_supported,
+                    available_models=available_models,
+                    resolved_mode=None,
+                    actionable_message=self._preflight_error_message(
+                        exc,
+                        available_models=available_models,
+                        model_listing_supported=model_listing_supported,
+                        selected_mode=selected_mode,
+                    ),
+                    error_message=error_message,
+                )
+            self.last_mode_used = selected_mode
+            return ProviderPreflightResult(
+                ok=True,
+                connection_succeeded=True,
+                model_accepted=True,
+                selected_mode_supported=True,
+                model_listing_supported=model_listing_supported,
+                available_models=available_models,
+                resolved_mode=selected_mode,
+                actionable_message=(
+                    "Model connection is ready for this session. "
+                    "Configured provider mode 'prompt_tools' works with this endpoint."
+                ),
+                error_message=error_message,
+            )
         try:
             self._run_in_mode(
                 mode=selected_mode,
@@ -339,6 +429,36 @@ class OpenAICompatibleProvider:
         )
         return adapter.parse_model_output(payload, response_model=response_model)
 
+    def run_text(
+        self,
+        *,
+        messages: Sequence[dict[str, Any]],
+        request_params: dict[str, Any] | None = None,
+    ) -> str:
+        """Run one plain chat completion and return assistant text."""
+        response = cast(Any, self._sync_client.chat.completions).create(
+            model=self.model,
+            messages=cast(Any, list(messages)),
+            **self._merged_request_params(request_params),
+        )
+        self.last_mode_used = ProviderModeStrategy.PROMPT_TOOLS
+        return self._plain_response_text(response)
+
+    async def run_text_async(
+        self,
+        *,
+        messages: Sequence[dict[str, Any]],
+        request_params: dict[str, Any] | None = None,
+    ) -> str:
+        """Run one plain chat completion asynchronously and return assistant text."""
+        response = await cast(Any, self._async_client_instance.chat.completions).create(
+            model=self.model,
+            messages=cast(Any, list(messages)),
+            **self._merged_request_params(request_params),
+        )
+        self.last_mode_used = ProviderModeStrategy.PROMPT_TOOLS
+        return self._plain_response_text(response)
+
     def _run_with_fallback(
         self,
         *,
@@ -350,8 +470,10 @@ class OpenAICompatibleProvider:
         previous_client: Any | None = None
         for mode in self._candidate_modes():
             client = self._sync_execution_client(mode)
-            if failures and not self._mode_attempts_are_distinct(
-                previous_client, client
+            if (
+                mode is not ProviderModeStrategy.PROMPT_TOOLS
+                and failures
+                and not self._mode_attempts_are_distinct(previous_client, client)
             ):
                 break
 
@@ -386,8 +508,10 @@ class OpenAICompatibleProvider:
         previous_client: Any | None = None
         for mode in self._candidate_modes():
             client = self._async_execution_client(mode)
-            if failures and not self._mode_attempts_are_distinct(
-                previous_client, client
+            if (
+                mode is not ProviderModeStrategy.PROMPT_TOOLS
+                and failures
+                and not self._mode_attempts_are_distinct(previous_client, client)
             ):
                 break
 
@@ -445,6 +569,12 @@ class OpenAICompatibleProvider:
                 response_model=response_model,
                 request_params=request_params,
             )
+        if self._should_use_prompt_tools(mode):
+            return self._create_prompt_tools_structured_sync(
+                messages=messages,
+                response_model=response_model,
+                request_params=request_params,
+            )
         if self._should_use_local_md_json(mode):
             return self._create_local_md_json_sync(
                 client=client,
@@ -470,6 +600,12 @@ class OpenAICompatibleProvider:
     ) -> object:
         if self._should_use_native_json_schema(mode):
             return await self._create_native_json_schema_async(
+                messages=messages,
+                response_model=response_model,
+                request_params=request_params,
+            )
+        if self._should_use_prompt_tools(mode):
+            return await self._create_prompt_tools_structured_async(
                 messages=messages,
                 response_model=response_model,
                 request_params=request_params,
@@ -524,6 +660,29 @@ class OpenAICompatibleProvider:
             response_model=response_model,
         )
 
+    def _create_prompt_tools_structured_sync(
+        self,
+        *,
+        messages: Sequence[dict[str, Any]],
+        response_model: type[BaseModel],
+        request_params: dict[str, Any] | None,
+    ) -> BaseModel:
+        response = cast(Any, self._sync_client.chat.completions).create(
+            model=self.model,
+            messages=cast(
+                Any,
+                self._structured_json_prompt_messages(
+                    messages=messages,
+                    response_model=response_model,
+                ),
+            ),
+            **self._merged_request_params(request_params),
+        )
+        return self._parse_markdown_json_response(
+            response=response,
+            response_model=response_model,
+        )
+
     async def _create_native_json_schema_async(
         self,
         *,
@@ -553,6 +712,29 @@ class OpenAICompatibleProvider:
         response = await cast(Any, client.chat.completions).create(
             model=self.model,
             messages=cast(Any, list(messages)),
+            **self._merged_request_params(request_params),
+        )
+        return self._parse_markdown_json_response(
+            response=response,
+            response_model=response_model,
+        )
+
+    async def _create_prompt_tools_structured_async(
+        self,
+        *,
+        messages: Sequence[dict[str, Any]],
+        response_model: type[BaseModel],
+        request_params: dict[str, Any] | None,
+    ) -> BaseModel:
+        response = await cast(Any, self._async_client_instance.chat.completions).create(
+            model=self.model,
+            messages=cast(
+                Any,
+                self._structured_json_prompt_messages(
+                    messages=messages,
+                    response_model=response_model,
+                ),
+            ),
             **self._merged_request_params(request_params),
         )
         return self._parse_markdown_json_response(
@@ -629,6 +811,8 @@ class OpenAICompatibleProvider:
         return not any(marker in message for marker in disconnected_markers)
 
     def _candidate_modes(self) -> list[ProviderModeStrategy]:
+        if self.mode_strategy is ProviderModeStrategy.PROMPT_TOOLS:
+            return [ProviderModeStrategy.PROMPT_TOOLS]
         if self.mode_strategy is ProviderModeStrategy.AUTO:
             if self.provider_family == "ollama":
                 return [
@@ -650,13 +834,21 @@ class OpenAICompatibleProvider:
     def _should_use_local_md_json(mode: ProviderModeStrategy) -> bool:
         return mode is ProviderModeStrategy.MD_JSON
 
+    @staticmethod
+    def _should_use_prompt_tools(mode: ProviderModeStrategy) -> bool:
+        return mode is ProviderModeStrategy.PROMPT_TOOLS
+
     def _sync_execution_client(self, mode: ProviderModeStrategy) -> Any:
-        if self._should_use_native_json_schema(mode):
+        if self._should_use_native_json_schema(mode) or self._should_use_prompt_tools(
+            mode
+        ):
             return self._sync_client
         return self._instructor_sync_client(mode)
 
     def _async_execution_client(self, mode: ProviderModeStrategy) -> Any:
-        if self._should_use_native_json_schema(mode):
+        if self._should_use_native_json_schema(mode) or self._should_use_prompt_tools(
+            mode
+        ):
             return self._async_client_instance
         return self._instructor_async_client(mode)
 
@@ -767,6 +959,21 @@ class OpenAICompatibleProvider:
             if isinstance(candidate, (ValidationError, json.JSONDecodeError)):
                 return True
 
+            message = str(candidate).lower()
+            capability_markers = (
+                "tools not supported",
+                "tool calls not supported",
+                "tool_calls not supported",
+                "unsupported tools",
+                "unsupported parameter: tools",
+                "unsupported parameter 'tools'",
+                "response_format",
+                "json_schema",
+                "structured output",
+            )
+            if any(marker in message for marker in capability_markers):
+                return True
+
             candidate_type = type(candidate)
             module_name = candidate_type.__module__
             if module_name.startswith("openai"):
@@ -782,7 +989,6 @@ class OpenAICompatibleProvider:
             if any(marker in class_name for marker in retry_markers):
                 return True
 
-            message = str(candidate).lower()
             if any(marker in message for marker in retry_markers):
                 return True
 
@@ -844,6 +1050,32 @@ class OpenAICompatibleProvider:
             f"Tried modes: {details}."
         )
 
+    def _run_prompt_tools_preflight(
+        self,
+        *,
+        request_params: dict[str, Any] | None,
+    ) -> None:
+        text = self.run_text(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Return exactly this text and nothing else: PROMPT_TOOLS_OK"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": "Validate this endpoint and model.",
+                },
+            ],
+            request_params=request_params,
+        )
+        if "PROMPT_TOOLS_OK" not in text:
+            raise StructuredOutputValidationError(
+                "Prompt-tools preflight did not return the expected text.",
+                invalid_payload=text,
+            )
+
     def _merged_request_params(
         self, request_params: dict[str, Any] | None
     ) -> dict[str, Any]:
@@ -851,6 +1083,30 @@ class OpenAICompatibleProvider:
         if request_params is not None:
             merged.update(request_params)
         return merged
+
+    @staticmethod
+    def _structured_json_prompt_messages(
+        *,
+        messages: Sequence[dict[str, Any]],
+        response_model: type[BaseModel],
+    ) -> list[dict[str, Any]]:
+        schema = json.dumps(
+            response_model.model_json_schema(),
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+        return [
+            *list(messages),
+            {
+                "role": "system",
+                "content": (
+                    "Return a JSON object that satisfies this schema. "
+                    "Do not include prose outside the JSON object.\n"
+                    f"{schema}"
+                ),
+            },
+        ]
 
     @staticmethod
     def _native_json_schema_payload(
@@ -953,6 +1209,10 @@ class OpenAICompatibleProvider:
             if text:
                 return text
         raise ValueError("Structured provider response did not include JSON content.")
+
+    @staticmethod
+    def _plain_response_text(response: Any) -> str:
+        return OpenAICompatibleProvider._structured_response_text(response)
 
     @classmethod
     def _extract_markdown_json_candidate(cls, text: str) -> str | None:

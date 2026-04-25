@@ -6,12 +6,16 @@ import json
 from collections.abc import Callable, Generator, Iterator
 from datetime import UTC, datetime
 from threading import Condition
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol, TypeVar, cast
 from uuid import uuid4
 
 from pydantic import BaseModel
 
-from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
+from llm_tools.llm_adapters import (
+    ActionEnvelopeAdapter,
+    ParsedModelResponse,
+    PromptToolAdapter,
+)
 from llm_tools.tool_api import (
     ProtectionProvenanceSnapshot,
     ToolContext,
@@ -154,6 +158,14 @@ class ModelTurnProvider(Protocol):
     def uses_staged_schema_protocol(self) -> bool:
         """Return whether this provider expects staged strict schemas."""
 
+    def run_text(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        request_params: dict[str, Any] | None = None,
+    ) -> str:
+        """Return one plain text model response."""
+
 
 class ChatSessionTurnRunner:
     """Session-aware cancellable chat workflow for the interactive UI."""
@@ -197,6 +209,7 @@ class ChatSessionTurnRunner:
         self._protection_controller = protection_controller
         self._enabled_tool_names = frozenset(enabled_tool_names or ())
         self._adapter = ActionEnvelopeAdapter()
+        self._prompt_tool_adapter = PromptToolAdapter()
         self._approval_condition = Condition()
         self._cancel_requested = False
         self._pending_approval: ChatWorkflowApprovalState | None = None
@@ -236,7 +249,7 @@ class ChatSessionTurnRunner:
             )
         )
 
-    def __iter__(
+    def __iter__(  # noqa: C901
         self,
     ) -> Iterator[
         ChatWorkflowStatusEvent
@@ -294,24 +307,50 @@ class ChatSessionTurnRunner:
                 yield prompt_event
                 return
 
-            if self._uses_staged_schema_protocol():
-                parsed = yield from self._run_staged_round(
+            if self._uses_prompt_tool_protocol():
+                parsed = yield from self._run_prompt_tool_round(
                     round_index=round_index,
                     messages=serialized_messages,
                     prepared=prepared,
                 )
+            elif self._uses_staged_schema_protocol():
+                try:
+                    parsed = yield from self._run_staged_round(
+                        round_index=round_index,
+                        messages=serialized_messages,
+                        prepared=prepared,
+                    )
+                except Exception as exc:
+                    if not self._can_fallback_to_prompt_tools(exc):
+                        raise
+                    yield ChatWorkflowStatusEvent(status="using prompt tools")
+                    parsed = yield from self._run_prompt_tool_round(
+                        round_index=round_index,
+                        messages=serialized_messages,
+                        prepared=prepared,
+                    )
             else:
                 yield ChatWorkflowInspectorEvent(
                     round_index=round_index,
                     kind="provider_messages",
                     payload=serialized_messages,
                 )
-                parsed = self._provider.run(
-                    adapter=self._adapter,
-                    messages=serialized_messages,
-                    response_model=prepared.response_model,
-                    request_params={"temperature": self._temperature},
-                )
+                try:
+                    parsed = self._provider.run(
+                        adapter=self._adapter,
+                        messages=serialized_messages,
+                        response_model=prepared.response_model,
+                        request_params={"temperature": self._temperature},
+                    )
+                except Exception as exc:
+                    if not self._can_fallback_to_prompt_tools(exc):
+                        raise
+                    yield ChatWorkflowStatusEvent(status="using prompt tools")
+                    parsed = yield from self._run_prompt_tool_round(
+                        round_index=round_index,
+                        messages=serialized_messages,
+                        prepared=prepared,
+                    )
             parsed = self._apply_response_protection(
                 parsed=parsed,
                 provenance=provenance,
@@ -456,6 +495,25 @@ class ChatSessionTurnRunner:
             return False
         return bool(preference())
 
+    def _uses_prompt_tool_protocol(self) -> bool:
+        preference = getattr(
+            self._provider,
+            "uses_prompt_tool_protocol",
+            None,
+        )
+        if not callable(preference):
+            return False
+        return bool(preference())
+
+    def _can_fallback_to_prompt_tools(self, exc: Exception) -> bool:
+        run_text = getattr(self._provider, "run_text", None)
+        if not callable(run_text):
+            return False
+        can_fallback = getattr(self._provider, "can_fallback_to_prompt_tools", None)
+        if not callable(can_fallback):
+            return False
+        return bool(can_fallback(exc))
+
     def _structured_provider(self) -> ModelTurnProvider:
         run_structured = getattr(self._provider, "run_structured", None)
         if not callable(run_structured):
@@ -588,6 +646,152 @@ class ChatSessionTurnRunner:
                             response_model=response_model,
                             error=exc,
                             invalid_payload=invalid_payload,
+                        ),
+                    },
+                ]
+
+    def _run_prompt_tool_round(
+        self,
+        *,
+        round_index: int,
+        messages: list[dict[str, Any]],
+        prepared: PreparedModelInteraction,
+    ) -> Generator[
+        ChatWorkflowStatusEvent | ChatWorkflowInspectorEvent | ChatWorkflowResultEvent,
+        None,
+        ParsedModelResponse,
+    ]:
+        decision = yield from self._run_prompt_tool_step(
+            round_index=round_index,
+            stage_name="decision",
+            messages=self._prompt_tool_adapter.decision_stage_messages(
+                base_messages=messages,
+                tool_specs=prepared.tool_specs,
+            ),
+            parser=lambda text: self._prompt_tool_adapter.parse_decision(
+                text,
+                tool_specs=prepared.tool_specs,
+            ),
+            repair_context={"tool_specs": prepared.tool_specs},
+        )
+        if decision.mode == "finalize":
+            return (
+                yield from self._run_prompt_tool_step(
+                    round_index=round_index,
+                    stage_name="final_response",
+                    messages=self._prompt_tool_adapter.final_response_stage_messages(
+                        base_messages=messages,
+                        final_response_model=ChatFinalResponse,
+                    ),
+                    parser=lambda text: self._prompt_tool_adapter.parse_final_response(
+                        text,
+                        final_response_model=ChatFinalResponse,
+                    ),
+                    repair_context={"final_response_model": ChatFinalResponse},
+                )
+            )
+
+        tool_name = decision.tool_name
+        if not isinstance(tool_name, str) or tool_name.strip() == "":
+            raise ValueError("Prompt-tool decision did not select a valid tool name.")
+        tool_spec = self._tool_spec(prepared.tool_specs, tool_name)
+        tool_input_model = prepared.input_models.get(tool_name)
+        if tool_input_model is None:
+            raise ValueError(
+                f"Selected tool '{tool_name}' was not prepared for this interaction."
+            )
+        yield ChatWorkflowStatusEvent(status=f"preparing {tool_name}")
+        return (
+            yield from self._run_prompt_tool_step(
+                round_index=round_index,
+                stage_name=f"tool:{tool_name}",
+                messages=self._prompt_tool_adapter.tool_invocation_stage_messages(
+                    base_messages=messages,
+                    tool_spec=tool_spec,
+                    input_model=tool_input_model,
+                ),
+                parser=lambda text: self._prompt_tool_adapter.parse_tool_invocation(
+                    text,
+                    tool_name=tool_name,
+                    input_model=tool_input_model,
+                ),
+                repair_context={
+                    "selected_tool": tool_spec,
+                    "input_model": tool_input_model,
+                },
+            )
+        )
+
+    def _run_prompt_tool_step(
+        self,
+        *,
+        round_index: int,
+        stage_name: str,
+        messages: list[dict[str, Any]],
+        parser: Callable[[str], _StagedStepT],
+        repair_context: dict[str, object],
+    ) -> Generator[
+        ChatWorkflowStatusEvent | ChatWorkflowInspectorEvent | ChatWorkflowResultEvent,
+        None,
+        _StagedStepT,
+    ]:
+        run_text = getattr(self._provider, "run_text", None)
+        if not callable(run_text):
+            raise RuntimeError(
+                "Prompt-tool protocol requires a provider that supports run_text()."
+            )
+        attempt_messages = list(messages)
+        repair_attempted = False
+        while True:
+            yield ChatWorkflowInspectorEvent(
+                round_index=round_index,
+                kind="provider_messages",
+                payload=attempt_messages,
+            )
+            text: str | None = None
+            try:
+                text = run_text(
+                    messages=attempt_messages,
+                    request_params={"temperature": self._temperature},
+                )
+                return parser(text)
+            except Exception as exc:
+                if repair_attempted:
+                    raise
+                repair_attempted = True
+                yield ChatWorkflowStatusEvent(status=f"repairing {stage_name}")
+                invalid_payload: object | None = text
+                if invalid_payload is None:
+                    invalid_payload = getattr(exc, "invalid_payload", None)
+                tool_specs_value = repair_context.get("tool_specs")
+                selected_tool_value = repair_context.get("selected_tool")
+                input_model_value = repair_context.get("input_model")
+                attempt_messages = [
+                    *messages,
+                    {
+                        "role": "system",
+                        "content": self._prompt_tool_adapter.repair_stage_message(
+                            stage_name=stage_name,
+                            error=exc,
+                            invalid_payload=invalid_payload,
+                            tool_specs=(
+                                cast(list[ToolSpec], tool_specs_value)
+                                if isinstance(tool_specs_value, list)
+                                else None
+                            ),
+                            selected_tool=(
+                                selected_tool_value
+                                if isinstance(selected_tool_value, ToolSpec)
+                                else None
+                            ),
+                            input_model=(
+                                cast(type[BaseModel], input_model_value)
+                                if isinstance(input_model_value, type)
+                                else None
+                            ),
+                            final_response_model=repair_context.get(
+                                "final_response_model"
+                            ),
                         ),
                     },
                 ]

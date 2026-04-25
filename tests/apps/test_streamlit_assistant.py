@@ -1182,6 +1182,35 @@ class _RecordingStagedProvider:
         return self.run_structured(**kwargs)
 
 
+class _RecordingPromptToolProvider:
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = list(responses)
+        self.calls: list[list[dict[str, str]]] = []
+
+    def prefers_simplified_json_schema_contract(self) -> bool:
+        return False
+
+    def uses_prompt_tool_protocol(self) -> bool:
+        return True
+
+    def run(self, **kwargs: object) -> ParsedModelResponse:
+        del kwargs
+        raise AssertionError("prompt-tool provider should use run_text()")
+
+    async def run_async(self, **kwargs: object) -> ParsedModelResponse:
+        del kwargs
+        raise AssertionError("prompt-tool provider should use run_text_async()")
+
+    def run_text(self, **kwargs: object) -> str:
+        messages = kwargs["messages"]  # type: ignore[index]
+        assert isinstance(messages, list)
+        self.calls.append([dict(message) for message in messages])
+        return self._responses.pop(0)
+
+    async def run_text_async(self, **kwargs: object) -> str:
+        return self.run_text(**kwargs)
+
+
 def test_assistant_harness_turn_provider_builds_research_messages() -> None:
     provider = _RecordingProvider()
     harness_provider = AssistantHarnessTurnProvider(
@@ -1246,6 +1275,39 @@ def test_assistant_harness_turn_provider_repairs_invalid_staged_final_response()
     assert "The previous final_response response was invalid." in repair_message
     assert "Validation summary:" in repair_message
     assert '"summary": "bad-shape"' in repair_message
+
+
+def test_assistant_harness_turn_provider_uses_prompt_tools() -> None:
+    provider = _RecordingPromptToolProvider(
+        [
+            "```decision\nMODE: finalize\n```",
+            "```final\nANSWER:\nResearch answer.\n```",
+        ]
+    )
+    harness_provider = AssistantHarnessTurnProvider(
+        provider=provider,  # type: ignore[arg-type]
+        temperature=0.1,
+        system_prompt="research-system",
+    )
+    response = harness_provider.run(
+        state=object(),
+        selected_task_ids=["task-1"],
+        context=ToolContext(
+            invocation_id="turn-1",
+            metadata={"harness_turn_context": {"turn_index": 1}},
+        ),
+        adapter=ActionEnvelopeAdapter(),
+        prepared_interaction=build_assistant_executor()[1].prepare_model_interaction(
+            ActionEnvelopeAdapter(),
+            context=ToolContext(invocation_id="demo"),
+            final_response_model=str,
+        ),
+    )
+
+    assert response.final_response == "Research answer."
+    assert len(provider.calls) == 2
+    assert "```decision" in provider.calls[0][-1]["content"]
+    assert "```final" in provider.calls[1][-1]["content"]
 
 
 def test_streamlit_assistant_helper_paths_and_preferences(
