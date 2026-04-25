@@ -590,8 +590,8 @@ class ChatSessionTurnRunner:
                 if not isinstance(arguments, dict):
                     arguments = {}
                 lines.append(
-                    "Prior tool call record: "
-                    f"name={tool_name}, arguments={cls._compact_json(arguments)}."
+                    "Tool call audit metadata, not evidence and not an answer: "
+                    f"{tool_name}({cls._compact_json(arguments)})."
                 )
             return "\n".join(lines) if lines else None
         if final_response is not None:

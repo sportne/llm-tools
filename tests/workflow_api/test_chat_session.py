@@ -295,7 +295,8 @@ def test_chat_session_runner_summarizes_model_visible_assistant_history(
     serialized = runner._serialize_messages_for_model([tool_message, final_message])
 
     assert serialized[0]["content"] == (
-        'Prior tool call record: name=read_file, arguments={"path":"README.md"}.'
+        "Tool call audit metadata, not evidence and not an answer: "
+        'read_file({"path":"README.md"}).'
     )
     assert serialized[1]["content"] == "Assistant final answer: Done."
     assert ChatSessionTurnRunner._assistant_message_summary("not json") is None
@@ -492,7 +493,8 @@ def test_chat_session_runner_executes_prompt_tool_rounds(tmp_path: Path) -> None
     assert assistant_history
     assert all('"actions"' not in str(content) for content in assistant_history)
     assert any(
-        "Prior tool call record: name=search_text" in str(content)
+        "Tool call audit metadata, not evidence and not an answer: search_text"
+        in str(content)
         for content in assistant_history
     )
     assert any(
@@ -681,6 +683,53 @@ def test_chat_session_runner_repairs_prompt_tool_final_response(
     assert isinstance(result_event, ChatWorkflowResultEvent)
     assert result_event.result.final_response is not None
     assert result_event.result.final_response.answer == "Done after repair."
+
+
+def test_chat_session_runner_repairs_prompt_tool_audit_metadata_final_response(
+    tmp_path: Path,
+) -> None:
+    provider = _FakePromptToolProvider(
+        [
+            "```decision\nMODE: finalize\n```",
+            (
+                "```final\nANSWER:\n"
+                "Tool call audit metadata, not evidence and not an answer: "
+                'read_file({"path":"README.md"}).\n```'
+            ),
+            "```final\nANSWER:\nThe README explains the project.\n```",
+        ]
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer from the gathered evidence.",
+        session_state=ChatSessionState(),
+        executor=_empty_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(max_tool_result_chars=500),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    events = list(runner)
+
+    assert len(provider.calls) == 3
+    repair_message = provider.calls[-1][-1]["content"]
+    assert isinstance(repair_message, str)
+    assert "audit metadata" in repair_message
+    assert "tool result content as evidence" in repair_message
+    assert any(
+        isinstance(event, ChatWorkflowStatusEvent)
+        and event.status == "repairing final_response"
+        for event in events
+    )
+    result_event = events[-1]
+    assert isinstance(result_event, ChatWorkflowResultEvent)
+    assert result_event.result.final_response is not None
+    assert (
+        result_event.result.final_response.answer == "The README explains the project."
+    )
 
 
 def test_chat_session_runner_fails_prompt_tool_stage_after_two_repairs(

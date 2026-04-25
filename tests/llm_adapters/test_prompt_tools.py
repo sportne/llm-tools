@@ -401,6 +401,29 @@ def test_parse_final_response_rejects_empty_answer() -> None:
         )
 
 
+def test_parse_final_response_rejects_tool_audit_metadata_answers() -> None:
+    adapter = PromptToolAdapter()
+
+    with pytest.raises(PromptToolProtocolError, match="audit metadata"):
+        adapter.parse_final_response(
+            (
+                "```final\nANSWER:\n"
+                "Tool call audit metadata, not evidence and not an answer: "
+                'read_file({"path":"README.md"}).\n```'
+            ),
+            final_response_model=ChatFinalResponse,
+        )
+    with pytest.raises(PromptToolProtocolError, match="audit metadata"):
+        adapter.parse_final_response(
+            (
+                "```final\nANSWER:\n"
+                '{"answer": "Prior tool call record: name=search_text, '
+                'arguments={\\"path\\":\\"src\\"}."}\n```'
+            ),
+            final_response_model=ChatFinalResponse,
+        )
+
+
 def test_prompt_tool_messages_and_repair_guidance_cover_schema_variants() -> None:
     adapter = PromptToolAdapter()
     base_messages = [{"role": "user", "content": "work"}]
@@ -462,10 +485,13 @@ def test_prompt_tool_messages_and_repair_guidance_cover_schema_variants() -> Non
     assert "MODE must be exactly" in decision_messages[-1]["content"]
     assert "BEGIN_ARG: argument_name" in tool_messages[-1]["content"]
     assert "Final response schema:" in final_messages[-1]["content"]
+    assert "Tool call audit metadata" in final_messages[-1]["content"]
+    assert "must not be repeated as the answer" in final_messages[-1]["content"]
     assert "Exact tool block shape:" in repair
     assert str({object(): "bad"}).startswith("{<object object")
     assert "Return only the fields required" in unknown_repair
     assert "RuntimeError" in unknown_repair
     assert "Final response schema:" in final_repair
+    assert "tool result content as evidence" in final_repair
     assert "structured JSON action-envelope shape" in envelope_repair
     assert '"actions"' not in envelope_repair

@@ -258,6 +258,13 @@ class PromptToolAdapter:
                     "Current step: finalize the answer.\n"
                     "Return exactly one fenced final block and no prose outside it.\n"
                     "Do not include a tool invocation.\n"
+                    "Answer the user's request using the available tool result content "
+                    "as evidence.\n"
+                    "Tool call audit metadata may show which tools and arguments were "
+                    "used, but it is not evidence and must not be repeated as the "
+                    "answer.\n"
+                    "If evidence is incomplete, provide the best supported answer and "
+                    "state what is uncertain or missing.\n"
                     "Use plain markdown after ANSWER unless a JSON object is required.\n"
                     f"{schema_text}\n\n"
                     "Required format:\n"
@@ -304,7 +311,9 @@ class PromptToolAdapter:
             ),
             "final_response": (
                 "Finalization rules: return exactly one ```final block with ANSWER:. "
-                "Do not include a tool block or prose outside the block."
+                "Do not include a tool block or prose outside the block. "
+                "Use tool result content as evidence; do not answer by repeating "
+                "tool call audit metadata."
             ),
         }.get(stage_name)
         if guidance is None and stage_name.startswith("tool:"):
@@ -730,6 +739,10 @@ class PromptToolAdapter:
                 raise PromptToolProtocolError(
                     "Final answer must not be empty.", invalid_payload=invalid_payload
                 )
+            PromptToolAdapter._reject_audit_metadata_answer(
+                value,
+                invalid_payload=invalid_payload,
+            )
             return value
         if isinstance(final_response_model, type) and issubclass(
             final_response_model, BaseModel
@@ -743,6 +756,10 @@ class PromptToolAdapter:
                         str(exc), invalid_payload=invalid_payload
                     ) from exc
             elif "answer" in final_response_model.model_fields:
+                PromptToolAdapter._reject_audit_metadata_answer(
+                    value,
+                    invalid_payload=invalid_payload,
+                )
                 payload = {"answer": value}
             else:
                 raise PromptToolProtocolError(
@@ -750,6 +767,13 @@ class PromptToolAdapter:
                     invalid_payload=invalid_payload,
                 )
             try:
+                if isinstance(payload, dict):
+                    answer = payload.get("answer")
+                    if isinstance(answer, str):
+                        PromptToolAdapter._reject_audit_metadata_answer(
+                            answer,
+                            invalid_payload=invalid_payload,
+                        )
                 return final_response_model.model_validate(payload).model_dump(
                     mode="json"
                 )
@@ -758,6 +782,34 @@ class PromptToolAdapter:
                     str(exc), invalid_payload=invalid_payload
                 ) from exc
         return value
+
+    @staticmethod
+    def _reject_audit_metadata_answer(
+        value: str,
+        *,
+        invalid_payload: object,
+    ) -> None:
+        normalized = " ".join(value.strip().lower().split())
+        if not normalized:
+            return
+        audit_markers = (
+            "prior tool call record:",
+            "tool call audit metadata",
+            "name=read_file,",
+            "name=search_text,",
+            "name=list_directory,",
+            "read_file({",
+            "search_text({",
+            "list_directory({",
+        )
+        if normalized.startswith(audit_markers):
+            raise PromptToolProtocolError(
+                (
+                    "Final answer repeated tool-call audit metadata instead of "
+                    "answering from tool result evidence."
+                ),
+                invalid_payload=invalid_payload,
+            )
 
     @staticmethod
     def _tool_catalog(tool_specs: list[ToolSpec]) -> str:
