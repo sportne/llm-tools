@@ -238,7 +238,28 @@ def _summarize_artifact(
         "artifact": str(artifact),
     }
     if not artifact.exists():
-        return {**base, "status": "missing", "summary": "No artifact was written."}
+        return {
+            **base,
+            "status": "missing",
+            "summary": "No artifact was written.",
+            "resolved_mode": None,
+            "checks": None,
+            "tool_sequence": [],
+            "tool_call_count": 0,
+            "exact_duplicate_tool_calls": 0,
+            "tool_name_counts": {},
+            "repair_count": 0,
+            "hit_default_round_cap": False,
+            "final_response_present": False,
+            "final_answer_chars": 0,
+            "answer_quality": {
+                "expected_keyword_hits": 0,
+                "expected_keywords": [],
+                "refusal_like": False,
+                "quality_passed": False,
+            },
+            "failure": "No artifact was written.",
+        }
     payload = json.loads(artifact.read_text(encoding="utf-8"))
     tool_calls = _tool_calls(payload)
     exact_counts = Counter(_tool_call_key(call) for call in tool_calls)
