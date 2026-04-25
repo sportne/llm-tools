@@ -117,6 +117,16 @@ class _ProbeModel(BaseModel):
     items: list[str]
 
 
+def _assert_schema_prompt_was_appended(call: dict[str, Any]) -> None:
+    messages = call["messages"]
+    assert messages[-1]["role"] == "system"
+    schema_prompt = messages[-1]["content"]
+    assert "Return a JSON object that satisfies this schema." in schema_prompt
+    assert '"status"' in schema_prompt
+    assert '"count"' in schema_prompt
+    assert '"items"' in schema_prompt
+
+
 class _MarkdownCarrier(BaseModel):
     status: str
     count: int
@@ -340,6 +350,8 @@ def test_md_json_mode_extracts_json_from_markdown_content() -> None:
     }
     assert len(completions.calls) == 1
     assert "response_model" not in completions.calls[0]
+    assert completions.calls[0]["messages"][0]["content"] == "Return structured data."
+    _assert_schema_prompt_was_appended(completions.calls[0])
 
 
 def test_md_json_mode_extracts_json_from_dict_chat_completion() -> None:
@@ -370,6 +382,7 @@ def test_md_json_mode_extracts_json_from_dict_chat_completion() -> None:
     )
 
     assert payload.model_dump()["status"] == "ok"
+    _assert_schema_prompt_was_appended(completions.calls[0])
 
 
 def test_md_json_mode_extracts_json_from_markdown_content_async() -> None:
@@ -399,6 +412,8 @@ def test_md_json_mode_extracts_json_from_markdown_content_async() -> None:
         "items": ["alpha", "beta", "gamma"],
     }
     assert len(completions.calls) == 1
+    assert "response_model" not in completions.calls[0]
+    _assert_schema_prompt_was_appended(completions.calls[0])
 
 
 def test_md_json_mode_bypasses_instructor_sync_client(monkeypatch: Any) -> None:
@@ -424,6 +439,7 @@ def test_md_json_mode_bypasses_instructor_sync_client(monkeypatch: Any) -> None:
     assert payload.model_dump()["status"] == "ok"
     assert len(base_completions.calls) == 1
     assert "response_model" not in base_completions.calls[0]
+    _assert_schema_prompt_was_appended(base_completions.calls[0])
 
 
 def test_md_json_mode_bypasses_instructor_async_client(monkeypatch: Any) -> None:
@@ -449,6 +465,7 @@ def test_md_json_mode_bypasses_instructor_async_client(monkeypatch: Any) -> None
     assert payload.model_dump()["status"] == "ok"
     assert len(base_completions.calls) == 1
     assert "response_model" not in base_completions.calls[0]
+    _assert_schema_prompt_was_appended(base_completions.calls[0])
 
 
 def test_parse_markdown_json_response_accepts_structured_payloads() -> None:
