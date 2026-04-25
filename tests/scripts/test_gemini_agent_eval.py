@@ -13,6 +13,19 @@ import common  # noqa: E402
 import run_gemini_agent_eval as gemini_eval  # noqa: E402
 
 
+def test_gemini_default_provider_modes_include_native_tools() -> None:
+    parser = gemini_eval.build_parser()
+    args = parser.parse_args([])
+
+    assert args.provider_modes.split(",") == [
+        "tools",
+        "json",
+        "prompt_tools",
+        "prompt_tools_single_action",
+        "prompt_tools_category",
+    ]
+
+
 def test_backend_matrix_config_supports_custom_openai_provider(tmp_path: Path) -> None:
     config = common.build_assistant_config(
         workspace=tmp_path,

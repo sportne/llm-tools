@@ -15,7 +15,6 @@ from typing import Any
 
 import common
 from run_ollama_agent_eval import (
-    DEFAULT_PROVIDER_MODES,
     DEFAULT_SCENARIOS,
     _csv,
     _rollup,
@@ -27,6 +26,13 @@ DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/open
 DEFAULT_API_KEY_FILE = "google-ai-studio-api-key.txt"
 GEMINI_API_KEY_ENV_VAR = "GOOGLE_AI_STUDIO_API_KEY"
 NATIVE_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+DEFAULT_PROVIDER_MODES = [
+    "tools",
+    "json",
+    "prompt_tools",
+    "prompt_tools_single_action",
+    "prompt_tools_category",
+]
 DEFAULT_MODEL_PROFILES = [
     {
         "model": "gemini-3.1-flash-lite-preview",
