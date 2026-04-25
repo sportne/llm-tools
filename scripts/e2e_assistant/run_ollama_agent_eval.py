@@ -263,7 +263,9 @@ def _summarize_artifact(
     payload = json.loads(artifact.read_text(encoding="utf-8"))
     tool_calls = _tool_calls(payload)
     exact_counts = Counter(_tool_call_key(call) for call in tool_calls)
-    duplicate_exact_calls = sum(count - 1 for count in exact_counts.values() if count > 1)
+    duplicate_exact_calls = sum(
+        count - 1 for count in exact_counts.values() if count > 1
+    )
     status_events = payload.get("status_events") or []
     final_response = payload.get("final_response")
     answer = (final_response or {}).get("answer", "")
@@ -324,7 +326,9 @@ def _tool_call_key(call: dict[str, Any]) -> str:
 
 def _rollup(rows: list[dict[str, Any]]) -> dict[str, Any]:
     completed = [row for row in rows if row.get("status") != "missing"]
-    passed = [row for row in completed if row.get("status") == common.SCENARIO_STATUS_PASSED]
+    passed = [
+        row for row in completed if row.get("status") == common.SCENARIO_STATUS_PASSED
+    ]
     quality_passed = [
         row
         for row in completed
@@ -339,7 +343,9 @@ def _rollup(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "quality_pass_rate": (
             len(quality_passed) / len(completed) if completed else 0.0
         ),
-        "round_cap_hits": sum(1 for row in completed if row.get("hit_default_round_cap")),
+        "round_cap_hits": sum(
+            1 for row in completed if row.get("hit_default_round_cap")
+        ),
         "total_exact_duplicate_tool_calls": sum(
             int(row.get("exact_duplicate_tool_calls") or 0) for row in completed
         ),

@@ -81,13 +81,17 @@ class PromptToolAdapter:
             {
                 "role": "system",
                 "content": (
-                    f"Current step: invoke the selected tool '{tool_spec.name}'.\n"
+                    "Current step: fill arguments for the already-selected tool.\n"
+                    f"The selected tool is fixed: {tool_spec.name}\n"
+                    "This is not a tool-selection step.\n"
                     f"Tool description: {tool_spec.description}\n"
-                    "Return exactly one fenced tool block for this tool and no prose.\n"
+                    "Return exactly one fenced tool block for the fixed tool and no prose.\n"
                     "The tool block must be the final substantive content.\n"
-                    "Do not choose another tool and do not finalize in this step.\n\n"
+                    "Do not choose another tool and do not finalize in this step.\n"
+                    "Changing TOOL_NAME is invalid even if another available tool seems better.\n\n"
                     "Hard requirements:\n"
-                    f"- The first non-empty line inside the block must be exactly: TOOL_NAME: {tool_spec.name}\n"
+                    f"- Copy this literal line as the first non-empty line inside the block: TOOL_NAME: {tool_spec.name}\n"
+                    "- TOOL_NAME is not a choice field in this step.\n"
                     f"- Do not write '{tool_spec.name}:' as a field name.\n"
                     "- Every argument must start with BEGIN_ARG: argument_name on one line.\n"
                     "- Do not put the argument name on the next line after BEGIN_ARG:.\n"
@@ -152,9 +156,19 @@ class PromptToolAdapter:
             ),
         }.get(stage_name)
         if guidance is None and stage_name.startswith("tool:"):
+            selected_tool_name = (
+                selected_tool.name if selected_tool is not None else None
+            )
+            tool_line = (
+                f"TOOL_NAME: {selected_tool_name}"
+                if selected_tool_name is not None
+                else "TOOL_NAME: <selected tool>"
+            )
             guidance = (
-                "Tool rules: return exactly one ```tool block for the selected tool. "
-                "The first non-empty line inside the block must be TOOL_NAME: <selected tool>. "
+                "Tool rules: this is not a tool-selection step. "
+                "Return exactly one ```tool block for the already-selected tool. "
+                f"The first non-empty line inside the block must be exactly {tool_line}. "
+                "Do not change TOOL_NAME even if another available tool seems better. "
                 "Do not use the tool name itself as a field name. "
                 "Use BEGIN_ARG: argument_name on one line, then the value, then END_ARG."
             )

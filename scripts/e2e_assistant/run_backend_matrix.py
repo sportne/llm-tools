@@ -105,7 +105,10 @@ class _DeterministicProtectionClassifier:
     def assess_response(self, **kwargs: object) -> ProtectionAssessment:
         response_payload = kwargs["response_payload"]
         response_text = str(response_payload).lower()
-        if "top secret token" in response_text or "proprietary playbook" in response_text:
+        if (
+            "top secret token" in response_text
+            or "proprietary playbook" in response_text
+        ):
             return ProtectionAssessment(
                 sensitivity_label="restricted",
                 reasoning="Candidate answer contains restricted proprietary material.",
@@ -241,6 +244,7 @@ def _run_chat_turn(
     final_response_payload: dict[str, Any] | None = None
     token_usage_payload: dict[str, Any] | None = None
     session_state_payload: dict[str, Any] | None = None
+    failure_payload: dict[str, Any] | None = None
 
     try:
         runner = _build_assistant_runner(
@@ -307,10 +311,21 @@ def _run_chat_turn(
                             final_response=common.dump_model(result.final_response),
                         )
                     )
+    except Exception as exc:
+        failure_payload = common.failure_payload(exc)
+        transcript_entries.append(
+            common.transcript_entry(
+                "system",
+                (
+                    "Scenario execution raised an exception after partial chat "
+                    f"artifacts were captured: {type(exc).__name__}: {exc}"
+                ),
+            )
+        )
     finally:
         assistant_app.build_protection_controller = original_build_protection_controller
 
-    return {
+    payload = {
         "prompt": prompt,
         "status_events": status_events,
         "approvals": approvals,
@@ -324,6 +339,9 @@ def _run_chat_turn(
         "token_usage": token_usage_payload,
         "session_state": session_state_payload,
     }
+    if failure_payload is not None:
+        payload["failure"] = failure_payload
+    return payload
 
 
 def _serialize_chat_turn(
@@ -390,9 +408,7 @@ def _evaluate_chat_multi_turn(
     final_session_state = final_turn.get("session_state") or {}
     turn_records = final_session_state.get("turns") or []
     all_tool_names = [
-        tool_name
-        for turn in turns
-        for tool_name in turn.get("tool_sequence", [])
+        tool_name for turn in turns for tool_name in turn.get("tool_sequence", [])
     ]
     checks = {
         "all_turns_have_final_response": all(
@@ -400,8 +416,7 @@ def _evaluate_chat_multi_turn(
         ),
         "session_retains_multiple_turns": len(turn_records) == len(turns),
         "at_least_one_local_tool_used": any(
-            tool_name
-            in {"read_file", "search_text", "find_files", "list_directory"}
+            tool_name in {"read_file", "search_text", "find_files", "list_directory"}
             for tool_name in all_tool_names
         ),
         "later_turn_completed": bool(final_turn.get("final_response")),
@@ -475,14 +490,10 @@ def _run_chat_multi_turn_scenario(
 
     result["turns"] = turns
     result["tool_sequence"] = [
-        tool_name
-        for turn in turns
-        for tool_name in turn.get("tool_sequence", [])
+        tool_name for turn in turns for tool_name in turn.get("tool_sequence", [])
     ]
     result["transcript_entries"] = [
-        entry
-        for turn in turns
-        for entry in turn.get("transcript_entries", [])
+        entry for turn in turns for entry in turn.get("transcript_entries", [])
     ]
     result["final_response"] = turns[-1].get("final_response")
     result["session_state"] = turns[-1].get("session_state")
@@ -525,19 +536,19 @@ def _evaluate_protection_demo(
     challenge_turn, feedback_turn, sanitize_turn = turns
     feedback_entries = scenario_result.get("corrections_entries", [])
     provenance_paths = scenario_result.get("sanitize_provenance_paths", [])
-    sanitize_answer = (
-        ((sanitize_turn.get("final_response") or {}).get("answer")) or ""
-    )
+    sanitize_answer = ((sanitize_turn.get("final_response") or {}).get("answer")) or ""
     checks = {
         "challenge_returned_final_response": challenge_turn.get("final_response")
         is not None,
         "challenge_created_pending_prompt": bool(
-            (challenge_turn.get("session_state") or {}).get(
-                "pending_protection_prompt"
-            )
+            (challenge_turn.get("session_state") or {}).get("pending_protection_prompt")
         ),
         "feedback_cleared_pending_prompt": (
-            ((feedback_turn.get("session_state") or {}).get("pending_protection_prompt"))
+            (
+                (feedback_turn.get("session_state") or {}).get(
+                    "pending_protection_prompt"
+                )
+            )
             is None
         ),
         "feedback_recorded_to_store": bool(feedback_entries)
@@ -796,6 +807,8 @@ def _run_chat_scenario(
 
     result.update(chat_turn)
     result["checks"] = checks
+    if chat_turn.get("failure"):
+        summary = "Scenario execution raised an exception after partial artifacts."
     result["summary"] = summary
     result["status"] = (
         common.SCENARIO_STATUS_PASSED
@@ -926,7 +939,9 @@ def _run_research_approval_flow(
     workflow_statuses: list[str] = []
     if trace is not None:
         for turn in trace.turns:
-            workflow_statuses.extend(status.value for status in turn.workflow_outcome_statuses)
+            workflow_statuses.extend(
+                status.value for status in turn.workflow_outcome_statuses
+            )
             for invocation in turn.invocation_traces:
                 tool_name_counts[invocation.tool_name] += 1
     return {
