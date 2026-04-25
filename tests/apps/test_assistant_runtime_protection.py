@@ -843,7 +843,7 @@ def test_direct_research_provider_runs_staged_async_and_repairs_provider_failure
 ):
     import llm_tools.apps.assistant_research_provider as provider_module
 
-    error = RuntimeError("temporary parse failure")
+    error = ValueError("temporary parse failure")
     error.invalid_payload = {"mode": "tool"}  # type: ignore[attr-defined]
     provider = _StagedProvider(
         [
@@ -886,7 +886,11 @@ def test_direct_research_provider_raises_after_two_staged_repairs() -> None:
     import llm_tools.apps.assistant_research_provider as provider_module
 
     provider = _StagedProvider(
-        [RuntimeError("boom"), RuntimeError("boom again"), RuntimeError("boom last")]
+        [
+            ValueError("schema validation failed"),
+            ValueError("schema validation failed again"),
+            ValueError("schema validation failed last"),
+        ]
     )
     harness_provider = provider_module.AssistantHarnessTurnProvider(
         provider=provider,  # type: ignore[arg-type]
@@ -904,8 +908,8 @@ def test_direct_research_provider_raises_after_two_staged_repairs() -> None:
                 prepared_interaction=_prepared_research_interaction(),
             )
         )
-    except RuntimeError as exc:
-        assert str(exc) == "boom last"
+    except ValueError as exc:
+        assert str(exc) == "schema validation failed last"
     else:  # pragma: no cover - defensive assertion
         raise AssertionError("Expected repeated staged failure to propagate")
 
@@ -1088,7 +1092,7 @@ def test_direct_research_provider_falls_back_to_prompt_tools_from_sync_modes() -
 
         assert parsed.final_response == f"Fallback staged={staged}."
         assert len(provider.sync_messages) == 2
-        assert provider.structured_calls == (3 if staged else 0)
+        assert provider.structured_calls == (1 if staged else 0)
         assert provider.run_calls == int(not staged)
 
 
@@ -1124,7 +1128,7 @@ def test_direct_research_provider_falls_back_to_prompt_tools_from_async_modes() 
 
         assert parsed.final_response == f"Async fallback staged={staged}."
         assert len(provider.async_messages) == 2
-        assert provider.async_structured_calls == (3 if staged else 0)
+        assert provider.async_structured_calls == (1 if staged else 0)
         assert provider.async_run_calls == int(not staged)
 
 

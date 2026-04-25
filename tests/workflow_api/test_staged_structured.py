@@ -13,6 +13,7 @@ from llm_tools.workflow_api.executor import PreparedModelInteraction
 from llm_tools.workflow_api.staged_structured import (
     StagedStructuredToolRunner,
     format_invalid_payload,
+    is_repairable_stage_error,
     repair_stage_guidance,
     tool_spec_by_name,
     validation_error_summary,
@@ -127,14 +128,14 @@ def test_staged_runner_repairs_twice_then_raises() -> None:
     adapter = ActionEnvelopeAdapter()
     provider = _FakeProvider(
         [
-            RuntimeError("first"),
-            RuntimeError("second"),
-            RuntimeError("third"),
+            ValueError("schema validation failed first"),
+            ValueError("schema validation failed second"),
+            ValueError("schema validation failed third"),
         ]
     )
     runner = StagedStructuredToolRunner(adapter=adapter, temperature=0)
 
-    with pytest.raises(RuntimeError, match="third"):
+    with pytest.raises(ValueError, match="third"):
         runner.run_round(
             provider=provider,
             messages=[{"role": "user", "content": "answer"}],
@@ -151,12 +152,34 @@ def test_staged_runner_repairs_twice_then_raises() -> None:
     )
 
 
+def test_staged_runner_does_not_repair_transport_failure() -> None:
+    adapter = ActionEnvelopeAdapter()
+    provider = _FakeProvider([RuntimeError("connection refused")])
+
+    with pytest.raises(RuntimeError, match="connection refused"):
+        StagedStructuredToolRunner(adapter=adapter, temperature=0).run_round(
+            provider=provider,
+            messages=[{"role": "user", "content": "answer"}],
+            prepared=_prepared(adapter),
+            final_response_model=_FinalAnswer,
+        )
+
+    assert len(provider.messages) == 1
+
+
 def test_staged_runner_helpers_cover_edge_cases() -> None:
     adapter = ActionEnvelopeAdapter()
     runner = StagedStructuredToolRunner(adapter=adapter, temperature=0)
     spec = ToolSpec(name="lookup", description="Read one path.")
 
     assert validation_error_summary(RuntimeError("")) == "RuntimeError"
+    assert is_repairable_stage_error(ValueError("Invalid staged payload."))
+    assert not is_repairable_stage_error(RuntimeError("connection refused"))
+    assert not is_repairable_stage_error(
+        ValueError(
+            "All provider mode attempts failed. Overall failure type: transport-related."
+        )
+    )
     assert repair_stage_guidance("tool:lookup").startswith("Tool stage rules:")
     assert repair_stage_guidance("final_response").startswith(
         "Finalization stage rules:"

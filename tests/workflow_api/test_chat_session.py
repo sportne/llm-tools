@@ -70,7 +70,10 @@ class _FakeStagedProvider:
         assert isinstance(messages, list)
         self.calls.append([dict(message) for message in messages])
         self.response_model_names.append(kwargs["response_model"].__name__)
-        return self._responses.pop(0)
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
     def uses_staged_schema_protocol(self) -> bool:
         return True
@@ -707,6 +710,29 @@ def test_chat_session_runner_fails_staged_stage_after_two_repairs(
     assert "The previous final_response response was invalid." in str(
         provider.calls[3][-1]["content"]
     )
+
+
+def test_chat_session_runner_does_not_repair_staged_transport_failure(
+    tmp_path: Path,
+) -> None:
+    provider = _FakeStagedProvider([RuntimeError("connection refused")])
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(),
+        executor=_empty_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    with pytest.raises(RuntimeError, match="connection refused"):
+        list(runner)
+
+    assert len(provider.calls) == 1
 
 
 def test_chat_session_runner_stage_helpers_cover_remaining_edges(

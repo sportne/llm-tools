@@ -67,6 +67,7 @@ from llm_tools.workflow_api.protection import ProtectionAction, ProtectionContro
 from llm_tools.workflow_api.staged_structured import (
     StagedStructuredToolRunner,
     format_invalid_payload,
+    is_repairable_stage_error,
     repair_stage_guidance,
     tool_spec_by_name,
     validation_error_summary,
@@ -637,7 +638,7 @@ class ChatSessionTurnRunner:
                 )
                 return parser(payload)
             except Exception as exc:
-                if repair_attempts >= 2:
+                if repair_attempts >= 2 or not is_repairable_stage_error(exc):
                     raise
                 repair_attempts += 1
                 yield ChatWorkflowStatusEvent(status=f"repairing {stage_name}")

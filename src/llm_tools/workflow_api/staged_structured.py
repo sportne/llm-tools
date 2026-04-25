@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import ToolSpec
@@ -257,7 +257,10 @@ class StagedStructuredToolRunner:
                 )
                 return parser(payload)
             except Exception as exc:
-                if repair_attempts >= self._repair_attempts:
+                if (
+                    repair_attempts >= self._repair_attempts
+                    or not is_repairable_stage_error(exc)
+                ):
                     raise
                 repair_attempts += 1
                 invalid_payload = payload
@@ -298,7 +301,10 @@ class StagedStructuredToolRunner:
                 )
                 return parser(payload)
             except Exception as exc:
-                if repair_attempts >= self._repair_attempts:
+                if (
+                    repair_attempts >= self._repair_attempts
+                    or not is_repairable_stage_error(exc)
+                ):
                     raise
                 repair_attempts += 1
                 invalid_payload = payload
@@ -453,6 +459,91 @@ def validation_error_summary(error: Exception) -> str:
     """Return a short, model-visible validation summary."""
     message = str(error).strip()
     return message or type(error).__name__
+
+
+def is_repairable_stage_error(error: Exception) -> bool:
+    """Return whether one staged failure should receive a repair prompt."""
+    nonrepairable_markers = (
+        "transport-related",
+        "connection",
+        "connect",
+        "timed out",
+        "timeout",
+        "rate limit",
+        "rate_limit",
+        "unauthorized",
+        "authentication",
+        "api key",
+        "forbidden",
+        "model not found",
+        "model_not_found",
+        "name resolution",
+        "dns",
+        "refused",
+        "unreachable",
+    )
+    repair_markers = (
+        "validation",
+        "parse",
+        "json",
+        "schema",
+        "structured output",
+        "invalid staged",
+        "invalid action envelope",
+    )
+    for candidate in iter_exception_chain(error):
+        if isinstance(candidate, (ValidationError, json.JSONDecodeError)):
+            return True
+
+        message = str(candidate).lower()
+        if any(marker in message for marker in nonrepairable_markers):
+            return False
+
+        candidate_type = type(candidate)
+        module_name = candidate_type.__module__
+        if module_name.startswith("openai"):
+            return False
+        if module_name.startswith("pydantic"):
+            return True
+
+        class_name = candidate_type.__name__.lower()
+        if isinstance(candidate, ValueError) and (
+            any(marker in class_name for marker in repair_markers)
+            or any(marker in message for marker in repair_markers)
+        ):
+            return True
+
+        if module_name.startswith("instructor") and (
+            any(marker in class_name for marker in repair_markers)
+            or any(marker in message for marker in repair_markers)
+        ):
+            return True
+
+    return False
+
+
+def iter_exception_chain(error: Exception) -> list[BaseException]:
+    """Return an exception plus any causal/context chain without duplicates."""
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    chain: list[BaseException] = []
+    while pending:
+        current = pending.pop()
+        current_id = id(current)
+        if current_id in seen:
+            continue
+        seen.add(current_id)
+        chain.append(current)
+
+        cause = getattr(current, "__cause__", None)
+        if isinstance(cause, BaseException):
+            pending.append(cause)
+
+        context = getattr(current, "__context__", None)
+        if isinstance(context, BaseException):
+            pending.append(context)
+
+    return chain
 
 
 def repair_stage_guidance(stage_name: str) -> str:
