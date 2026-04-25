@@ -1,4 +1,4 @@
-"""Live Ollama example using the OpenAI-compatible provider layer."""
+"""Live Ollama example using the low-level OpenAI-compatible provider layer."""
 
 from __future__ import annotations
 

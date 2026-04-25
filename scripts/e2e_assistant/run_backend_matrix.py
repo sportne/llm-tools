@@ -176,7 +176,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--provider-modes",
-        help="Comma-separated provider modes: tools,json,md_json.",
+        help="Comma-separated provider modes: tools,json,md_json,prompt_tools.",
     )
     return parser
 

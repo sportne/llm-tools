@@ -148,8 +148,13 @@ parsed = provider.run(
 turn_result = executor.execute_parsed_response(parsed, context)
 ```
 
-`workflow_api` remains one-turn scoped even though it also exports
-assistant-facing chat and protection helpers.
+This direct `provider.run(...)` path stays useful for small extraction-style
+turns. For local Ollama agentic workflows, prefer the chat or harness surfaces
+with `provider_mode_strategy: json` or `auto`; those paths use staged JSON
+schema rounds for decision, one selected tool call, and final response instead
+of asking the model for a full action envelope in one completion. If a local
+model cannot satisfy native or markdown JSON reliably, `auto` can fall through
+to the prompt-tool protocol.
 
 ### Run a durable harness session
 

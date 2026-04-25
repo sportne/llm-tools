@@ -59,6 +59,7 @@ class _FakeStagedProvider:
     def __init__(self, responses: list[object]) -> None:
         self._responses = list(responses)
         self.calls: list[list[dict[str, object]]] = []
+        self.response_model_names: list[str] = []
 
     def run(self, **kwargs) -> ParsedModelResponse:
         del kwargs
@@ -68,6 +69,7 @@ class _FakeStagedProvider:
         messages = kwargs["messages"]
         assert isinstance(messages, list)
         self.calls.append([dict(message) for message in messages])
+        self.response_model_names.append(kwargs["response_model"].__name__)
         return self._responses.pop(0)
 
     def uses_staged_schema_protocol(self) -> bool:
@@ -554,6 +556,12 @@ def test_chat_session_runner_executes_staged_tool_then_returns_final_response(
     assert result_event.result.final_response is not None
     assert result_event.result.final_response.answer == "It is defined in src/app.py."
     assert len(provider.calls) == 4
+    assert provider.response_model_names == [
+        "DecisionStep",
+        "SearchTextInvocationStep",
+        "DecisionStep",
+        "FinalResponseStep",
+    ]
     assert "Current step: choose the next action." in provider.calls[0][-1]["content"]
     assert "invoke the selected tool 'search_text'" in provider.calls[1][-1]["content"]
     assert "Current step: finalize the answer." in provider.calls[3][-1]["content"]
@@ -657,6 +665,48 @@ def test_chat_session_runner_with_no_tools_repairs_invalid_tool_decision(
     assert isinstance(repair_message, str)
     assert "The previous decision response was invalid." in repair_message
     assert '"const": "finalize"' in repair_message
+
+
+def test_chat_session_runner_fails_staged_stage_after_two_repairs(
+    tmp_path: Path,
+) -> None:
+    provider = _FakeStagedProvider(
+        [
+            {"mode": "finalize"},
+            {"mode": "finalize", "final_response": {"answer": ""}},
+            {"mode": "finalize", "final_response": {"answer": ""}},
+            {"mode": "finalize", "final_response": {"answer": ""}},
+        ]
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(),
+        executor=_empty_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    with pytest.raises(ValueError, match="Invalid staged final-response payload"):
+        list(runner)
+
+    assert len(provider.calls) == 4
+    assert provider.response_model_names == [
+        "DecisionStep",
+        "FinalResponseStep",
+        "FinalResponseStep",
+        "FinalResponseStep",
+    ]
+    assert "The previous final_response response was invalid." in str(
+        provider.calls[2][-1]["content"]
+    )
+    assert "The previous final_response response was invalid." in str(
+        provider.calls[3][-1]["content"]
+    )
 
 
 def test_chat_session_runner_stage_helpers_cover_remaining_edges(

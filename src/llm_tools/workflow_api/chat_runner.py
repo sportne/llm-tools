@@ -64,6 +64,13 @@ from llm_tools.workflow_api.models import (
     WorkflowTurnResult,
 )
 from llm_tools.workflow_api.protection import ProtectionAction, ProtectionController
+from llm_tools.workflow_api.staged_structured import (
+    StagedStructuredToolRunner,
+    format_invalid_payload,
+    repair_stage_guidance,
+    tool_spec_by_name,
+    validation_error_summary,
+)
 
 _LOCAL_GROUNDING_TOOL_NAMES = frozenset(
     {
@@ -210,6 +217,10 @@ class ChatSessionTurnRunner:
         self._enabled_tool_names = frozenset(enabled_tool_names or ())
         self._adapter = ActionEnvelopeAdapter()
         self._prompt_tool_adapter = PromptToolAdapter()
+        self._staged_tool_runner = StagedStructuredToolRunner(
+            adapter=self._adapter,
+            temperature=self._temperature,
+        )
         self._approval_condition = Condition()
         self._cancel_requested = False
         self._pending_approval: ChatWorkflowApprovalState | None = None
@@ -539,9 +550,9 @@ class ChatSessionTurnRunner:
             provider=provider,
             round_index=round_index,
             stage_name="decision",
-            messages=self._decision_stage_messages(
+            messages=self._staged_tool_runner.decision_stage_messages(
                 base_messages=messages,
-                prepared=prepared,
+                tool_specs=prepared.tool_specs,
             ),
             response_model=decision_model,
             parser=lambda payload: decision_model.model_validate(payload),
@@ -555,7 +566,7 @@ class ChatSessionTurnRunner:
                 provider=provider,
                 round_index=round_index,
                 stage_name="final_response",
-                messages=self._final_response_stage_messages(
+                messages=self._staged_tool_runner.final_response_stage_messages(
                     base_messages=messages,
                     response_model=final_response_model,
                 ),
@@ -567,25 +578,21 @@ class ChatSessionTurnRunner:
             )
             return parsed_response
 
-        tool_name = getattr(decision_payload, "tool_name", None)
-        if not isinstance(tool_name, str) or tool_name.strip() == "":
-            raise ValueError("Decision stage did not select a valid tool name.")
-        tool_spec = self._tool_spec(prepared.tool_specs, tool_name)
-        tool_input_model = prepared.input_models.get(tool_name)
-        if tool_input_model is None:
-            raise ValueError(
-                f"Selected tool '{tool_name}' was not prepared for this interaction."
-            )
+        tool_spec, tool_input_model = self._staged_tool_runner.selected_tool(
+            tool_specs=prepared.tool_specs,
+            input_models=prepared.input_models,
+            tool_name=getattr(decision_payload, "tool_name", None),
+        )
         tool_response_model = self._adapter.build_tool_invocation_step_model(
-            tool_name=tool_name,
+            tool_name=tool_spec.name,
             input_model=tool_input_model,
         )
-        yield ChatWorkflowStatusEvent(status=f"preparing {tool_name}")
+        yield ChatWorkflowStatusEvent(status=f"preparing {tool_spec.name}")
         parsed_response = yield from self._run_staged_step(
             provider=provider,
             round_index=round_index,
-            stage_name=f"tool:{tool_name}",
-            messages=self._tool_invocation_stage_messages(
+            stage_name=f"tool:{tool_spec.name}",
+            messages=self._staged_tool_runner.tool_invocation_stage_messages(
                 base_messages=messages,
                 tool_spec=tool_spec,
                 tool_input_model=tool_input_model,
@@ -614,7 +621,7 @@ class ChatSessionTurnRunner:
         _StagedStepT,
     ]:
         attempt_messages = list(messages)
-        repair_attempted = False
+        repair_attempts = 0
         while True:
             yield ChatWorkflowInspectorEvent(
                 round_index=round_index,
@@ -630,9 +637,9 @@ class ChatSessionTurnRunner:
                 )
                 return parser(payload)
             except Exception as exc:
-                if repair_attempted:
+                if repair_attempts >= 2:
                     raise
-                repair_attempted = True
+                repair_attempts += 1
                 yield ChatWorkflowStatusEvent(status=f"repairing {stage_name}")
                 invalid_payload = payload
                 if invalid_payload is None:
@@ -641,7 +648,7 @@ class ChatSessionTurnRunner:
                     *messages,
                     {
                         "role": "system",
-                        "content": self._repair_stage_message(
+                        "content": self._staged_tool_runner.repair_stage_message(
                             stage_name=stage_name,
                             response_model=response_model,
                             error=exc,
@@ -796,161 +803,21 @@ class ChatSessionTurnRunner:
                     },
                 ]
 
-    def _decision_stage_messages(
-        self,
-        *,
-        base_messages: list[dict[str, Any]],
-        prepared: PreparedModelInteraction,
-    ) -> list[dict[str, Any]]:
-        tool_catalog = json.dumps(
-            self._adapter.export_compact_tool_catalog(prepared.tool_specs),
-            indent=2,
-            sort_keys=True,
-        )
-        return [
-            *base_messages,
-            {
-                "role": "system",
-                "content": (
-                    "Current step: choose the next action.\n"
-                    "Return mode='tool' with exactly one tool_name, or mode='finalize'.\n"
-                    "Do not provide tool arguments or a final answer in this step.\n"
-                    f"Available tools:\n{tool_catalog}"
-                ),
-            },
-        ]
-
-    def _tool_invocation_stage_messages(
-        self,
-        *,
-        base_messages: list[dict[str, Any]],
-        tool_spec: ToolSpec,
-        tool_input_model: type[BaseModel],
-        response_model: type[BaseModel],
-    ) -> list[dict[str, Any]]:
-        schema = json.dumps(
-            self._adapter.export_schema(response_model),
-            indent=2,
-            sort_keys=True,
-            default=str,
-        )
-        tool_schema = json.dumps(
-            tool_input_model.model_json_schema(),
-            indent=2,
-            sort_keys=True,
-            default=str,
-        )
-        return [
-            *base_messages,
-            {
-                "role": "system",
-                "content": (
-                    f"Current step: invoke the selected tool '{tool_spec.name}'.\n"
-                    f"Tool description: {tool_spec.description}\n"
-                    "Return exactly one invocation for this tool.\n"
-                    "Do not choose another tool and do not finalize in this step.\n"
-                    f"Tool argument schema:\n{tool_schema}\n\n"
-                    f"Full response schema for this step:\n{schema}"
-                ),
-            },
-        ]
-
-    def _final_response_stage_messages(
-        self,
-        *,
-        base_messages: list[dict[str, Any]],
-        response_model: type[BaseModel],
-    ) -> list[dict[str, Any]]:
-        schema = json.dumps(
-            self._adapter.export_schema(response_model),
-            indent=2,
-            sort_keys=True,
-            default=str,
-        )
-        return [
-            *base_messages,
-            {
-                "role": "system",
-                "content": (
-                    "Current step: finalize the answer.\n"
-                    "Return only the final response and no tool invocation.\n"
-                    "The response must satisfy this schema exactly:\n"
-                    f"{schema}"
-                ),
-            },
-        ]
-
-    def _repair_stage_message(
-        self,
-        *,
-        stage_name: str,
-        response_model: type[BaseModel],
-        error: Exception,
-        invalid_payload: object | None,
-    ) -> str:
-        schema = json.dumps(
-            self._adapter.export_schema(response_model),
-            indent=2,
-            sort_keys=True,
-            default=str,
-        )
-        guidance = self._repair_stage_guidance(stage_name)
-        invalid_payload_text = self._format_invalid_payload(invalid_payload)
-        return (
-            f"The previous {stage_name} response was invalid.\n"
-            "Correct the response for the same stage only.\n"
-            f"{guidance}\n"
-            f"Validation summary: {self._validation_error_summary(error)}\n"
-            f"Previous invalid payload:\n{invalid_payload_text}\n"
-            "Return a corrected payload that matches this schema exactly:\n"
-            f"{schema}"
-        )
-
     @staticmethod
     def _validation_error_summary(error: Exception) -> str:
-        message = str(error).strip()
-        if message:
-            return message
-        return type(error).__name__
+        return validation_error_summary(error)
 
     @staticmethod
     def _repair_stage_guidance(stage_name: str) -> str:
-        if stage_name == "decision":
-            return (
-                "Decision stage rules: return only mode and, when mode='tool', one tool_name. "
-                "Do not include arguments or final_response."
-            )
-        if stage_name.startswith("tool:"):
-            return (
-                "Tool stage rules: return exactly one invocation for the selected tool. "
-                "Include mode='tool', the fixed tool_name, and arguments only."
-            )
-        if stage_name == "final_response":
-            return (
-                "Finalization stage rules: return only mode='finalize' and final_response. "
-                "Do not include tool_name or arguments."
-            )
-        return "Return only the fields required for this stage."
+        return repair_stage_guidance(stage_name)
 
     @staticmethod
     def _format_invalid_payload(invalid_payload: object | None) -> str:
-        if invalid_payload is None:
-            return "(unavailable)"
-        if isinstance(invalid_payload, str):
-            return invalid_payload
-        try:
-            return json.dumps(invalid_payload, indent=2, sort_keys=True, default=str)
-        except TypeError:
-            return str(invalid_payload)
+        return format_invalid_payload(invalid_payload)
 
     @staticmethod
     def _tool_spec(tool_specs: list[ToolSpec], tool_name: str) -> ToolSpec:
-        for spec in tool_specs:
-            if spec.name == tool_name:
-                return spec
-        raise ValueError(
-            f"Unknown tool selected during staged interaction: {tool_name}"
-        )
+        return tool_spec_by_name(tool_specs, tool_name)
 
     def _apply_prompt_protection(
         self,

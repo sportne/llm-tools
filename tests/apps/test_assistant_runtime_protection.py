@@ -97,6 +97,7 @@ class _StagedProvider:
         self._responses = list(responses)
         self.sync_messages: list[list[dict[str, str]]] = []
         self.async_messages: list[list[dict[str, str]]] = []
+        self.response_model_names: list[str] = []
 
     def prefers_simplified_json_schema_contract(self) -> bool:
         return False
@@ -116,6 +117,9 @@ class _StagedProvider:
         messages = kwargs["messages"]
         assert isinstance(messages, list)
         self.sync_messages.append([dict(message) for message in messages])
+        response_model = kwargs["response_model"]
+        assert isinstance(response_model, type)
+        self.response_model_names.append(response_model.__name__)
         response = self._responses.pop(0)
         if isinstance(response, Exception):
             raise response
@@ -125,6 +129,9 @@ class _StagedProvider:
         messages = kwargs["messages"]
         assert isinstance(messages, list)
         self.async_messages.append([dict(message) for message in messages])
+        response_model = kwargs["response_model"]
+        assert isinstance(response_model, type)
+        self.response_model_names.append(response_model.__name__)
         response = self._responses.pop(0)
         if isinstance(response, Exception):
             raise response
@@ -741,6 +748,10 @@ def test_direct_research_provider_runs_staged_tool_flow() -> None:
 
     assert parsed.invocations[0].tool_name == "read_file"
     assert parsed.invocations[0].arguments["path"] == "README.md"
+    assert provider.response_model_names == [
+        "DecisionStep",
+        "ReadFileInvocationStep",
+    ]
     assert provider.sync_messages[0][-1]["content"].startswith(
         "Current step: choose the next action."
     )
@@ -871,10 +882,12 @@ def test_direct_research_provider_runs_staged_async_and_repairs_provider_failure
     )
 
 
-def test_direct_research_provider_raises_after_second_staged_failure() -> None:
+def test_direct_research_provider_raises_after_two_staged_repairs() -> None:
     import llm_tools.apps.assistant_research_provider as provider_module
 
-    provider = _StagedProvider([RuntimeError("boom"), RuntimeError("boom again")])
+    provider = _StagedProvider(
+        [RuntimeError("boom"), RuntimeError("boom again"), RuntimeError("boom last")]
+    )
     harness_provider = provider_module.AssistantHarnessTurnProvider(
         provider=provider,  # type: ignore[arg-type]
         temperature=0.1,
@@ -892,9 +905,17 @@ def test_direct_research_provider_raises_after_second_staged_failure() -> None:
             )
         )
     except RuntimeError as exc:
-        assert str(exc) == "boom again"
+        assert str(exc) == "boom last"
     else:  # pragma: no cover - defensive assertion
         raise AssertionError("Expected repeated staged failure to propagate")
+
+    assert len(provider.async_messages) == 3
+    assert provider.async_messages[1][-1]["content"].startswith(
+        "The previous decision response was invalid."
+    )
+    assert provider.async_messages[2][-1]["content"].startswith(
+        "The previous decision response was invalid."
+    )
 
 
 def test_direct_research_provider_prompt_tools_repairs_decision_and_tool_stage() -> (
@@ -1067,7 +1088,7 @@ def test_direct_research_provider_falls_back_to_prompt_tools_from_sync_modes() -
 
         assert parsed.final_response == f"Fallback staged={staged}."
         assert len(provider.sync_messages) == 2
-        assert provider.structured_calls == (2 if staged else 0)
+        assert provider.structured_calls == (3 if staged else 0)
         assert provider.run_calls == int(not staged)
 
 
@@ -1103,7 +1124,7 @@ def test_direct_research_provider_falls_back_to_prompt_tools_from_async_modes() 
 
         assert parsed.final_response == f"Async fallback staged={staged}."
         assert len(provider.async_messages) == 2
-        assert provider.async_structured_calls == (2 if staged else 0)
+        assert provider.async_structured_calls == (3 if staged else 0)
         assert provider.async_run_calls == int(not staged)
 
 

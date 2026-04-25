@@ -295,6 +295,7 @@ def test_ollama_json_mode_uses_native_json_schema_payload(monkeypatch: Any) -> N
             "schema": _ProbeModel.model_json_schema(),
         },
     }
+    _assert_schema_prompt_was_appended(call)
     assert "response_model" not in call
 
 
@@ -326,6 +327,7 @@ def test_ollama_json_mode_uses_native_json_schema_payload_async(
     }
     assert len(completions.calls) == 1
     assert completions.calls[0]["response_format"]["type"] == "json_schema"
+    _assert_schema_prompt_was_appended(completions.calls[0])
 
 
 def test_prompt_tools_preflight_success_and_failure() -> None:

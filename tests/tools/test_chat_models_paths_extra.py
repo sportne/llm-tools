@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -278,7 +277,6 @@ def test_ops_cover_remaining_control_flow_edges(
     (tmp_path / "too-large.py").write_text("placeholder\n", encoding="utf-8")
     (tmp_path / ".hidden.py").write_text("needle\n", encoding="utf-8")
     (tmp_path / "file-link.py").symlink_to(file_path)
-    os.mkfifo(tmp_path / "events.pipe")
 
     recursive = list_directory_impl(
         tmp_path,

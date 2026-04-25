@@ -58,6 +58,10 @@ These examples do not make network calls:
   Uses the OpenAI-compatible provider layer against Ollama's local
   OpenAI-compatible endpoint.
   It defaults to `http://localhost:11434/v1` and model `gemma4:26b`.
+  This is a low-level provider example. For Ollama-backed agentic chat or
+  research, prefer the assistant config examples with `auto` or explicit `json`
+  mode so the runtime uses staged JSON rounds and can fall back to
+  `prompt_tools` when needed.
 
 This example is intentionally not run in CI. It should fail with a clear
 message if Ollama is not reachable.

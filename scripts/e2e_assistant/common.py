@@ -37,6 +37,7 @@ DEFAULT_PROVIDER_MODES = [
     ProviderModeStrategy.TOOLS,
     ProviderModeStrategy.JSON,
     ProviderModeStrategy.MD_JSON,
+    ProviderModeStrategy.PROMPT_TOOLS,
 ]
 DEFAULT_ENABLED_TOOLS = [
     "list_directory",

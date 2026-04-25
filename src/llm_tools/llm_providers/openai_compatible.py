@@ -633,7 +633,13 @@ class OpenAICompatibleProvider:
     ) -> BaseModel:
         response = cast(Any, self._sync_client.chat.completions).create(
             model=self.model,
-            messages=cast(Any, list(messages)),
+            messages=cast(
+                Any,
+                self._structured_json_prompt_messages(
+                    messages=messages,
+                    response_model=response_model,
+                ),
+            ),
             response_format=cast(Any, self._native_json_schema_payload(response_model)),
             **self._merged_request_params(request_params),
         )
@@ -698,7 +704,13 @@ class OpenAICompatibleProvider:
     ) -> BaseModel:
         response = await cast(Any, self._async_client_instance.chat.completions).create(
             model=self.model,
-            messages=cast(Any, list(messages)),
+            messages=cast(
+                Any,
+                self._structured_json_prompt_messages(
+                    messages=messages,
+                    response_model=response_model,
+                ),
+            ),
             response_format=cast(Any, self._native_json_schema_payload(response_model)),
             **self._merged_request_params(request_params),
         )
