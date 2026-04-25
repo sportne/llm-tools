@@ -342,6 +342,36 @@ def test_md_json_mode_extracts_json_from_markdown_content() -> None:
     assert "response_model" not in completions.calls[0]
 
 
+def test_md_json_mode_extracts_json_from_dict_chat_completion() -> None:
+    completions = _NativeSyncCompletions(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            "```json\n"
+                            '{"status":"ok","count":3,"items":["alpha","beta","gamma"]}\n'
+                            "```"
+                        )
+                    }
+                }
+            ]
+        }
+    )
+    provider = OpenAICompatibleProvider(
+        model="demo-model",
+        client=_BareClient(chat=SimpleNamespace(completions=completions)),
+        mode_strategy=ProviderModeStrategy.MD_JSON,
+    )
+
+    payload = provider.run_structured(
+        messages=[{"role": "user", "content": "Return structured data."}],
+        response_model=_ProbeModel,
+    )
+
+    assert payload.model_dump()["status"] == "ok"
+
+
 def test_md_json_mode_extracts_json_from_markdown_content_async() -> None:
     completions = _NativeAsyncCompletions(
         _native_response(
@@ -371,25 +401,14 @@ def test_md_json_mode_extracts_json_from_markdown_content_async() -> None:
     assert len(completions.calls) == 1
 
 
-def test_md_json_mode_uses_selected_wrapped_sync_client(monkeypatch: Any) -> None:
+def test_md_json_mode_bypasses_instructor_sync_client(monkeypatch: Any) -> None:
     base_completions = _NativeSyncCompletions(
-        _native_response('{"status":"wrong","count":0,"items":[]}')
-    )
-    wrapped_completions = _NativeSyncCompletions(
         _native_response(
             '```json\n{"status":"ok","count":3,"items":["alpha","beta","gamma"]}\n```'
         )
     )
-    wrapped_client = _BareClient(chat=SimpleNamespace(completions=wrapped_completions))
 
-    class _SpecificWrappedInstructor(_WrappedInstructor):
-        @staticmethod
-        def from_openai(client: Any, *, mode: _FakeMode) -> Any:
-            assert client.chat.completions is base_completions
-            assert mode is _FakeMode.MD_JSON
-            return wrapped_client
-
-    monkeypatch.setattr(provider_module, "_instructor", _SpecificWrappedInstructor())
+    monkeypatch.setattr(provider_module, "_instructor", _RealNamedInstructor())
     provider = OpenAICompatibleProvider(
         model="demo-model",
         client=_BareClient(chat=SimpleNamespace(completions=base_completions)),
@@ -403,27 +422,16 @@ def test_md_json_mode_uses_selected_wrapped_sync_client(monkeypatch: Any) -> Non
     )
 
     assert payload.model_dump()["status"] == "ok"
-    assert len(base_completions.calls) == 0
-    assert len(wrapped_completions.calls) == 1
+    assert len(base_completions.calls) == 1
+    assert "response_model" not in base_completions.calls[0]
 
 
-def test_md_json_mode_uses_selected_wrapped_async_client(monkeypatch: Any) -> None:
+def test_md_json_mode_bypasses_instructor_async_client(monkeypatch: Any) -> None:
     base_completions = _NativeAsyncCompletions(
-        _native_response('{"status":"wrong","count":0,"items":[]}')
-    )
-    wrapped_completions = _NativeAsyncCompletions(
         _native_response('{"status":"ok","count":3,"items":["alpha","beta","gamma"]}')
     )
-    wrapped_client = _BareClient(chat=SimpleNamespace(completions=wrapped_completions))
 
-    class _SpecificWrappedInstructor(_WrappedInstructor):
-        @staticmethod
-        def from_openai(client: Any, *, mode: _FakeMode) -> Any:
-            assert client.chat.completions is base_completions
-            assert mode is _FakeMode.MD_JSON
-            return wrapped_client
-
-    monkeypatch.setattr(provider_module, "_instructor", _SpecificWrappedInstructor())
+    monkeypatch.setattr(provider_module, "_instructor", _RealNamedInstructor())
     provider = OpenAICompatibleProvider(
         model="demo-model",
         async_client=_BareClient(chat=SimpleNamespace(completions=base_completions)),
@@ -439,8 +447,8 @@ def test_md_json_mode_uses_selected_wrapped_async_client(monkeypatch: Any) -> No
     )
 
     assert payload.model_dump()["status"] == "ok"
-    assert len(base_completions.calls) == 0
-    assert len(wrapped_completions.calls) == 1
+    assert len(base_completions.calls) == 1
+    assert "response_model" not in base_completions.calls[0]
 
 
 def test_parse_markdown_json_response_accepts_structured_payloads() -> None:

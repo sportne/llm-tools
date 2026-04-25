@@ -49,8 +49,9 @@ class PromptToolAdapter:
                 "role": "system",
                 "content": (
                     "Current step: choose the next action.\n"
-                    "Return exactly one fenced decision block.\n"
-                    "Use MODE: tool with one TOOL_NAME, or MODE: finalize.\n"
+                    "Return exactly one fenced decision block and no prose.\n"
+                    "Inside the block, MODE must be exactly tool or finalize.\n"
+                    "When MODE is tool, TOOL_NAME must be one exact available tool name.\n"
                     "Do not provide tool arguments or a final answer in this step.\n\n"
                     f"Available tools:\n{self._tool_catalog(tool_specs)}\n\n"
                     "Required formats:\n"
@@ -75,9 +76,15 @@ class PromptToolAdapter:
                 "content": (
                     f"Current step: invoke the selected tool '{tool_spec.name}'.\n"
                     f"Tool description: {tool_spec.description}\n"
-                    "Return exactly one fenced tool block for this tool.\n"
+                    "Return exactly one fenced tool block for this tool and no prose.\n"
                     "The tool block must be the final substantive content.\n"
                     "Do not choose another tool and do not finalize in this step.\n\n"
+                    "Hard requirements:\n"
+                    f"- The first non-empty line inside the block must be exactly: TOOL_NAME: {tool_spec.name}\n"
+                    f"- Do not write '{tool_spec.name}:' as a field name.\n"
+                    "- Every argument must start with BEGIN_ARG: argument_name on one line.\n"
+                    "- Do not put the argument name on the next line after BEGIN_ARG:.\n"
+                    "- Every argument must end with END_ARG on its own line.\n\n"
                     "Tool argument schema:\n"
                     f"{json.dumps(input_model.model_json_schema(), indent=2, sort_keys=True, default=str)}\n\n"
                     "Required format:\n"
@@ -104,7 +111,8 @@ class PromptToolAdapter:
                 "role": "system",
                 "content": (
                     "Current step: finalize the answer.\n"
-                    "Return exactly one fenced final block and no tool invocation.\n"
+                    "Return exactly one fenced final block and no prose outside it.\n"
+                    "Do not include a tool invocation.\n"
                     "Use plain markdown after ANSWER unless a JSON object is required.\n"
                     f"{schema_text}\n\n"
                     "Required format:\n"
@@ -127,17 +135,21 @@ class PromptToolAdapter:
         guidance = {
             "decision": (
                 "Decision rules: return exactly one ```decision block. "
-                "Use MODE: tool with one valid TOOL_NAME, or MODE: finalize."
+                "MODE must be exactly tool or finalize. "
+                "When MODE is tool, TOOL_NAME must be one exact available tool name. "
+                "Do not add prose outside the block."
             ),
             "final_response": (
                 "Finalization rules: return exactly one ```final block with ANSWER:. "
-                "Do not include a tool block."
+                "Do not include a tool block or prose outside the block."
             ),
         }.get(stage_name)
         if guidance is None and stage_name.startswith("tool:"):
             guidance = (
                 "Tool rules: return exactly one ```tool block for the selected tool. "
-                "Include TOOL_NAME and BEGIN_ARG/END_ARG sections only."
+                "The first non-empty line inside the block must be TOOL_NAME: <selected tool>. "
+                "Do not use the tool name itself as a field name. "
+                "Use BEGIN_ARG: argument_name on one line, then the value, then END_ARG."
             )
         if guidance is None:
             guidance = "Return only the fields required for this stage."
@@ -149,6 +161,15 @@ class PromptToolAdapter:
             details.append(
                 "Selected tool schema:\n"
                 f"{json.dumps(input_model.model_json_schema(), indent=2, sort_keys=True, default=str)}"
+            )
+            details.append(
+                "Exact tool block shape:\n"
+                "```tool\n"
+                f"TOOL_NAME: {selected_tool.name}\n"
+                "BEGIN_ARG: argument_name\n"
+                "argument value\n"
+                "END_ARG\n"
+                "```"
             )
         if final_response_model is not None:
             details.append(self._final_schema_text(final_response_model))
@@ -199,13 +220,13 @@ class PromptToolAdapter:
         input_model: type[BaseModel],
     ) -> ParsedModelResponse:
         body = self._single_block_body(text, "tool", require_final_block=True)
-        parsed_name = self._tool_name_from_body(body)
+        parsed_name = self._tool_name_from_body(body, invalid_payload=text)
         if parsed_name != tool_name:
             raise PromptToolProtocolError(
                 f"Tool block selected '{parsed_name}', expected '{tool_name}'.",
                 invalid_payload=text,
             )
-        raw_arguments = self._parse_argument_blocks(body)
+        raw_arguments = self._parse_argument_blocks(body, invalid_payload=text)
         arguments = self._validate_arguments(
             raw_arguments,
             input_model=input_model,
@@ -290,13 +311,18 @@ class PromptToolAdapter:
             fields[key.strip().upper()] = value.strip()
         return fields
 
-    def _tool_name_from_body(self, body: str) -> str:
+    def _tool_name_from_body(self, body: str, *, invalid_payload: object) -> str:
         for line in body.splitlines():
             if line.strip().lower().startswith("tool_name:"):
                 return line.split(":", 1)[1].strip()
-        raise PromptToolProtocolError("Tool block is missing TOOL_NAME.")
+        raise PromptToolProtocolError(
+            "Tool block is missing TOOL_NAME.",
+            invalid_payload=invalid_payload,
+        )
 
-    def _parse_argument_blocks(self, body: str) -> dict[str, Any]:
+    def _parse_argument_blocks(
+        self, body: str, *, invalid_payload: object
+    ) -> dict[str, Any]:
         lines = body.splitlines()
         arguments: dict[str, Any] = {}
         index = 0
@@ -307,9 +333,15 @@ class PromptToolAdapter:
                 continue
             arg_name = line.split(":", 1)[1].strip()
             if not arg_name:
-                raise PromptToolProtocolError("BEGIN_ARG is missing an argument name.")
+                raise PromptToolProtocolError(
+                    "BEGIN_ARG is missing an argument name.",
+                    invalid_payload=invalid_payload,
+                )
             if arg_name in arguments:
-                raise PromptToolProtocolError(f"Duplicate argument: {arg_name}.")
+                raise PromptToolProtocolError(
+                    f"Duplicate argument: {arg_name}.",
+                    invalid_payload=invalid_payload,
+                )
             index += 1
             value_lines: list[str] = []
             while index < len(lines) and lines[index].strip().lower() != "end_arg":
@@ -317,7 +349,8 @@ class PromptToolAdapter:
                 index += 1
             if index >= len(lines):
                 raise PromptToolProtocolError(
-                    f"Argument '{arg_name}' is missing END_ARG."
+                    f"Argument '{arg_name}' is missing END_ARG.",
+                    invalid_payload=invalid_payload,
                 )
             arguments[arg_name] = self._parse_argument_value(
                 "\n".join(value_lines).strip()

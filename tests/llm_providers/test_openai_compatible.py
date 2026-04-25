@@ -41,7 +41,9 @@ class _SyncCompletions:
 
     def create(self, **kwargs: Any) -> object:
         self.calls.append(kwargs)
-        mode = kwargs.get("__mode", "TOOLS")
+        mode = kwargs.get("__mode", "RAW")
+        if mode not in self._outcomes:
+            mode = "TOOLS"
         outcome = self._outcomes[mode]
         if isinstance(outcome, Exception):
             raise outcome
@@ -55,7 +57,9 @@ class _AsyncCompletions:
 
     async def create(self, **kwargs: Any) -> object:
         self.calls.append(kwargs)
-        mode = kwargs.get("__mode", "TOOLS")
+        mode = kwargs.get("__mode", "RAW")
+        if mode not in self._outcomes:
+            mode = "TOOLS"
         outcome = self._outcomes[mode]
         if isinstance(outcome, Exception):
             raise outcome
@@ -297,7 +301,7 @@ def test_provider_run_auto_falls_back_to_json_for_retryable_schema_errors(
 
     assert parsed.final_response == "done"
     assert provider.last_mode_used is ProviderModeStrategy.JSON
-    assert [call["__mode"] for call in client.chat.completions.calls] == [
+    assert [call.get("__mode") for call in client.chat.completions.calls] == [
         "TOOLS",
         "JSON",
     ]
@@ -322,7 +326,7 @@ def test_provider_run_auto_retries_wrapped_validation_failure(monkeypatch: Any) 
     )
 
     assert parsed.final_response == "wrapped"
-    assert [call["__mode"] for call in client.chat.completions.calls] == [
+    assert [call.get("__mode") for call in client.chat.completions.calls] == [
         "TOOLS",
         "JSON",
     ]
@@ -357,7 +361,7 @@ def test_provider_run_honors_explicit_mode_strategy(monkeypatch: Any) -> None:
         outcomes={
             "TOOLS": RuntimeError("unused"),
             "JSON": RuntimeError("unused"),
-            "MD_JSON": {"actions": [], "final_response": "md-json"},
+            "RAW": {"actions": [], "final_response": "md-json"},
         }
     )
     provider = OpenAICompatibleProvider(
@@ -374,7 +378,7 @@ def test_provider_run_honors_explicit_mode_strategy(monkeypatch: Any) -> None:
 
     assert parsed.final_response == "md-json"
     assert provider.last_mode_used is ProviderModeStrategy.MD_JSON
-    assert [call["__mode"] for call in client.chat.completions.calls] == ["MD_JSON"]
+    assert [call.get("__mode") for call in client.chat.completions.calls] == [None]
 
 
 def test_provider_run_explicit_mode_raises_original_exception(monkeypatch: Any) -> None:
@@ -384,7 +388,7 @@ def test_provider_run_explicit_mode_raises_original_exception(monkeypatch: Any) 
         outcomes={
             "TOOLS": RuntimeError("unused"),
             "JSON": RuntimeError("unused"),
-            "MD_JSON": RuntimeError("md-json failed"),
+            "RAW": RuntimeError("md-json failed"),
         }
     )
     provider = OpenAICompatibleProvider(
@@ -400,7 +404,7 @@ def test_provider_run_explicit_mode_raises_original_exception(monkeypatch: Any) 
             response_model=response_model,
         )
 
-    assert [call["__mode"] for call in client.chat.completions.calls] == ["MD_JSON"]
+    assert [call.get("__mode") for call in client.chat.completions.calls] == [None]
 
 
 def test_provider_run_async_uses_fallback_order_for_retryable_schema_errors(
@@ -412,7 +416,7 @@ def test_provider_run_async_uses_fallback_order_for_retryable_schema_errors(
         outcomes={
             "TOOLS": _wrapped_schema_failure("schema validation failed"),
             "JSON": _wrapped_schema_failure("json validation failed"),
-            "MD_JSON": {
+            "RAW": {
                 "actions": [{"tool_name": "echo", "arguments": {"value": "async"}}],
                 "final_response": None,
             },
@@ -430,10 +434,10 @@ def test_provider_run_async_uses_fallback_order_for_retryable_schema_errors(
 
     assert parsed.invocations[0].arguments == {"value": "async"}
     assert provider.last_mode_used is ProviderModeStrategy.MD_JSON
-    assert [call["__mode"] for call in client.chat.completions.calls] == [
+    assert [call.get("__mode") for call in client.chat.completions.calls] == [
         "TOOLS",
         "JSON",
-        "MD_JSON",
+        None,
     ]
 
 
@@ -509,7 +513,7 @@ def test_provider_run_async_explicit_mode_raises_original_exception(
         outcomes={
             "TOOLS": RuntimeError("unused"),
             "JSON": RuntimeError("unused"),
-            "MD_JSON": RuntimeError("async md-json failed"),
+            "RAW": RuntimeError("async md-json failed"),
         }
     )
     provider = OpenAICompatibleProvider(
@@ -527,7 +531,7 @@ def test_provider_run_async_explicit_mode_raises_original_exception(
             )
         )
 
-    assert [call["__mode"] for call in client.chat.completions.calls] == ["MD_JSON"]
+    assert [call.get("__mode") for call in client.chat.completions.calls] == [None]
 
 
 def test_provider_missing_instructor_async_does_not_resend_identical_requests(
@@ -660,7 +664,7 @@ def test_provider_run_auto_reports_all_retryable_mode_failures(
         outcomes={
             "TOOLS": _wrapped_schema_failure("schema validation failed"),
             "JSON": _wrapped_schema_failure("json validation failed"),
-            "MD_JSON": _wrapped_schema_failure("markdown json validation failed"),
+            "RAW": _wrapped_schema_failure("markdown json validation failed"),
         }
     )
     provider = OpenAICompatibleProvider(model="demo-model", client=client)
@@ -690,5 +694,5 @@ def test_provider_run_auto_reports_all_retryable_mode_failures(
     assert [call.get("__mode") for call in client.chat.completions.calls] == [
         "TOOLS",
         "JSON",
-        "MD_JSON",
+        None,
     ]

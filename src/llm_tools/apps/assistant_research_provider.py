@@ -578,7 +578,7 @@ class AssistantHarnessTurnProvider:
                 "Prompt-tool protocol requires a provider that supports run_text()."
             )
         attempt_messages = list(messages)
-        repair_attempted = False
+        repair_attempts = 0
         while True:
             text: str | None = None
             try:
@@ -588,9 +588,9 @@ class AssistantHarnessTurnProvider:
                 )
                 return parser(text)
             except Exception as exc:
-                if repair_attempted:
+                if repair_attempts >= 2:
                     raise
-                repair_attempted = True
+                repair_attempts += 1
                 invalid_payload: object | None = text
                 if invalid_payload is None:
                     invalid_payload = getattr(exc, "invalid_payload", None)
@@ -621,7 +621,7 @@ class AssistantHarnessTurnProvider:
                 "Prompt-tool protocol requires a provider that supports run_text_async()."
             )
         attempt_messages = list(messages)
-        repair_attempted = False
+        repair_attempts = 0
         while True:
             text: str | None = None
             try:
@@ -631,9 +631,9 @@ class AssistantHarnessTurnProvider:
                 )
                 return parser(text)
             except Exception as exc:
-                if repair_attempted:
+                if repair_attempts >= 2:
                     raise
-                repair_attempted = True
+                repair_attempts += 1
                 invalid_payload: object | None = text
                 if invalid_payload is None:
                     invalid_payload = getattr(exc, "invalid_payload", None)

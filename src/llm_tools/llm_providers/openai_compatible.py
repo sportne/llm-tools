@@ -839,15 +839,19 @@ class OpenAICompatibleProvider:
         return mode is ProviderModeStrategy.PROMPT_TOOLS
 
     def _sync_execution_client(self, mode: ProviderModeStrategy) -> Any:
-        if self._should_use_native_json_schema(mode) or self._should_use_prompt_tools(
-            mode
+        if (
+            self._should_use_native_json_schema(mode)
+            or self._should_use_local_md_json(mode)
+            or self._should_use_prompt_tools(mode)
         ):
             return self._sync_client
         return self._instructor_sync_client(mode)
 
     def _async_execution_client(self, mode: ProviderModeStrategy) -> Any:
-        if self._should_use_native_json_schema(mode) or self._should_use_prompt_tools(
-            mode
+        if (
+            self._should_use_native_json_schema(mode)
+            or self._should_use_local_md_json(mode)
+            or self._should_use_prompt_tools(mode)
         ):
             return self._async_client_instance
         return self._instructor_async_client(mode)
@@ -1146,6 +1150,24 @@ class OpenAICompatibleProvider:
         response_model: type[BaseModel],
     ) -> BaseModel:
         if isinstance(response, BaseModel):
+            if hasattr(response, "choices"):
+                raw_text = cls._structured_response_text(response)
+                try:
+                    return response_model.model_validate_json(raw_text)
+                except ValidationError as exc:
+                    candidate = cls._extract_markdown_json_candidate(raw_text)
+                    if candidate is None or candidate.strip() == raw_text.strip():
+                        raise StructuredOutputValidationError(
+                            str(exc),
+                            invalid_payload=raw_text,
+                        ) from exc
+                    try:
+                        return response_model.model_validate_json(candidate)
+                    except ValidationError as candidate_exc:
+                        raise StructuredOutputValidationError(
+                            str(candidate_exc),
+                            invalid_payload=candidate,
+                        ) from candidate_exc
             try:
                 return response_model.model_validate(
                     response.model_dump(mode="json", exclude_none=False)
@@ -1157,7 +1179,9 @@ class OpenAICompatibleProvider:
                         mode="json", exclude_none=False
                     ),
                 ) from exc
-        if isinstance(response, (dict, list)):
+        if isinstance(response, (dict, list)) and not (
+            isinstance(response, dict) and "choices" in response
+        ):
             try:
                 return response_model.model_validate(response)
             except ValidationError as exc:
@@ -1189,14 +1213,26 @@ class OpenAICompatibleProvider:
 
     @staticmethod
     def _structured_response_text(response: Any) -> str:
-        choices = getattr(response, "choices", None)
+        choices = (
+            response.get("choices")
+            if isinstance(response, dict)
+            else getattr(response, "choices", None)
+        )
         if not choices:
             raise ValueError("Structured provider response did not include choices.")
         first_choice = choices[0]
-        message = getattr(first_choice, "message", None)
+        message = (
+            first_choice.get("message")
+            if isinstance(first_choice, dict)
+            else getattr(first_choice, "message", None)
+        )
         if message is None:
             raise ValueError("Structured provider response did not include a message.")
-        content = getattr(message, "content", None)
+        content = (
+            message.get("content")
+            if isinstance(message, dict)
+            else getattr(message, "content", None)
+        )
         if isinstance(content, str) and content.strip():
             return content
         if isinstance(content, list):

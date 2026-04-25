@@ -741,7 +741,7 @@ class ChatSessionTurnRunner:
                 "Prompt-tool protocol requires a provider that supports run_text()."
             )
         attempt_messages = list(messages)
-        repair_attempted = False
+        repair_attempts = 0
         while True:
             yield ChatWorkflowInspectorEvent(
                 round_index=round_index,
@@ -756,9 +756,9 @@ class ChatSessionTurnRunner:
                 )
                 return parser(text)
             except Exception as exc:
-                if repair_attempted:
+                if repair_attempts >= 2:
                     raise
-                repair_attempted = True
+                repair_attempts += 1
                 yield ChatWorkflowStatusEvent(status=f"repairing {stage_name}")
                 invalid_payload: object | None = text
                 if invalid_payload is None:

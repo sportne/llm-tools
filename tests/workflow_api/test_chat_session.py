@@ -371,12 +371,13 @@ def test_chat_session_runner_repairs_prompt_tool_final_response(
     assert result_event.result.final_response.answer == "Done after repair."
 
 
-def test_chat_session_runner_fails_prompt_tool_stage_after_one_repair(
+def test_chat_session_runner_fails_prompt_tool_stage_after_two_repairs(
     tmp_path: Path,
 ) -> None:
     provider = _FakePromptToolProvider(
         [
             "```decision\nMODE: finalize\n```",
+            "```final\nANSWER:\n```",
             "```final\nANSWER:\n```",
             "```final\nANSWER:\n```",
         ]
@@ -397,7 +398,7 @@ def test_chat_session_runner_fails_prompt_tool_stage_after_one_repair(
     with pytest.raises(PromptToolProtocolError):
         list(runner)
 
-    assert len(provider.calls) == 3
+    assert len(provider.calls) == 4
 
 
 def test_chat_session_runner_auto_falls_back_to_prompt_tools(
