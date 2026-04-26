@@ -637,8 +637,7 @@ class NiceGUIChatController:
         turn_state = self.active_turn_state
         if turn_state.busy:
             return "Wait for the current turn to finish."
-        turn_state.queued_follow_up_prompt = pending.original_user_message
-        return self.submit_prompt(
+        error = self.submit_prompt(
             _protection_feedback_message(
                 analysis_is_correct=False,
                 expected_sensitivity_label=cleaned_label,
@@ -646,6 +645,11 @@ class NiceGUIChatController:
             ),
             show_in_transcript=False,
         )
+        if error:
+            turn_state.queued_follow_up_prompt = None
+            return error
+        turn_state.queued_follow_up_prompt = pending.original_user_message
+        return None
 
     def save_active_session(self) -> None:
         """Persist the active record and preferences."""

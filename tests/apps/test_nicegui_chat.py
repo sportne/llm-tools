@@ -390,6 +390,9 @@ def test_information_security_helpers(tmp_path: Path) -> None:
         document_paths=[str(tmp_path)],
         allowed_sensitivity_labels=["TRIVIAL", "MINOR"],
     )
+    assert _format_information_security_level(configured) == "Undefined"
+    guidance = tmp_path / "guidance.md"
+    guidance.write_text("TRIVIAL information may be discussed.", encoding="utf-8")
     assert _format_information_security_level(configured) == "TRIVIAL/MINOR"
 
 
@@ -1024,6 +1027,35 @@ def test_controller_protection_overrule_requires_fields(tmp_path: Path) -> None:
         )
         == "Explanation is required."
     )
+
+
+def test_controller_protection_overrule_clears_queue_on_submit_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _controller(tmp_path, _FakeProvider([]))
+    controller.active_record.workflow_session_state.pending_protection_prompt = (
+        ProtectionPendingPrompt(
+            original_user_message="show the protected plan",
+            reasoning="The request may exceed the allowed category.",
+            predicted_sensitivity_label="MAJOR",
+        )
+    )
+    controller.active_turn_state.queued_follow_up_prompt = "stale prompt"
+
+    def fail_submit(_prompt: str, **_kwargs: object) -> str:
+        return "provider failed"
+
+    monkeypatch.setattr(controller, "submit_prompt", fail_submit)
+
+    assert (
+        controller.submit_protection_overrule(
+            expected_sensitivity_label="MINOR",
+            rationale="This is already cleared.",
+        )
+        == "provider failed"
+    )
+    assert controller.active_turn_state.queued_follow_up_prompt is None
 
 
 def test_controller_busy_turn_queues_follow_up(tmp_path: Path) -> None:

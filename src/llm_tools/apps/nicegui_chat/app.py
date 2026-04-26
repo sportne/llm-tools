@@ -182,6 +182,9 @@ def _format_information_security_level(config: ProtectionConfig) -> str:
         or not config.document_paths
     ):
         return PROTECTION_UNDEFINED_LABEL
+    report = inspect_protection_corpus(config)
+    if not report.usable_document_count:
+        return PROTECTION_UNDEFINED_LABEL
     return "/".join(config.allowed_sensitivity_labels)
 
 
