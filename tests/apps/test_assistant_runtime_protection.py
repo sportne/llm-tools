@@ -943,11 +943,12 @@ def test_direct_research_provider_raises_after_two_staged_repairs() -> None:
     )
 
 
-def test_direct_research_provider_prompt_tools_repairs_decision_and_tool_stage() -> (
-    None
-):
+def test_direct_research_provider_prompt_tools_repairs_decision_and_tool_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import llm_tools.apps.assistant_research_provider as provider_module
 
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "split")
     provider = _PromptToolProvider(
         [
             "```decision\nMODE: tool\nTOOL_NAME: read_file\n```",
@@ -981,9 +982,12 @@ def test_direct_research_provider_prompt_tools_repairs_decision_and_tool_stage()
     assert "Selected tool schema:" in tool_repair
 
 
-def test_direct_research_provider_prompt_tools_async_repairs_final_response() -> None:
+def test_direct_research_provider_prompt_tools_async_repairs_final_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import llm_tools.apps.assistant_research_provider as provider_module
 
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "split")
     provider = _PromptToolProvider(
         [
             "```decision\nMODE: finalize\n```",
@@ -1041,9 +1045,12 @@ def test_direct_research_provider_prompt_tools_single_action_env_flow(
     assert "Prompt-tool output contract:" in provider.sync_messages[0][-1]["content"]
 
 
-def test_direct_research_provider_prompt_tools_async_split_tool_flow() -> None:
+def test_direct_research_provider_prompt_tools_async_split_tool_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import llm_tools.apps.assistant_research_provider as provider_module
 
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "split")
     provider = _PromptToolProvider(
         [
             "```decision\nMODE: tool\nTOOL_NAME: read_file\n```",
@@ -1364,9 +1371,12 @@ def test_direct_research_provider_falls_back_to_prompt_tools_from_async_modes() 
         assert provider.async_run_calls == int(not staged)
 
 
-def test_direct_research_provider_rejects_unprepared_staged_and_prompt_tools() -> None:
+def test_direct_research_provider_rejects_unprepared_staged_and_prompt_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import llm_tools.apps.assistant_research_provider as provider_module
 
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "split")
     staged_provider = _StagedProvider([{"mode": "tool", "tool_name": "read_file"}])
     prompt_provider = _PromptToolProvider(
         [
@@ -1414,9 +1424,12 @@ def test_direct_research_provider_rejects_unprepared_staged_and_prompt_tools() -
         raise AssertionError("Expected prompt-tool missing input model error")
 
 
-def test_direct_research_provider_prompt_tools_raise_after_two_repairs() -> None:
+def test_direct_research_provider_prompt_tools_raise_after_two_repairs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import llm_tools.apps.assistant_research_provider as provider_module
 
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "split")
     provider = _PromptToolProvider(
         [
             "not an action block",

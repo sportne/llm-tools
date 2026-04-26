@@ -39,8 +39,6 @@ DEFAULT_MODEL_PROFILES = [
 DEFAULT_PROVIDER_MODES = [
     "json",
     "prompt_tools",
-    "prompt_tools_single_action",
-    "prompt_tools_category",
 ]
 DEFAULT_SCENARIOS = ["chat_repo_lookup"]
 DEFAULT_ROUND_CAP = 8

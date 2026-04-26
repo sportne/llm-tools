@@ -42,6 +42,7 @@ _PROMPT_TOOL_STRATEGY_ENV = "LLM_TOOLS_PROMPT_TOOL_STRATEGY"
 _PROMPT_TOOL_CATEGORY_THRESHOLD_ENV = "LLM_TOOLS_PROMPT_TOOL_CATEGORY_THRESHOLD"
 _DEFAULT_PROMPT_TOOL_CATEGORY_THRESHOLD = 7
 _PROMPT_TOOL_SINGLE_ACTION_STRATEGIES = {"single_action", "single-action", "single"}
+_PROMPT_TOOL_SPLIT_STRATEGIES = {"split", "decision", "decision_tool"}
 
 
 class AssistantHarnessTurnProvider:
@@ -804,6 +805,10 @@ class AssistantHarnessTurnProvider:
     @staticmethod
     def _uses_prompt_tool_single_action_strategy() -> bool:
         strategy = os.environ.get(_PROMPT_TOOL_STRATEGY_ENV, "").strip().lower()
+        if not strategy:
+            return True
+        if strategy in _PROMPT_TOOL_SPLIT_STRATEGIES or strategy == "category":
+            return False
         return strategy in _PROMPT_TOOL_SINGLE_ACTION_STRATEGIES
 
     @staticmethod

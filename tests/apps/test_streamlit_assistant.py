@@ -1300,7 +1300,6 @@ def test_assistant_harness_turn_provider_repairs_invalid_staged_final_response()
 def test_assistant_harness_turn_provider_uses_prompt_tools() -> None:
     provider = _RecordingPromptToolProvider(
         [
-            "```decision\nMODE: finalize\n```",
             "```final\nANSWER:\nResearch answer.\n```",
         ]
     )
@@ -1325,9 +1324,10 @@ def test_assistant_harness_turn_provider_uses_prompt_tools() -> None:
     )
 
     assert response.final_response == "Research answer."
-    assert len(provider.calls) == 2
-    assert "```decision" in provider.calls[0][-1]["content"]
-    assert "```final" in provider.calls[1][-1]["content"]
+    assert len(provider.calls) == 1
+    assert "choose exactly one next action" in provider.calls[0][-1]["content"]
+    assert "```tool" in provider.calls[0][-1]["content"]
+    assert "```final" in provider.calls[0][-1]["content"]
 
 
 def test_streamlit_assistant_helper_paths_and_preferences(

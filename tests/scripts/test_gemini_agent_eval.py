@@ -21,8 +21,6 @@ def test_gemini_default_provider_modes_include_native_tools() -> None:
         "tools",
         "json",
         "prompt_tools",
-        "prompt_tools_single_action",
-        "prompt_tools_category",
     ]
 
 

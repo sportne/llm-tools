@@ -205,7 +205,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--provider-modes",
         help=(
             "Comma-separated provider modes: tools,json,prompt_tools,"
-            "prompt_tools_single_action,prompt_tools_category."
+            "prompt_tools_split,prompt_tools_single_action,prompt_tools_category. "
+            "The prompt_tools mode uses the default single-action prompt protocol."
         ),
     )
     return parser

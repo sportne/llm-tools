@@ -13,7 +13,6 @@ from pathlib import Path
 from tempfile import gettempdir
 from typing import Any
 
-import common
 from run_ollama_agent_eval import (
     DEFAULT_SCENARIOS,
     _csv,
@@ -30,8 +29,6 @@ DEFAULT_PROVIDER_MODES = [
     "tools",
     "json",
     "prompt_tools",
-    "prompt_tools_single_action",
-    "prompt_tools_category",
 ]
 DEFAULT_MODEL_PROFILES = [
     {

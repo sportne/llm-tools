@@ -39,6 +39,10 @@ def test_parse_decision_tool_and_finalize() -> None:
         "```decision\nMODE: tool\nTOOL_NAME: read_file\n```",
         tool_specs=_tool_specs(),
     )
+    tool_name_mode = adapter.parse_decision(
+        "```decision\nMODE: read_file\nTOOL_NAME: read_file\n```",
+        tool_specs=_tool_specs(),
+    )
     final = adapter.parse_decision(
         "```decision\nMODE: finalize\n```",
         tool_specs=_tool_specs(),
@@ -46,6 +50,8 @@ def test_parse_decision_tool_and_finalize() -> None:
 
     assert decision.mode == "tool"
     assert decision.tool_name == "read_file"
+    assert tool_name_mode.mode == "tool"
+    assert tool_name_mode.tool_name == "read_file"
     assert final.mode == "finalize"
     assert final.tool_name is None
 
@@ -124,6 +130,27 @@ def test_parse_tool_invocation_handles_multiline_and_json_arguments() -> None:
         "limit": 25,
         "options": {"encoding": "utf-8", "lines": [1, 2]},
     }
+
+
+def test_parse_tool_invocation_normalizes_common_tool_block_shapes() -> None:
+    adapter = PromptToolAdapter()
+
+    bare_tool = adapter.parse_tool_invocation(
+        "```tool\nread_file\nBEGIN_ARG: Path\nREADME.md\nEND_ARG\n```",
+        tool_name="read_file",
+        input_model=_ReadFileInput,
+    )
+    colon_tool = adapter.parse_single_action(
+        "```tool\nread_file:\nBEGIN_ARG: path\nREADME.md\nEND_ARG\n```",
+        tool_specs=_tool_specs(),
+        input_models={"read_file": _ReadFileInput, "search_text": _ReadFileInput},
+        final_response_model=ChatFinalResponse,
+    )
+
+    assert bare_tool.invocations[0].tool_name == "read_file"
+    assert bare_tool.invocations[0].arguments["path"] == "README.md"
+    assert colon_tool.invocations[0].tool_name == "read_file"
+    assert colon_tool.invocations[0].arguments["path"] == "README.md"
 
 
 def test_parse_tool_invocation_rejects_extra_missing_and_nonfinal_blocks() -> None:
@@ -261,6 +288,43 @@ def test_parse_single_action_tool_and_final_blocks() -> None:
     assert final.final_response["answer"] == "Done"
 
 
+def test_parse_single_action_accepts_plain_text_final_answer() -> None:
+    adapter = PromptToolAdapter()
+
+    parsed = adapter.parse_single_action(
+        "The repository stores chat session state in FileChatSessionStore.",
+        tool_specs=_tool_specs(),
+        input_models={"read_file": _ReadFileInput},
+        final_response_model=ChatFinalResponse,
+    )
+
+    assert (
+        parsed.final_response["answer"]
+        == "The repository stores chat session state in FileChatSessionStore."
+    )
+
+
+def test_parse_single_action_accepts_prose_with_non_protocol_json_fence() -> None:
+    adapter = PromptToolAdapter()
+
+    parsed = adapter.parse_single_action(
+        (
+            "The Streamlit assistant persists durable sessions with "
+            "FileHarnessStateStore.\n\n"
+            "```json\n"
+            '{"answer": "duplicate structured answer"}\n'
+            "```"
+        ),
+        tool_specs=_tool_specs(),
+        input_models={"read_file": _ReadFileInput},
+        final_response_model=ChatFinalResponse,
+    )
+
+    assert parsed.final_response["answer"] == (
+        "The Streamlit assistant persists durable sessions with FileHarnessStateStore."
+    )
+
+
 def test_parse_single_action_rejects_wrong_shape_and_category_constraints() -> None:
     adapter = PromptToolAdapter()
     input_models = {"read_file": _ReadFileInput, "search_text": _ReadFileInput}
@@ -297,6 +361,13 @@ def test_parse_single_action_rejects_wrong_shape_and_category_constraints() -> N
             input_models=input_models,
             final_response_model=ChatFinalResponse,
         )
+    with pytest.raises(PromptToolProtocolError, match="Expected fenced block"):
+        adapter.parse_single_action(
+            '```json\n{"answer": "no prose outside this block"}\n```',
+            tool_specs=_tool_specs(),
+            input_models=input_models,
+            final_response_model=ChatFinalResponse,
+        )
 
 
 def test_category_grouping_and_decision_parsing() -> None:
@@ -329,12 +400,24 @@ def test_category_grouping_and_decision_parsing() -> None:
         "```category\nMODE: category\nCATEGORY: text\n```",
         categories=categories,
     )
+    mode_category = adapter.parse_category_decision(
+        "```category\nMODE: text\nCATEGORY: text\n```",
+        categories=categories,
+    )
+    category_fence = adapter.parse_category_decision(
+        "```text\nMODE: text\nCATEGORY: text\n```",
+        categories=categories,
+    )
     final = adapter.parse_category_decision(
         "```category\nMODE: finalize\n```",
         categories=categories,
     )
     assert parsed.mode == "category"
     assert parsed.category == "text"
+    assert mode_category.mode == "category"
+    assert mode_category.category == "text"
+    assert category_fence.mode == "category"
+    assert category_fence.category == "text"
     assert final.mode == "finalize"
     with pytest.raises(PromptToolProtocolError, match="unknown category"):
         adapter.parse_category_decision(

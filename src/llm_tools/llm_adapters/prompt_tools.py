@@ -393,6 +393,9 @@ class PromptToolAdapter:
         fields = self._parse_key_lines(body)
         mode = fields.get("MODE", "").strip().lower()
         allowed_tools = {spec.name for spec in tool_specs}
+        selected_tool = fields.get("TOOL_NAME", "").strip()
+        if mode in allowed_tools and (not selected_tool or selected_tool == mode):
+            return PromptToolDecision(mode="tool", tool_name=mode)
         if mode == "finalize":
             if "TOOL_NAME" in fields and fields["TOOL_NAME"].strip():
                 raise PromptToolProtocolError(
@@ -405,7 +408,7 @@ class PromptToolAdapter:
                 "Decision MODE must be 'tool' or 'finalize'.",
                 invalid_payload=text,
             )
-        tool_name = fields.get("TOOL_NAME", "").strip()
+        tool_name = selected_tool
         if tool_name not in allowed_tools:
             raise PromptToolProtocolError(
                 f"Decision selected unknown tool: {tool_name or '(missing)'}.",
@@ -419,10 +422,17 @@ class PromptToolAdapter:
         *,
         categories: list[PromptToolCategory],
     ) -> PromptToolCategoryDecision:
-        body = self._single_block_body(text, "category")
+        allowed_categories = {category.name for category in categories}
+        body = self._category_block_body(text, allowed_categories=allowed_categories)
         fields = self._parse_key_lines(body)
         mode = fields.get("MODE", "").strip().lower()
-        allowed_categories = {category.name for category in categories}
+        if mode in allowed_categories:
+            category_name = fields.get("CATEGORY", "").strip() or mode
+            if category_name == mode:
+                return PromptToolCategoryDecision(
+                    mode="category",
+                    category=category_name,
+                )
         if mode == "finalize":
             if "CATEGORY" in fields and fields["CATEGORY"].strip():
                 raise PromptToolProtocolError(
@@ -451,11 +461,26 @@ class PromptToolAdapter:
         input_models: dict[str, type[BaseModel]],
         final_response_model: object,
     ) -> ParsedModelResponse:
-        kind, body = self._single_block(
-            text,
-            allowed_kinds={"tool", "final"},
-            require_final_block=True,
-        )
+        try:
+            kind, body = self._single_block(
+                text,
+                allowed_kinds={"tool", "final"},
+                require_final_block=True,
+            )
+        except PromptToolProtocolError:
+            plain_answer = self._plain_final_answer_candidate(
+                text,
+                protocol_kinds={"tool", "final"},
+            )
+            if plain_answer is None:
+                raise
+            return ParsedModelResponse(
+                final_response=self._validate_final_response(
+                    plain_answer,
+                    final_response_model=final_response_model,
+                    invalid_payload=text,
+                )
+            )
         if kind == "final":
             answer = self._final_answer_from_body(body)
             return ParsedModelResponse(
@@ -465,8 +490,12 @@ class PromptToolAdapter:
                     invalid_payload=text,
                 )
             )
-        parsed_name = self._tool_name_from_body(body, invalid_payload=text)
         allowed_tools = {spec.name for spec in tool_specs}
+        parsed_name = self._tool_name_from_body(
+            body,
+            invalid_payload=text,
+            allowed_tools=allowed_tools,
+        )
         if parsed_name not in allowed_tools:
             raise PromptToolProtocolError(
                 f"Tool block selected unknown tool: {parsed_name or '(missing)'}.",
@@ -501,7 +530,11 @@ class PromptToolAdapter:
         input_model: type[BaseModel],
     ) -> ParsedModelResponse:
         body = self._single_block_body(text, "tool", require_final_block=True)
-        parsed_name = self._tool_name_from_body(body, invalid_payload=text)
+        parsed_name = self._tool_name_from_body(
+            body,
+            invalid_payload=text,
+            allowed_tools={tool_name},
+        )
         if parsed_name != tool_name:
             raise PromptToolProtocolError(
                 f"Tool block selected '{parsed_name}', expected '{tool_name}'.",
@@ -586,6 +619,32 @@ class PromptToolAdapter:
                 )
         return matching[0].strip()
 
+    def _category_block_body(
+        self,
+        text: str,
+        *,
+        allowed_categories: set[str],
+    ) -> str:
+        blocks = [
+            (match.group("kind").strip().lower(), match.group("body"))
+            for match in self._BLOCK_RE.finditer(text)
+        ]
+        matching = [
+            body
+            for block_kind, body in blocks
+            if block_kind == "category" or block_kind in allowed_categories
+        ]
+        if not matching:
+            raise PromptToolProtocolError(
+                "Missing fenced category block.", invalid_payload=text
+            )
+        if len(matching) != 1 or len(blocks) != 1:
+            raise PromptToolProtocolError(
+                "Expected exactly one fenced category block.",
+                invalid_payload=text,
+            )
+        return matching[0].strip()
+
     def _single_block(
         self,
         text: str,
@@ -625,6 +684,45 @@ class PromptToolAdapter:
                 )
         return kind, body.strip()
 
+    def _plain_final_answer_candidate(
+        self,
+        text: str,
+        *,
+        protocol_kinds: set[str],
+    ) -> str | None:
+        stripped = text.strip()
+        if not stripped:
+            return None
+        matches = list(self._BLOCK_RE.finditer(text))
+        if not matches:
+            return stripped
+        if any(
+            match.group("kind").strip().lower() in protocol_kinds for match in matches
+        ):
+            return None
+        outside = self._text_outside_matches(text, matches).strip()
+        if not outside:
+            return None
+        if all(
+            match.group("kind").strip().lower() in {"json", "jsonc"}
+            for match in matches
+        ):
+            return outside
+        return stripped
+
+    @staticmethod
+    def _text_outside_matches(
+        text: str,
+        matches: list[re.Match[str]],
+    ) -> str:
+        chunks: list[str] = []
+        cursor = 0
+        for match in matches:
+            chunks.append(text[cursor : match.start()])
+            cursor = match.end()
+        chunks.append(text[cursor:])
+        return "".join(chunks)
+
     @staticmethod
     def _parse_key_lines(body: str) -> dict[str, str]:
         fields: dict[str, str] = {}
@@ -635,10 +733,30 @@ class PromptToolAdapter:
             fields[key.strip().upper()] = value.strip()
         return fields
 
-    def _tool_name_from_body(self, body: str, *, invalid_payload: object) -> str:
+    def _tool_name_from_body(
+        self,
+        body: str,
+        *,
+        invalid_payload: object,
+        allowed_tools: set[str],
+    ) -> str:
+        first_content_line: str | None = None
         for line in body.splitlines():
-            if line.strip().lower().startswith("tool_name:"):
-                return line.split(":", 1)[1].strip()
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if first_content_line is None:
+                first_content_line = stripped
+            if stripped.lower().startswith("tool_name:"):
+                return stripped.split(":", 1)[1].strip()
+        if first_content_line is not None:
+            candidate = (
+                first_content_line[:-1]
+                if first_content_line.endswith(":")
+                else first_content_line
+            )
+            if candidate in allowed_tools:
+                return candidate
         raise PromptToolProtocolError(
             "Tool block is missing TOOL_NAME.",
             invalid_payload=invalid_payload,
@@ -702,6 +820,11 @@ class PromptToolAdapter:
         input_model: type[BaseModel],
         invalid_payload: object,
     ) -> dict[str, Any]:
+        arguments = PromptToolAdapter._normalize_argument_names(
+            arguments,
+            input_model=input_model,
+            invalid_payload=invalid_payload,
+        )
         extra_args = set(arguments) - set(input_model.model_fields)
         if extra_args:
             raise PromptToolProtocolError(
@@ -714,6 +837,28 @@ class PromptToolAdapter:
             raise PromptToolProtocolError(
                 str(exc), invalid_payload=invalid_payload
             ) from exc
+
+    @staticmethod
+    def _normalize_argument_names(
+        arguments: dict[str, Any],
+        *,
+        input_model: type[BaseModel],
+        invalid_payload: object,
+    ) -> dict[str, Any]:
+        field_names = set(input_model.model_fields)
+        field_lookup = {name.lower(): name for name in field_names}
+        normalized: dict[str, Any] = {}
+        for key, value in arguments.items():
+            target_key = (
+                key if key in field_names else field_lookup.get(key.lower(), key)
+            )
+            if target_key in normalized:
+                raise PromptToolProtocolError(
+                    f"Duplicate argument after normalization: {target_key}.",
+                    invalid_payload=invalid_payload,
+                )
+            normalized[target_key] = value
+        return normalized
 
     @staticmethod
     def _final_answer_from_body(body: str) -> str:

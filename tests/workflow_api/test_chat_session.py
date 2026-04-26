@@ -196,6 +196,12 @@ class _FallbackStagedPromptToolProvider(_FakePromptToolProvider):
         return exc is self.failure
 
 
+class _FailingNativeProvider:
+    def run(self, **kwargs) -> ParsedModelResponse:
+        del kwargs
+        raise RuntimeError("auth failed")
+
+
 class _CancelOnRunProvider:
     def __init__(self, response: ParsedModelResponse) -> None:
         self._response = response
@@ -337,6 +343,12 @@ def test_chat_session_runner_strategy_helpers_use_env_defaults(
     assert runner._uses_json_single_action_strategy() is True
     monkeypatch.setenv("LLM_TOOLS_JSON_AGENT_STRATEGY", "decision")
     assert runner._uses_json_single_action_strategy() is False
+    monkeypatch.delenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", raising=False)
+    assert runner._uses_prompt_tool_single_action_strategy() is True
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "split")
+    assert runner._uses_prompt_tool_single_action_strategy() is False
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "category")
+    assert runner._uses_prompt_tool_single_action_strategy() is False
     monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_CATEGORY_THRESHOLD", "bad")
     assert ChatSessionTurnRunner._prompt_tool_category_threshold() == 7
 
@@ -646,7 +658,9 @@ def test_chat_session_runner_prompt_tool_does_not_repair_transport_failure(
 
 def test_chat_session_runner_repairs_prompt_tool_final_response(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "split")
     provider = _FakePromptToolProvider(
         [
             "```decision\nMODE: finalize\n```",
@@ -687,7 +701,9 @@ def test_chat_session_runner_repairs_prompt_tool_final_response(
 
 def test_chat_session_runner_repairs_prompt_tool_audit_metadata_final_response(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "split")
     provider = _FakePromptToolProvider(
         [
             "```decision\nMODE: finalize\n```",
@@ -734,7 +750,9 @@ def test_chat_session_runner_repairs_prompt_tool_audit_metadata_final_response(
 
 def test_chat_session_runner_fails_prompt_tool_stage_after_two_repairs(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "split")
     provider = _FakePromptToolProvider(
         [
             "```decision\nMODE: finalize\n```",
@@ -799,6 +817,26 @@ def test_chat_session_runner_auto_falls_back_to_prompt_tools(
     assert isinstance(result_event, ChatWorkflowResultEvent)
     assert result_event.result.final_response is not None
     assert result_event.result.final_response.answer == "Fallback answer."
+
+
+def test_chat_session_runner_does_not_fallback_for_uncategorized_native_failure(
+    tmp_path: Path,
+) -> None:
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(),
+        executor=_empty_executor(),
+        provider=_FailingNativeProvider(),  # type: ignore[arg-type]
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(max_tool_result_chars=500),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    with pytest.raises(RuntimeError, match="auth failed"):
+        list(runner)
 
 
 def test_chat_session_runner_staged_failure_falls_back_to_prompt_tools(
