@@ -1036,7 +1036,9 @@ def build_nicegui_chat_ui(  # noqa: C901
         if provider_select is not None:
             provider_select.value = runtime.provider.value
         if model_input is not None:
-            set_model_options(model_options_state["values"], selected=runtime.model_name)
+            set_model_options(
+                model_options_state["values"], selected=runtime.model_name
+            )
         if mode_select is not None:
             mode_select.value = runtime.provider_mode_strategy.value
         if base_url_input is not None:
