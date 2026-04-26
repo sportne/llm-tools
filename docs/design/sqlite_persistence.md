@@ -2,9 +2,9 @@
 
 ## Goal
 
-The NiceGUI client uses SQLite through SQLAlchemy 2.x for durable chat state.
-This replaces the file-per-session approach for the new app only; Streamlit
-storage remains unchanged.
+The NiceGUI client uses SQLCipher-backed SQLite through SQLAlchemy 2.x for
+durable chat state. This replaces the file-per-session approach for the new app
+only; Streamlit storage remains unchanged.
 
 ## Location
 
@@ -23,6 +23,22 @@ LLM_TOOLS_NICEGUI_DB=/path/to/chat.sqlite3
 The store uses synchronous SQLAlchemy with one short-lived database transaction
 per operation. SQLite foreign keys are enabled and WAL is requested for normal
 file-backed databases.
+
+The database file is always encrypted with SQLCipher. The app creates or reads
+the SQLCipher key from:
+
+```text
+~/.llm-tools/assistant/nicegui/hosted/db.key
+```
+
+User-owned fields are also encrypted inside the opened database using per-user
+data keys. Those user keys are wrapped by a local server key stored at:
+
+```text
+~/.llm-tools/assistant/nicegui/hosted/user-kek.key
+```
+
+Losing either key file makes the corresponding encrypted data unrecoverable.
 
 ## Tables
 
@@ -46,8 +62,9 @@ Stores durable session metadata plus validated JSON fields:
 - `temporary`
 - `project_id`
 
-`owner_user_id` is nullable for legacy local loopback sessions and populated for
-hosted-mode private user data. `project_id` is nullable and reserved so future
+`owner_user_id` is nullable for local loopback sessions and populated for
+hosted-mode private user data. Local loopback sessions use an internal local key
+identifier for field encryption. `project_id` is nullable and reserved so future
 project workspaces can be added without rewriting the core session/message
 schema.
 
@@ -126,21 +143,6 @@ Stores hosted-mode browser sessions:
 
 Only token hashes are stored in SQLite.
 
-### `secret_records`
-
-Stores hosted-mode encrypted secrets:
-
-- `secret_id`
-- `owner_user_id`
-- `session_id`
-- `name`
-- `ciphertext`
-- `created_at`
-- `updated_at`
-
-The encrypted value is scoped to one user and one chat session. The master key is
-stored outside SQLite under the hosted key path.
-
 ### `auth_events`
 
 Stores minimal local auth audit events:
@@ -151,10 +153,24 @@ Stores minimal local auth audit events:
 - `detail_json`
 - `created_at`
 
+### `user_key_records`
+
+Stores wrapped per-user encryption keys:
+
+- `owner_key_id`
+- `wrapped_key`
+- `algorithm`
+- `key_version`
+- `created_at`
+- `rotated_at`
+
+Raw user data keys are never stored in SQLite.
+
 ## Validation
 
-Relational columns store queryable metadata. Complex fields are stored as JSON
-but validated with Pydantic models on write and on read:
+Relational columns store the minimum queryable metadata needed for ownership,
+ordering, and status. User-owned content fields are encrypted envelopes and are
+validated with Pydantic models after decryption:
 
 - runtime config
 - workflow session state
@@ -162,10 +178,14 @@ but validated with Pydantic models on write and on read:
 - transcript final responses
 - inspector payload wrappers
 - preferences
-- hosted users, browser sessions, and encrypted secret metadata
+- hosted users and browser sessions
 
 Malformed persisted JSON raises a store corruption error with the affected
 field name rather than silently dropping data.
+
+Encrypted envelopes use authenticated encryption. The authentication context
+includes the table, row id, owner key id, column, and key version so copied or
+swapped encrypted values fail during decryption.
 
 ## Store API
 
@@ -180,7 +200,11 @@ The v1 API is intentionally small:
 - `delete_session(session_id)`
 - `load_preferences(owner_user_id=None)`
 - `save_preferences(preferences, owner_user_id=None)`
-- user, user-session, encrypted-secret, and auth-event helpers for hosted mode
+- user, user-session, and auth-event helpers for hosted mode
 
 Temporary sessions are returned as normal typed records but are not inserted into
 the database.
+
+Provider API keys and tool credentials are not part of the SQLite schema. The
+NiceGUI app keeps typed credential values in server memory for the current
+browser/app session only.

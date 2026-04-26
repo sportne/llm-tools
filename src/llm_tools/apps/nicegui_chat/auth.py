@@ -58,7 +58,6 @@ def validate_hosted_startup(
     tls_keyfile: str | None,
     allow_insecure_hosted_secrets: bool,
     secret_key_path: Path | None = None,
-    master_key_path: Path | None = None,
 ) -> HostedStartupValidation:
     """Resolve hosted-mode startup policy and fail closed for unsafe bindings."""
     mode = auth_mode.strip().lower()
@@ -80,7 +79,6 @@ def validate_hosted_startup(
             "Secret entry is disabled because hosted mode is reachable without HTTPS."
         )
     resolved_secret_key_path = secret_key_path or _DEFAULT_HOSTED_DIR / "app.secret"
-    resolved_master_key_path = master_key_path or _DEFAULT_HOSTED_DIR / "master.key"
     return HostedStartupValidation(
         config=NiceGUIHostedConfig(
             auth_mode=mode,  # type: ignore[arg-type]
@@ -89,7 +87,6 @@ def validate_hosted_startup(
             tls_keyfile=tls_keyfile,
             allow_insecure_hosted_secrets=allow_insecure_hosted_secrets,
             secret_key_path=str(resolved_secret_key_path),
-            master_key_path=str(resolved_master_key_path),
             secret_entry_enabled=secret_entry_enabled,
             insecure_hosted_warning=warning,
         ),
@@ -156,8 +153,6 @@ class LocalAuthProvider:
         self.store.record_auth_event(
             user_id=user.user_id, event_type="user_created", detail={"role": role}
         )
-        if role == "admin":
-            self.store.assign_unowned_sessions(user.user_id)
         return user
 
     def reset_password(self, *, user_id: str, password: str) -> NiceGUIUser | None:

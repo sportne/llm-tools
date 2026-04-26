@@ -8,6 +8,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -34,11 +35,15 @@ from sqlalchemy import (
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+from llm_tools.apps.nicegui_chat.crypto import (
+    CryptoManager,
+    NiceGUICryptoError,
+    ensure_text_key_file,
+)
 from llm_tools.apps.nicegui_chat.models import (
     NiceGUIInspectorState,
     NiceGUIPreferences,
     NiceGUIRuntimeConfig,
-    NiceGUISecretRecord,
     NiceGUISessionRecord,
     NiceGUISessionSummary,
     NiceGUITranscriptEntry,
@@ -51,8 +56,12 @@ from llm_tools.workflow_api import ChatFinalResponse, ChatSessionState, ChatToke
 
 NICEGUI_DB_ENV_VAR = "LLM_TOOLS_NICEGUI_DB"
 PREFERENCES_KEY = "preferences"
+LOCAL_OWNER_KEY_ID = "__local__"
 _DEFAULT_DB_PATH = Path.home() / ".llm-tools" / "assistant" / "nicegui" / "chat.sqlite3"
 _DB_POINTER_PATH = Path.home() / ".llm-tools" / "assistant" / "nicegui" / "db_path.txt"
+_DEFAULT_KEY_DIR = Path.home() / ".llm-tools" / "assistant" / "nicegui" / "hosted"
+_DEFAULT_DB_KEY_PATH = _DEFAULT_KEY_DIR / "db.key"
+_DEFAULT_USER_KEY_PATH = _DEFAULT_KEY_DIR / "user-kek.key"
 
 metadata = MetaData()
 
@@ -154,29 +163,6 @@ user_sessions = Table(
     Column("revoked_at", String, nullable=True),
 )
 
-secret_records = Table(
-    "secret_records",
-    metadata,
-    Column("secret_id", String, primary_key=True),
-    Column(
-        "owner_user_id",
-        String,
-        ForeignKey("users.user_id", ondelete="CASCADE"),
-        nullable=False,
-    ),
-    Column("session_id", String, nullable=False),
-    Column("name", String, nullable=False),
-    Column("ciphertext", Text, nullable=False),
-    Column("created_at", String, nullable=False),
-    Column("updated_at", String, nullable=False),
-    UniqueConstraint(
-        "owner_user_id",
-        "session_id",
-        "name",
-        name="uq_secret_records_owner_session_name",
-    ),
-)
-
 auth_events = Table(
     "auth_events",
     metadata,
@@ -185,6 +171,17 @@ auth_events = Table(
     Column("event_type", String, nullable=False),
     Column("detail_json", Text, nullable=False),
     Column("created_at", String, nullable=False),
+)
+
+user_key_records = Table(
+    "user_key_records",
+    metadata,
+    Column("owner_key_id", String, primary_key=True),
+    Column("wrapped_key", Text, nullable=False),
+    Column("algorithm", String, nullable=False),
+    Column("key_version", Integer, nullable=False),
+    Column("created_at", String, nullable=False),
+    Column("rotated_at", String, nullable=True),
 )
 
 
@@ -215,14 +212,30 @@ def remember_default_db_path(path: Path | str) -> None:
     _DB_POINTER_PATH.write_text(str(db_path), encoding="utf-8")
 
 
-def create_sqlite_engine(path: Path | str) -> Engine:
-    """Create a SQLite engine with app defaults."""
+def create_sqlcipher_engine(
+    path: Path | str, *, db_key_file: Path | str | None = None
+) -> Engine:
+    """Create a SQLCipher-backed SQLite engine with app defaults."""
     path_text = str(path)
-    url = "sqlite:///:memory:" if path_text == ":memory:" else f"sqlite:///{path_text}"
+    key_path = Path(db_key_file).expanduser() if db_key_file else _DEFAULT_DB_KEY_PATH
+    passphrase = ensure_text_key_file(key_path)
+    try:
+        import sqlcipher3  # type: ignore[import-untyped]
+    except ImportError as exc:  # pragma: no cover - dependency guard
+        raise NiceGUIChatStoreError(
+            "NiceGUI encrypted persistence requires sqlcipher3-binary."
+        ) from exc
+    quoted_passphrase = quote(passphrase, safe="")
+    url = (
+        f"sqlite+pysqlcipher://:{quoted_passphrase}@/:memory:"
+        if path_text == ":memory:"
+        else f"sqlite+pysqlcipher://:{quoted_passphrase}@/{path_text}"
+    )
     if path_text != ":memory:":
         Path(path_text).expanduser().parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(
         url,
+        module=sqlcipher3,
         connect_args={"check_same_thread": False},
         future=True,
     )
@@ -230,6 +243,7 @@ def create_sqlite_engine(path: Path | str) -> Engine:
     @event.listens_for(engine, "connect")
     def _configure_sqlite(dbapi_connection: Any, _connection_record: object) -> None:
         cursor = dbapi_connection.cursor()
+        cursor.execute("SELECT count(*) FROM sqlite_master")
         cursor.execute("PRAGMA foreign_keys=ON")
         if path_text != ":memory:":
             with suppress(Exception):
@@ -247,6 +261,10 @@ def _preferences_key(owner_user_id: str | None = None) -> str:
     if owner_user_id is None:
         return PREFERENCES_KEY
     return f"{PREFERENCES_KEY}:{owner_user_id}"
+
+
+def _owner_key_id(owner_user_id: str | None) -> str:
+    return owner_user_id or LOCAL_OWNER_KEY_ID
 
 
 def _dump_model(model: BaseModel) -> str:
@@ -321,11 +339,29 @@ def _new_session_record(
 class SQLiteNiceGUIChatStore:
     """SQLAlchemy-backed store for NiceGUI chat sessions."""
 
-    def __init__(self, db_path: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        db_path: Path | str | None = None,
+        *,
+        db_key_file: Path | str | None = None,
+        user_key_file: Path | str | None = None,
+    ) -> None:
         self.db_path = (
             Path(db_path).expanduser() if db_path is not None else default_db_path()
         )
-        self.engine = create_sqlite_engine(self.db_path)
+        self.db_key_file = (
+            Path(db_key_file).expanduser() if db_key_file else _DEFAULT_DB_KEY_PATH
+        )
+        self.user_key_file = (
+            Path(user_key_file).expanduser()
+            if user_key_file
+            else _DEFAULT_USER_KEY_PATH
+        )
+        self.crypto = CryptoManager(self.user_key_file)
+        self._data_key_cache: dict[str, bytes] = {}
+        self.engine = create_sqlcipher_engine(
+            self.db_path, db_key_file=self.db_key_file
+        )
 
     def initialize(self) -> None:
         """Create missing tables."""
@@ -338,7 +374,7 @@ class SQLiteNiceGUIChatStore:
             ) from exc
 
     def _ensure_schema_columns(self) -> None:
-        """Add additive columns for existing SQLite databases."""
+        """Add additive columns for existing encrypted SQLite databases."""
         workbench_columns = {
             "started_at": "TEXT",
             "finished_at": "TEXT",
@@ -381,26 +417,28 @@ class SQLiteNiceGUIChatStore:
         stmt = select(chat_sessions).where(chat_sessions.c.temporary.is_(False))
         if owner_user_id is not None:
             stmt = stmt.where(chat_sessions.c.owner_user_id == owner_user_id)
-        cleaned_query = (query or "").strip()
-        if cleaned_query:
-            like_query = f"%{cleaned_query}%"
-            stmt = stmt.where(
-                chat_sessions.c.title.like(like_query)
-                | chat_sessions.c.model_name.like(like_query)
-                | chat_sessions.c.root_path.like(like_query)
-            )
         stmt = stmt.order_by(chat_sessions.c.updated_at.desc())
-        if limit is not None:
-            stmt = stmt.limit(limit)
         with self.engine.begin() as connection:
             rows = connection.execute(stmt).mappings().all()
-        return [
+        summaries = [
             NiceGUISessionSummary(
                 session_id=str(row["session_id"]),
-                title=str(row["title"]),
+                title=self._decrypt_field(
+                    row["owner_user_id"],
+                    table="chat_sessions",
+                    row_id=str(row["session_id"]),
+                    column="title",
+                    value=str(row["title"]),
+                ),
                 created_at=str(row["created_at"]),
                 updated_at=str(row["updated_at"]),
-                root_path=row["root_path"],
+                root_path=self._decrypt_optional_field(
+                    row["owner_user_id"],
+                    table="chat_sessions",
+                    row_id=str(row["session_id"]),
+                    column="root_path",
+                    value=row["root_path"],
+                ),
                 provider=row["provider"],
                 model_name=str(row["model_name"]),
                 message_count=self._message_count(str(row["session_id"])),
@@ -410,6 +448,21 @@ class SQLiteNiceGUIChatStore:
             )
             for row in rows
         ]
+        cleaned_query = (query or "").strip().lower()
+        if cleaned_query:
+            summaries = [
+                summary
+                for summary in summaries
+                if cleaned_query in summary.title.lower()
+                or cleaned_query in summary.model_name.lower()
+                or (
+                    summary.root_path is not None
+                    and cleaned_query in summary.root_path.lower()
+                )
+            ]
+        if limit is not None:
+            summaries = summaries[:limit]
+        return summaries
 
     def create_session(
         self,
@@ -464,12 +517,24 @@ class SQLiteNiceGUIChatStore:
                 .all()
             )
         runtime = _load_model_json(
-            raw=session_row["runtime_json"],
+            raw=self._decrypt_field(
+                session_row["owner_user_id"],
+                table="chat_sessions",
+                row_id=str(session_row["session_id"]),
+                column="runtime_json",
+                value=str(session_row["runtime_json"]),
+            ),
             model_type=NiceGUIRuntimeConfig,
             field_name="runtime_json",
         )
         workflow_state = _load_model_json(
-            raw=session_row["workflow_session_state_json"],
+            raw=self._decrypt_field(
+                session_row["owner_user_id"],
+                table="chat_sessions",
+                row_id=str(session_row["session_id"]),
+                column="workflow_session_state_json",
+                value=str(session_row["workflow_session_state_json"]),
+            ),
             model_type=ChatSessionState,
             field_name="workflow_session_state_json",
         )
@@ -477,24 +542,53 @@ class SQLiteNiceGUIChatStore:
             None
             if session_row["token_usage_json"] is None
             else _load_model_json(
-                raw=session_row["token_usage_json"],
+                raw=self._decrypt_field(
+                    session_row["owner_user_id"],
+                    table="chat_sessions",
+                    row_id=str(session_row["session_id"]),
+                    column="token_usage_json",
+                    value=str(session_row["token_usage_json"]),
+                ),
                 model_type=ChatTokenUsage,
                 field_name="token_usage_json",
             )
         )
         inspector_state = _load_model_json(
-            raw=session_row["inspector_state_json"],
+            raw=self._decrypt_field(
+                session_row["owner_user_id"],
+                table="chat_sessions",
+                row_id=str(session_row["session_id"]),
+                column="inspector_state_json",
+                value=str(session_row["inspector_state_json"]),
+            ),
             model_type=NiceGUIInspectorState,
             field_name="inspector_state_json",
         )
-        transcript = [self._transcript_entry_from_row(row) for row in message_rows]
+        transcript = [
+            self._transcript_entry_from_row(
+                row, owner_user_id=session_row["owner_user_id"]
+            )
+            for row in message_rows
+        ]
         record = NiceGUISessionRecord(
             summary=NiceGUISessionSummary(
                 session_id=str(session_row["session_id"]),
-                title=str(session_row["title"]),
+                title=self._decrypt_field(
+                    session_row["owner_user_id"],
+                    table="chat_sessions",
+                    row_id=str(session_row["session_id"]),
+                    column="title",
+                    value=str(session_row["title"]),
+                ),
                 created_at=str(session_row["created_at"]),
                 updated_at=str(session_row["updated_at"]),
-                root_path=session_row["root_path"],
+                root_path=self._decrypt_optional_field(
+                    session_row["owner_user_id"],
+                    table="chat_sessions",
+                    row_id=str(session_row["session_id"]),
+                    column="root_path",
+                    value=session_row["root_path"],
+                ),
                 provider=session_row["provider"],
                 model_name=str(session_row["model_name"]),
                 message_count=len(
@@ -513,9 +607,22 @@ class SQLiteNiceGUIChatStore:
                 NiceGUIWorkbenchItem(
                     item_id=str(row["item_id"]),
                     kind=row["kind"],
-                    title=str(row["title"]),
+                    title=self._decrypt_field(
+                        session_row["owner_user_id"],
+                        table="workbench_items",
+                        row_id=str(row["item_id"]),
+                        column="title",
+                        value=str(row["title"]),
+                    ),
                     payload=_load_payload_json(
-                        raw=row["payload_json"], field_name="workbench.payload_json"
+                        raw=self._decrypt_field(
+                            session_row["owner_user_id"],
+                            table="workbench_items",
+                            row_id=str(row["item_id"]),
+                            column="payload_json",
+                            value=str(row["payload_json"]),
+                        ),
+                        field_name="workbench.payload_json",
                     ),
                     version=int(row["version"]),
                     active=bool(row["active"]),
@@ -541,6 +648,7 @@ class SQLiteNiceGUIChatStore:
         if record.summary.temporary:
             return
         _sync_summary_fields(record)
+        self._ensure_user_key(record.summary.owner_user_id)
         with self.engine.begin() as connection:
             existing = connection.execute(
                 select(chat_sessions.c.session_id).where(
@@ -568,6 +676,7 @@ class SQLiteNiceGUIChatStore:
                             record.summary.session_id,
                             ordinal=ordinal,
                             entry=entry,
+                            owner_user_id=record.summary.owner_user_id,
                         )
                     )
                 )
@@ -579,7 +688,11 @@ class SQLiteNiceGUIChatStore:
             for item in record.workbench_items:
                 connection.execute(
                     insert(workbench_items).values(
-                        self._workbench_values(record.summary.session_id, item)
+                        self._workbench_values(
+                            record.summary.session_id,
+                            item,
+                            owner_user_id=record.summary.owner_user_id,
+                        )
                     )
                 )
 
@@ -590,6 +703,19 @@ class SQLiteNiceGUIChatStore:
         if entry.created_at is None:
             entry = entry.model_copy(update={"created_at": _now_iso()})
         with self.engine.begin() as connection:
+            session_row = (
+                connection.execute(
+                    select(chat_sessions.c.owner_user_id).where(
+                        chat_sessions.c.session_id == session_id
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            owner_user_id = (
+                None if session_row is None else session_row["owner_user_id"]
+            )
+            self._ensure_user_key(owner_user_id)
             max_ordinal = connection.execute(
                 select(func.max(chat_messages.c.ordinal)).where(
                     chat_messages.c.session_id == session_id
@@ -598,7 +724,12 @@ class SQLiteNiceGUIChatStore:
             ordinal = 0 if max_ordinal is None else int(max_ordinal) + 1
             connection.execute(
                 insert(chat_messages).values(
-                    self._message_values(session_id, ordinal=ordinal, entry=entry)
+                    self._message_values(
+                        session_id,
+                        ordinal=ordinal,
+                        entry=entry,
+                        owner_user_id=owner_user_id,
+                    )
                 )
             )
             connection.execute(
@@ -632,8 +763,15 @@ class SQLiteNiceGUIChatStore:
             )
         if row is None:
             return NiceGUIPreferences()
+        owner_key_id = _owner_key_id(owner_user_id)
         return _load_model_json(
-            raw=row["payload_json"],
+            raw=self._decrypt_field(
+                owner_user_id,
+                table="app_preferences",
+                row_id=owner_key_id,
+                column="payload_json",
+                value=str(row["payload_json"]),
+            ),
             model_type=NiceGUIPreferences,
             field_name="app_preferences.payload_json",
         )  # type: ignore[return-value]
@@ -643,7 +781,14 @@ class SQLiteNiceGUIChatStore:
     ) -> None:
         """Persist app preferences."""
         key = _preferences_key(owner_user_id)
-        payload = _dump_model(preferences)
+        self._ensure_user_key(owner_user_id)
+        payload = self._encrypt_field(
+            owner_user_id,
+            table="app_preferences",
+            row_id=_owner_key_id(owner_user_id),
+            column="payload_json",
+            value=_dump_model(preferences),
+        )
         with self.engine.begin() as connection:
             existing = connection.execute(
                 select(app_preferences.c.key).where(app_preferences.c.key == key)
@@ -689,6 +834,7 @@ class SQLiteNiceGUIChatStore:
                     last_login_at=user.last_login_at,
                 )
             )
+        self._ensure_user_key(user.user_id)
         return user
 
     def list_users(self) -> list[NiceGUIUser]:
@@ -797,113 +943,6 @@ class SQLiteNiceGUIChatStore:
                 .values(revoked_at=_now_iso())
             )
 
-    def upsert_secret_record(
-        self,
-        *,
-        owner_user_id: str,
-        session_id: str,
-        name: str,
-        ciphertext: str,
-    ) -> NiceGUISecretRecord:
-        """Create or replace one encrypted secret record."""
-        timestamp = _now_iso()
-        with self.engine.begin() as connection:
-            existing = (
-                connection.execute(
-                    select(secret_records).where(
-                        secret_records.c.owner_user_id == owner_user_id,
-                        secret_records.c.session_id == session_id,
-                        secret_records.c.name == name,
-                    )
-                )
-                .mappings()
-                .first()
-            )
-            if existing is None:
-                secret_id = f"secret-{uuid4().hex}"
-                connection.execute(
-                    insert(secret_records).values(
-                        secret_id=secret_id,
-                        owner_user_id=owner_user_id,
-                        session_id=session_id,
-                        name=name,
-                        ciphertext=ciphertext,
-                        created_at=timestamp,
-                        updated_at=timestamp,
-                    )
-                )
-                return NiceGUISecretRecord(
-                    secret_id=secret_id,
-                    owner_user_id=owner_user_id,
-                    session_id=session_id,
-                    name=name,
-                    ciphertext=ciphertext,
-                    created_at=timestamp,
-                    updated_at=timestamp,
-                )
-            connection.execute(
-                update(secret_records)
-                .where(secret_records.c.secret_id == existing["secret_id"])
-                .values(ciphertext=ciphertext, updated_at=timestamp)
-            )
-        return NiceGUISecretRecord(
-            secret_id=str(existing["secret_id"]),
-            owner_user_id=owner_user_id,
-            session_id=session_id,
-            name=name,
-            ciphertext=ciphertext,
-            created_at=str(existing["created_at"]),
-            updated_at=timestamp,
-        )
-
-    def get_secret_record(
-        self, *, owner_user_id: str, session_id: str, name: str
-    ) -> NiceGUISecretRecord | None:
-        """Return one encrypted secret record."""
-        with self.engine.begin() as connection:
-            row = (
-                connection.execute(
-                    select(secret_records).where(
-                        secret_records.c.owner_user_id == owner_user_id,
-                        secret_records.c.session_id == session_id,
-                        secret_records.c.name == name,
-                    )
-                )
-                .mappings()
-                .first()
-            )
-        return None if row is None else self._secret_record_from_row(row)
-
-    def list_secret_names(self, *, owner_user_id: str, session_id: str) -> list[str]:
-        """Return configured secret names for one user chat session."""
-        with self.engine.begin() as connection:
-            rows = (
-                connection.execute(
-                    select(secret_records.c.name)
-                    .where(
-                        secret_records.c.owner_user_id == owner_user_id,
-                        secret_records.c.session_id == session_id,
-                    )
-                    .order_by(secret_records.c.name.asc())
-                )
-                .scalars()
-                .all()
-            )
-        return [str(name) for name in rows]
-
-    def delete_secret_record(
-        self, *, owner_user_id: str, session_id: str, name: str
-    ) -> None:
-        """Delete one encrypted secret record."""
-        with self.engine.begin() as connection:
-            connection.execute(
-                delete(secret_records).where(
-                    secret_records.c.owner_user_id == owner_user_id,
-                    secret_records.c.session_id == session_id,
-                    secret_records.c.name == name,
-                )
-            )
-
     def assign_unowned_sessions(self, owner_user_id: str) -> None:
         """Assign legacy local sessions to the first hosted-mode admin."""
         with self.engine.begin() as connection:
@@ -949,17 +988,6 @@ class SQLiteNiceGUIChatStore:
             revoked_at=row["revoked_at"],
         )
 
-    def _secret_record_from_row(self, row: Any) -> NiceGUISecretRecord:
-        return NiceGUISecretRecord(
-            secret_id=str(row["secret_id"]),
-            owner_user_id=str(row["owner_user_id"]),
-            session_id=str(row["session_id"]),
-            name=str(row["name"]),
-            ciphertext=str(row["ciphertext"]),
-            created_at=str(row["created_at"]),
-            updated_at=str(row["updated_at"]),
-        )
-
     def _message_count(self, session_id: str) -> int:
         with self.engine.begin() as connection:
             count = connection.execute(
@@ -972,21 +1000,193 @@ class SQLiteNiceGUIChatStore:
             ).scalar_one()
         return int(count)
 
+    def _ensure_user_key(self, owner_user_id: str | None) -> bytes:
+        owner_key_id = _owner_key_id(owner_user_id)
+        cached = self._data_key_cache.get(owner_key_id)
+        if cached is not None:
+            return cached
+        with self.engine.begin() as connection:
+            row = (
+                connection.execute(
+                    select(user_key_records.c.wrapped_key).where(
+                        user_key_records.c.owner_key_id == owner_key_id
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                timestamp = _now_iso()
+                data_key = self.crypto.new_data_key()
+                connection.execute(
+                    insert(user_key_records).values(
+                        owner_key_id=owner_key_id,
+                        wrapped_key=self.crypto.wrap_user_key(
+                            owner_key_id=owner_key_id,
+                            data_key=data_key,
+                        ),
+                        algorithm="AES-256-GCM",
+                        key_version=1,
+                        created_at=timestamp,
+                        rotated_at=None,
+                    )
+                )
+            else:
+                data_key = self.crypto.unwrap_user_key(
+                    owner_key_id=owner_key_id,
+                    envelope=str(row["wrapped_key"]),
+                )
+        self._data_key_cache[owner_key_id] = data_key
+        return data_key
+
+    def _aad(
+        self,
+        owner_user_id: str | None,
+        *,
+        table: str,
+        row_id: str,
+        column: str,
+    ) -> str:
+        return f"{table}:{row_id}:{_owner_key_id(owner_user_id)}:{column}:v1"
+
+    def _encrypt_field(
+        self,
+        owner_user_id: str | None,
+        *,
+        table: str,
+        row_id: str,
+        column: str,
+        value: str,
+    ) -> str:
+        return self.crypto.encrypt_text(
+            data_key=self._ensure_user_key(owner_user_id),
+            plaintext=value,
+            aad=self._aad(
+                owner_user_id,
+                table=table,
+                row_id=row_id,
+                column=column,
+            ),
+        )
+
+    def _decrypt_field(
+        self,
+        owner_user_id: str | None,
+        *,
+        table: str,
+        row_id: str,
+        column: str,
+        value: str,
+    ) -> str:
+        try:
+            return self.crypto.decrypt_text(
+                data_key=self._ensure_user_key(owner_user_id),
+                envelope=value,
+                aad=self._aad(
+                    owner_user_id,
+                    table=table,
+                    row_id=row_id,
+                    column=column,
+                ),
+            )
+        except NiceGUICryptoError as exc:
+            raise NiceGUIChatStoreCorruptionError(
+                f"Could not decrypt persisted field {table}.{column}."
+            ) from exc
+
+    def _encrypt_optional_field(
+        self,
+        owner_user_id: str | None,
+        *,
+        table: str,
+        row_id: str,
+        column: str,
+        value: str | None,
+    ) -> str | None:
+        if value is None:
+            return None
+        return self._encrypt_field(
+            owner_user_id,
+            table=table,
+            row_id=row_id,
+            column=column,
+            value=value,
+        )
+
+    def _decrypt_optional_field(
+        self,
+        owner_user_id: str | None,
+        *,
+        table: str,
+        row_id: str,
+        column: str,
+        value: str | None,
+    ) -> str | None:
+        if value is None:
+            return None
+        return self._decrypt_field(
+            owner_user_id,
+            table=table,
+            row_id=row_id,
+            column=column,
+            value=value,
+        )
+
     def _session_values(self, record: NiceGUISessionRecord) -> dict[str, object]:
+        session_id = record.summary.session_id
+        owner_user_id = record.summary.owner_user_id
         return {
-            "session_id": record.summary.session_id,
-            "title": record.summary.title,
+            "session_id": session_id,
+            "title": self._encrypt_field(
+                owner_user_id,
+                table="chat_sessions",
+                row_id=session_id,
+                column="title",
+                value=record.summary.title,
+            ),
             "created_at": record.summary.created_at,
             "updated_at": record.summary.updated_at,
-            "root_path": record.runtime.root_path,
+            "root_path": self._encrypt_optional_field(
+                owner_user_id,
+                table="chat_sessions",
+                row_id=session_id,
+                column="root_path",
+                value=record.runtime.root_path,
+            ),
             "provider": record.runtime.provider.value,
             "model_name": record.runtime.model_name,
-            "runtime_json": _dump_model(record.runtime),
-            "workflow_session_state_json": _dump_model(record.workflow_session_state),
-            "token_usage_json": (
-                None if record.token_usage is None else _dump_model(record.token_usage)
+            "runtime_json": self._encrypt_field(
+                owner_user_id,
+                table="chat_sessions",
+                row_id=session_id,
+                column="runtime_json",
+                value=_dump_model(record.runtime),
             ),
-            "inspector_state_json": _dump_model(record.inspector_state),
+            "workflow_session_state_json": self._encrypt_field(
+                owner_user_id,
+                table="chat_sessions",
+                row_id=session_id,
+                column="workflow_session_state_json",
+                value=_dump_model(record.workflow_session_state),
+            ),
+            "token_usage_json": (
+                None
+                if record.token_usage is None
+                else self._encrypt_field(
+                    owner_user_id,
+                    table="chat_sessions",
+                    row_id=session_id,
+                    column="token_usage_json",
+                    value=_dump_model(record.token_usage),
+                )
+            ),
+            "inspector_state_json": self._encrypt_field(
+                owner_user_id,
+                table="chat_sessions",
+                row_id=session_id,
+                column="inspector_state_json",
+                value=_dump_model(record.inspector_state),
+            ),
             "confidence": record.confidence,
             "temporary": record.summary.temporary,
             "project_id": record.summary.project_id,
@@ -999,35 +1199,64 @@ class SQLiteNiceGUIChatStore:
         *,
         ordinal: int,
         entry: NiceGUITranscriptEntry,
+        owner_user_id: str | None = None,
     ) -> dict[str, object]:
+        row_id = f"{session_id}:{ordinal}"
         return {
             "session_id": session_id,
             "ordinal": ordinal,
             "role": entry.role,
-            "text": entry.text,
+            "text": self._encrypt_field(
+                owner_user_id,
+                table="chat_messages",
+                row_id=row_id,
+                column="text",
+                value=entry.text,
+            ),
             "final_response_json": (
                 None
                 if entry.final_response is None
-                else _dump_model(entry.final_response)
+                else self._encrypt_field(
+                    owner_user_id,
+                    table="chat_messages",
+                    row_id=row_id,
+                    column="final_response_json",
+                    value=_dump_model(entry.final_response),
+                )
             ),
             "assistant_completion_state": entry.assistant_completion_state,
             "show_in_transcript": entry.show_in_transcript,
             "created_at": entry.created_at or _now_iso(),
         }
 
-    def _transcript_entry_from_row(self, row: Any) -> NiceGUITranscriptEntry:
+    def _transcript_entry_from_row(
+        self, row: Any, *, owner_user_id: str | None
+    ) -> NiceGUITranscriptEntry:
+        row_id = f"{row['session_id']}:{row['ordinal']}"
         final_response = (
             None
             if row["final_response_json"] is None
             else _load_model_json(
-                raw=row["final_response_json"],
+                raw=self._decrypt_field(
+                    owner_user_id,
+                    table="chat_messages",
+                    row_id=row_id,
+                    column="final_response_json",
+                    value=str(row["final_response_json"]),
+                ),
                 model_type=ChatFinalResponse,
                 field_name="chat_messages.final_response_json",
             )
         )
         return NiceGUITranscriptEntry(
             role=row["role"],
-            text=str(row["text"]),
+            text=self._decrypt_field(
+                owner_user_id,
+                table="chat_messages",
+                row_id=row_id,
+                column="text",
+                value=str(row["text"]),
+            ),
             final_response=final_response,  # type: ignore[arg-type]
             assistant_completion_state=row["assistant_completion_state"],
             show_in_transcript=bool(row["show_in_transcript"]),
@@ -1035,14 +1264,30 @@ class SQLiteNiceGUIChatStore:
         )
 
     def _workbench_values(
-        self, session_id: str, item: NiceGUIWorkbenchItem
+        self,
+        session_id: str,
+        item: NiceGUIWorkbenchItem,
+        *,
+        owner_user_id: str | None,
     ) -> dict[str, object]:
         return {
             "item_id": item.item_id,
             "session_id": session_id,
             "kind": item.kind,
-            "title": item.title,
-            "payload_json": _dump_json(item.payload),
+            "title": self._encrypt_field(
+                owner_user_id,
+                table="workbench_items",
+                row_id=item.item_id,
+                column="title",
+                value=item.title,
+            ),
+            "payload_json": self._encrypt_field(
+                owner_user_id,
+                table="workbench_items",
+                row_id=item.item_id,
+                column="payload_json",
+                value=_dump_json(item.payload),
+            ),
             "version": item.version,
             "active": item.active,
             "started_at": item.started_at,
@@ -1062,12 +1307,12 @@ __all__ = [
     "auth_events",
     "chat_messages",
     "chat_sessions",
-    "create_sqlite_engine",
+    "create_sqlcipher_engine",
     "default_db_path",
     "metadata",
     "remember_default_db_path",
-    "secret_records",
     "user_sessions",
+    "user_key_records",
     "users",
     "workbench_items",
 ]

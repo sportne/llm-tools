@@ -48,7 +48,6 @@ from llm_tools.apps.nicegui_chat.models import (
     NiceGUIPreferences,
     NiceGUIRuntimeConfig,
 )
-from llm_tools.apps.nicegui_chat.secrets import SQLiteSecretStore
 from llm_tools.apps.nicegui_chat.store import SQLiteNiceGUIChatStore
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import SideEffectClass, ToolInvocationRequest
@@ -108,13 +107,21 @@ def _controller(
     tmp_path: Path,
     provider: _FakeProvider,
 ) -> NiceGUIChatController:
-    store = SQLiteNiceGUIChatStore(tmp_path / "chat.sqlite3")
+    store = _chat_store(tmp_path)
     store.initialize()
     return NiceGUIChatController(
         store=store,
         config=StreamlitAssistantConfig(),
         root_path=tmp_path,
         provider_factory=lambda _runtime: provider,
+    )
+
+
+def _chat_store(tmp_path: Path) -> SQLiteNiceGUIChatStore:
+    return SQLiteNiceGUIChatStore(
+        tmp_path / "chat.sqlite3",
+        db_key_file=tmp_path / "db.key",
+        user_key_file=tmp_path / "user-kek.key",
     )
 
 
@@ -211,10 +218,9 @@ def test_hosted_page_routes_first_admin_login_and_chat(
     monkeypatch.setattr(
         nicegui_app_module, "nicegui_app", SimpleNamespace(storage=storage)
     )
-    store = SQLiteNiceGUIChatStore(tmp_path / "chat.sqlite3")
+    store = _chat_store(tmp_path)
     store.initialize()
     auth = LocalAuthProvider(store)
-    secret_store = SQLiteSecretStore(store, master_key_path=tmp_path / "master.key")
     calls: list[str] = []
     monkeypatch.setattr(
         nicegui_app_module,
@@ -238,7 +244,6 @@ def test_hosted_page_routes_first_admin_login_and_chat(
         root_path=tmp_path,
         hosted_config=NiceGUIHostedConfig(auth_mode="local"),
         auth_provider=auth,
-        secret_store=secret_store,
     )
 
     admin_password = "admin-" + "value"
@@ -249,7 +254,6 @@ def test_hosted_page_routes_first_admin_login_and_chat(
         root_path=tmp_path,
         hosted_config=NiceGUIHostedConfig(auth_mode="local"),
         auth_provider=auth,
-        secret_store=secret_store,
     )
 
     session_id, token = auth.create_session(user.user_id)
@@ -260,7 +264,6 @@ def test_hosted_page_routes_first_admin_login_and_chat(
         root_path=tmp_path,
         hosted_config=NiceGUIHostedConfig(auth_mode="local"),
         auth_provider=auth,
-        secret_store=secret_store,
     )
 
     assert calls == ["first-admin", "login", "chat:admin"]
@@ -725,23 +728,21 @@ def test_controller_session_secrets_are_in_memory_and_session_scoped(
     assert second.summary.session_id in controller.sessions
 
 
-def test_controller_hosted_secrets_are_persisted_and_env_isolated(
+def test_controller_hosted_secrets_are_memory_only_and_env_isolated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("GITLAB_API_TOKEN", "ambient-token")
-    store = SQLiteNiceGUIChatStore(tmp_path / "chat.sqlite3")
+    store = _chat_store(tmp_path)
     store.initialize()
     auth = LocalAuthProvider(store)
     credential_value = "secret"
     user = auth.create_user(username="admin", password=credential_value, role="admin")
-    secret_store = SQLiteSecretStore(store, master_key_path=tmp_path / "master.key")
     controller = NiceGUIChatController(
         store=store,
         config=StreamlitAssistantConfig(),
         root_path=tmp_path,
         provider_factory=lambda _runtime: _FakeProvider([]),
         current_user=user,
-        secret_store=secret_store,
         auth_provider=auth,
     )
     session_id = controller.active_session_id
@@ -760,12 +761,11 @@ def test_controller_hosted_secrets_are_persisted_and_env_isolated(
         root_path=tmp_path,
         provider_factory=lambda _runtime: _FakeProvider([]),
         current_user=user,
-        secret_store=SQLiteSecretStore(store, master_key_path=tmp_path / "master.key"),
         auth_provider=auth,
     )
     reloaded.select_session(session_id)
-    assert reloaded.provider_api_key() == "provider-token"
-    assert reloaded.session_tool_env() == {"GITLAB_API_TOKEN": "session-token"}
+    assert reloaded.provider_api_key() is None
+    assert reloaded.session_tool_env() == {}
 
 
 def test_controller_switch_database_copies_durable_sessions(
@@ -794,10 +794,29 @@ def test_controller_switch_database_copies_durable_sessions(
     assert remembered_paths == [new_db_path]
 
 
+def test_hosted_controller_cannot_switch_database(tmp_path: Path) -> None:
+    store = _chat_store(tmp_path)
+    store.initialize()
+    auth = LocalAuthProvider(store)
+    password = "hosted-" + "value"
+    user = auth.create_user(username="admin", password=password, role="admin")
+    controller = NiceGUIChatController(
+        store=store,
+        config=StreamlitAssistantConfig(),
+        root_path=tmp_path,
+        provider_factory=lambda _runtime: _FakeProvider([]),
+        current_user=user,
+        auth_provider=auth,
+    )
+
+    with pytest.raises(RuntimeError, match="Hosted sessions cannot switch"):
+        controller.switch_database(tmp_path / "new.sqlite3")
+
+
 def test_controller_loads_existing_session_and_deletes_active_session(
     tmp_path: Path,
 ) -> None:
-    store = SQLiteNiceGUIChatStore(tmp_path / "chat.sqlite3")
+    store = _chat_store(tmp_path)
     store.initialize()
     stored = store.create_session(NiceGUIRuntimeConfig(), title="Stored chat")
 
@@ -819,7 +838,7 @@ def test_controller_loads_existing_session_and_deletes_active_session(
 
 
 def test_controller_provider_creation_failure_persists_error(tmp_path: Path) -> None:
-    store = SQLiteNiceGUIChatStore(tmp_path / "chat.sqlite3")
+    store = _chat_store(tmp_path)
     store.initialize()
     controller = NiceGUIChatController(
         store=store,

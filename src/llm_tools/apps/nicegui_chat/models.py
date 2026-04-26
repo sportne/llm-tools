@@ -47,18 +47,6 @@ class NiceGUIUserSession(BaseModel):
     revoked_at: str | None = None
 
 
-class NiceGUISecretRecord(BaseModel):
-    """Encrypted per-user, per-chat secret metadata."""
-
-    secret_id: str
-    owner_user_id: str
-    session_id: str
-    name: str
-    ciphertext: str
-    created_at: str
-    updated_at: str
-
-
 class NiceGUIHostedConfig(BaseModel):
     """Hosted-mode security controls resolved at startup."""
 
@@ -68,7 +56,6 @@ class NiceGUIHostedConfig(BaseModel):
     tls_keyfile: str | None = None
     allow_insecure_hosted_secrets: bool = False
     secret_key_path: str | None = None
-    master_key_path: str | None = None
     secret_entry_enabled: bool = True
     insecure_hosted_warning: str | None = None
 
@@ -77,7 +64,6 @@ class NiceGUIHostedConfig(BaseModel):
         "tls_certfile",
         "tls_keyfile",
         "secret_key_path",
-        "master_key_path",
     )
     @classmethod
     def validate_optional_strings(cls, value: str | None) -> str | None:
@@ -278,7 +264,6 @@ __all__ = [
     "NiceGUIHostedConfig",
     "NiceGUIPreferences",
     "NiceGUIRuntimeConfig",
-    "NiceGUISecretRecord",
     "NiceGUISessionRecord",
     "NiceGUISessionSummary",
     "NiceGUITranscriptEntry",

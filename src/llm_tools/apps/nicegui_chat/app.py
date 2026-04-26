@@ -36,7 +36,6 @@ from llm_tools.apps.nicegui_chat.controller import (
     default_runtime_config,
 )
 from llm_tools.apps.nicegui_chat.models import NiceGUIHostedConfig, NiceGUIRuntimeConfig
-from llm_tools.apps.nicegui_chat.secrets import SQLiteSecretStore
 from llm_tools.apps.nicegui_chat.store import SQLiteNiceGUIChatStore, default_db_path
 from llm_tools.llm_providers import ProviderModeStrategy
 from llm_tools.tool_api import SideEffectClass
@@ -263,6 +262,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-base-url", type=str)
     parser.add_argument("--api-key-env-var", type=str)
     parser.add_argument("--db-path", type=Path, default=None)
+    parser.add_argument("--db-key-file", type=Path, default=None)
+    parser.add_argument("--user-key-file", type=Path, default=None)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--auth-mode", choices=["none", "local"], default="none")
@@ -271,7 +272,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tls-keyfile", type=Path)
     parser.add_argument("--allow-insecure-hosted-secrets", action="store_true")
     parser.add_argument("--hosted-secret-key-path", type=Path)
-    parser.add_argument("--hosted-master-key-path", type=Path)
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--max-context-tokens", type=int)
     parser.add_argument("--max-tool-round-trips", type=int)
@@ -351,6 +351,8 @@ def run_nicegui_chat_app(
     root_path: Path | None,
     config: StreamlitAssistantConfig,
     db_path: Path | None = None,
+    db_key_file: Path | None = None,
+    user_key_file: Path | None = None,
     host: str = "127.0.0.1",
     port: int = 8080,
     show: bool = True,
@@ -360,12 +362,15 @@ def run_nicegui_chat_app(
     tls_keyfile: Path | None = None,
     allow_insecure_hosted_secrets: bool = False,
     hosted_secret_key_path: Path | None = None,
-    hosted_master_key_path: Path | None = None,
 ) -> None:  # pragma: no cover
     """Render and run the NiceGUI chat app."""
     from nicegui import ui
 
-    store = SQLiteNiceGUIChatStore(db_path or default_db_path())
+    store = SQLiteNiceGUIChatStore(
+        db_path or default_db_path(),
+        db_key_file=db_key_file,
+        user_key_file=user_key_file,
+    )
     store.initialize()
     startup = validate_hosted_startup(
         auth_mode=auth_mode,
@@ -375,22 +380,16 @@ def run_nicegui_chat_app(
         tls_keyfile=str(tls_keyfile) if tls_keyfile is not None else None,
         allow_insecure_hosted_secrets=allow_insecure_hosted_secrets,
         secret_key_path=hosted_secret_key_path,
-        master_key_path=hosted_master_key_path,
     )
     storage_secret: str | None = None
-    secret_store: SQLiteSecretStore | None = None
     auth_provider: LocalAuthProvider | None = None
     if startup.config.auth_mode == "local":
         storage_secret = ensure_secret_file(Path(str(startup.config.secret_key_path)))
-        secret_store = SQLiteSecretStore(
-            store,
-            master_key_path=Path(str(startup.config.master_key_path)),
-        )
         auth_provider = LocalAuthProvider(store)
 
         @ui.page("/")
         def hosted_page() -> None:
-            if auth_provider is None or secret_store is None:
+            if auth_provider is None:
                 raise RuntimeError("Hosted NiceGUI auth was not initialized.")
             render_hosted_nicegui_page(
                 store=store,
@@ -398,7 +397,6 @@ def run_nicegui_chat_app(
                 root_path=root_path,
                 hosted_config=startup.config,
                 auth_provider=auth_provider,
-                secret_store=secret_store,
             )
 
     else:
@@ -457,7 +455,6 @@ def render_hosted_nicegui_page(
     root_path: Path | None,
     hosted_config: NiceGUIHostedConfig,
     auth_provider: LocalAuthProvider,
-    secret_store: SQLiteSecretStore,
 ) -> None:
     """Render first-run admin, login, or authenticated chat UI."""
     if not auth_provider.has_users():
@@ -478,7 +475,6 @@ def render_hosted_nicegui_page(
         root_path=root_path,
         hosted_config=hosted_config,
         current_user=current_user,
-        secret_store=secret_store,
         auth_provider=auth_provider,
     )
     build_nicegui_chat_ui(controller)
@@ -1678,7 +1674,8 @@ def build_nicegui_chat_ui(  # noqa: C901
         )
         remember_recent_runtime_values(runtime)
         if (
-            requested_db_path
+            controller.current_user is None
+            and requested_db_path
             and Path(requested_db_path).expanduser() != controller.store.db_path
         ):
             controller.switch_database(Path(requested_db_path).expanduser())
@@ -2031,6 +2028,8 @@ def build_nicegui_chat_ui(  # noqa: C901
                 ui.label("Persistence").classes("text-base")
                 with ui.row().classes("w-full items-end gap-2 no-wrap"):
                     database_path_input = ui.input("SQLite database").classes("grow")
+                    if controller.current_user is not None:
+                        database_path_input.disable()
                     ui.button(
                         icon="folder_open",
                         on_click=lambda: open_workspace_browser(target="database"),
@@ -2192,6 +2191,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         root_path=root_path,
         config=config,
         db_path=args.db_path,
+        db_key_file=args.db_key_file,
+        user_key_file=args.user_key_file,
         host=args.host,
         port=args.port,
         show=not args.no_browser,
@@ -2201,7 +2202,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         tls_keyfile=args.tls_keyfile,
         allow_insecure_hosted_secrets=args.allow_insecure_hosted_secrets,
         hosted_secret_key_path=args.hosted_secret_key_path,
-        hosted_master_key_path=args.hosted_master_key_path,
     )
     return 0
 

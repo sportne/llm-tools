@@ -35,7 +35,6 @@ from llm_tools.apps.nicegui_chat.models import (
     NiceGUIUser,
     NiceGUIWorkbenchItem,
 )
-from llm_tools.apps.nicegui_chat.secrets import SQLiteSecretStore
 from llm_tools.apps.nicegui_chat.store import (
     SQLiteNiceGUIChatStore,
     remember_default_db_path,
@@ -255,7 +254,6 @@ class NiceGUIChatController:
         provider_factory: ProviderFactory | None = None,
         hosted_config: NiceGUIHostedConfig | None = None,
         current_user: NiceGUIUser | None = None,
-        secret_store: SQLiteSecretStore | None = None,
         auth_provider: LocalAuthProvider | None = None,
     ) -> None:
         self.store = store
@@ -264,7 +262,6 @@ class NiceGUIChatController:
         self.provider_factory = provider_factory
         self.hosted_config = hosted_config or NiceGUIHostedConfig()
         self.current_user = current_user
-        self.secret_store = secret_store
         self.auth_provider = auth_provider
         self.owner_user_id = current_user.user_id if current_user is not None else None
         self.preferences: NiceGUIPreferences = store.load_preferences(
@@ -387,9 +384,6 @@ class NiceGUIChatController:
         """Return transient turn state for a session."""
         return self.turn_states.setdefault(session_id, NiceGUITurnState())
 
-    def _uses_persisted_secrets(self) -> bool:
-        return self.secret_store is not None and self.owner_user_id is not None
-
     def set_session_secret(
         self, name: str, value: str, *, session_id: str | None = None
     ) -> None:
@@ -399,16 +393,6 @@ class NiceGUIChatController:
         if not cleaned_name:
             return
         effective_session_id = session_id or self.active_session_id
-        secret_store = self.secret_store
-        owner_user_id = self.owner_user_id
-        if secret_store is not None and owner_user_id is not None:
-            secret_store.set_secret(
-                owner_user_id=owner_user_id,
-                session_id=effective_session_id,
-                name=cleaned_name,
-                value=cleaned_value,
-            )
-            return
         secrets = self.session_secrets.setdefault(effective_session_id, {})
         if cleaned_value:
             secrets[cleaned_name] = cleaned_value
@@ -416,40 +400,16 @@ class NiceGUIChatController:
     def clear_session_secret(self, name: str, *, session_id: str | None = None) -> None:
         """Clear one in-memory secret for the selected session."""
         effective_session_id = session_id or self.active_session_id
-        secret_store = self.secret_store
-        owner_user_id = self.owner_user_id
-        if secret_store is not None and owner_user_id is not None:
-            secret_store.delete_secret(
-                owner_user_id=owner_user_id,
-                session_id=effective_session_id,
-                name=name,
-            )
-            return
         self.session_secrets.setdefault(effective_session_id, {}).pop(name, None)
 
     def has_session_secret(self, name: str, *, session_id: str | None = None) -> bool:
         """Return whether the selected session has an in-memory secret."""
         effective_session_id = session_id or self.active_session_id
-        secret_store = self.secret_store
-        owner_user_id = self.owner_user_id
-        if secret_store is not None and owner_user_id is not None:
-            return secret_store.has_secret(
-                owner_user_id=owner_user_id,
-                session_id=effective_session_id,
-                name=name,
-            )
         return bool(self.session_secrets.get(effective_session_id, {}).get(name))
 
     def session_tool_env(self, *, session_id: str | None = None) -> dict[str, str]:
         """Return session-scoped tool credentials without provider-only secrets."""
         effective_session_id = session_id or self.active_session_id
-        secret_store = self.secret_store
-        owner_user_id = self.owner_user_id
-        if secret_store is not None and owner_user_id is not None:
-            return secret_store.tool_env(
-                owner_user_id=owner_user_id,
-                session_id=effective_session_id,
-            )
         return {
             name: value
             for name, value in self.session_secrets.get(
@@ -490,14 +450,6 @@ class NiceGUIChatController:
     def provider_api_key(self, *, session_id: str | None = None) -> str | None:
         """Return the selected session's in-memory provider API key."""
         effective_session_id = session_id or self.active_session_id
-        secret_store = self.secret_store
-        owner_user_id = self.owner_user_id
-        if secret_store is not None and owner_user_id is not None:
-            return secret_store.get_secret(
-                owner_user_id=owner_user_id,
-                session_id=effective_session_id,
-                name=PROVIDER_API_KEY_FIELD,
-            )
         return self.session_secrets.get(effective_session_id, {}).get(
             PROVIDER_API_KEY_FIELD
         )
@@ -631,7 +583,13 @@ class NiceGUIChatController:
 
     def switch_database(self, db_path: Path | str) -> None:
         """Switch persistence to a new SQLite database and copy active sessions."""
-        new_store = SQLiteNiceGUIChatStore(db_path)
+        if self.current_user is not None:
+            raise RuntimeError("Hosted sessions cannot switch SQLite databases.")
+        new_store = SQLiteNiceGUIChatStore(
+            db_path,
+            db_key_file=self.store.db_key_file,
+            user_key_file=self.store.user_key_file,
+        )
         new_store.initialize()
         for session_id in self.session_order:
             record = self.sessions.get(session_id)

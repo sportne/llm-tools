@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from llm_tools.apps.nicegui_chat.auth import (
     LocalAuthProvider,
@@ -18,23 +19,24 @@ from llm_tools.apps.nicegui_chat.models import (
     NiceGUITranscriptEntry,
     NiceGUIWorkbenchItem,
 )
-from llm_tools.apps.nicegui_chat.secrets import (
-    NiceGUISecretStoreError,
-    SQLiteSecretStore,
-    ensure_master_key,
-)
 from llm_tools.apps.nicegui_chat.store import (
     NICEGUI_DB_ENV_VAR,
     SQLiteNiceGUIChatStore,
+    chat_messages,
     chat_sessions,
     default_db_path,
     remember_default_db_path,
+    workbench_items,
 )
 from llm_tools.workflow_api import ChatFinalResponse
 
 
 def _store(tmp_path: Path) -> SQLiteNiceGUIChatStore:
-    store = SQLiteNiceGUIChatStore(tmp_path / "chat.sqlite3")
+    store = SQLiteNiceGUIChatStore(
+        tmp_path / "chat.sqlite3",
+        db_key_file=tmp_path / "db.key",
+        user_key_file=tmp_path / "user-kek.key",
+    )
     store.initialize()
     return store
 
@@ -115,6 +117,89 @@ def test_store_initializes_and_round_trips_session(tmp_path: Path) -> None:
     assert loaded.workbench_items[0].duration_seconds == 1.25
 
 
+def test_sqlcipher_database_rejects_plain_sqlite_and_wrong_key(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "chat.sqlite3"
+    store = _store(tmp_path)
+    store.create_session(NiceGUIRuntimeConfig(model_name="secret-model"), title="Alpha")
+
+    with pytest.raises(sqlite3.DatabaseError):
+        sqlite3.connect(db_path).execute(
+            "SELECT count(*) FROM chat_sessions"
+        ).fetchone()
+
+    wrong_key = tmp_path / "wrong-db.key"
+    wrong_key.write_text("wrong-passphrase", encoding="utf-8")
+    wrong_store = SQLiteNiceGUIChatStore(
+        db_path,
+        db_key_file=wrong_key,
+        user_key_file=tmp_path / "user-kek.key",
+    )
+    with pytest.raises(Exception, match="initialize|file is encrypted|not a database"):
+        wrong_store.initialize()
+
+
+def test_user_owned_fields_are_encrypted_inside_open_database(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    record = store.create_session(
+        NiceGUIRuntimeConfig(model_name="visible-model", root_path="/secret/root"),
+        title="Secret title",
+        owner_user_id="user-a",
+    )
+    record.transcript.append(
+        NiceGUITranscriptEntry(role="user", text="Secret message", created_at="1")
+    )
+    record.workbench_items.append(
+        NiceGUIWorkbenchItem(
+            item_id="item-secret",
+            kind="inspector",
+            title="Secret workbench",
+            payload={"secret": "payload"},
+            created_at="1",
+            updated_at="1",
+        )
+    )
+    store.save_session(record)
+
+    with store.engine.begin() as connection:
+        session_row = connection.execute(select(chat_sessions)).mappings().first()
+        message_row = connection.execute(select(chat_messages)).mappings().first()
+        workbench_row = connection.execute(select(workbench_items)).mappings().first()
+
+    assert session_row is not None
+    assert "Secret title" not in str(session_row["title"])
+    assert "/secret/root" not in str(session_row["root_path"])
+    assert "Secret message" not in str(message_row["text"])
+    assert "Secret workbench" not in str(workbench_row["title"])
+    assert "payload" not in str(workbench_row["payload_json"])
+    assert session_row["provider"] == "ollama"
+    assert session_row["model_name"] == "visible-model"
+
+
+def test_per_user_encryption_detects_owner_swapping(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    auth = LocalAuthProvider(store)
+    password = "secret-" + "value"
+    user_a = auth.create_user(username="alice", password=password)
+    user_b = auth.create_user(username="bob", password=password)
+    record = store.create_session(
+        NiceGUIRuntimeConfig(model_name="alpha"),
+        title="Alice chat",
+        owner_user_id=user_a.user_id,
+    )
+
+    with store.engine.begin() as connection:
+        connection.execute(
+            update(chat_sessions)
+            .where(chat_sessions.c.session_id == record.summary.session_id)
+            .values(owner_user_id=user_b.user_id)
+        )
+
+    with pytest.raises(Exception, match="decrypt"):
+        store.load_session(record.summary.session_id, owner_user_id=user_b.user_id)
+
+
 def test_store_lists_searches_appends_and_deletes_sessions(tmp_path: Path) -> None:
     store = _store(tmp_path)
     first = store.create_session(
@@ -172,7 +257,7 @@ def test_store_filters_sessions_and_preferences_by_owner(tmp_path: Path) -> None
     assert store.load_preferences(owner_user_id="user-b").active_session_id is None
 
 
-def test_local_auth_and_encrypted_secret_store(tmp_path: Path) -> None:
+def test_local_auth_provider_lifecycle(tmp_path: Path) -> None:
     store = _store(tmp_path)
     auth = LocalAuthProvider(store)
     credential_value = "secret"
@@ -192,29 +277,6 @@ def test_local_auth_and_encrypted_secret_store(tmp_path: Path) -> None:
     assert auth.user_for_session(session_id, token).user_id == admin.user_id
     auth.revoke_session(session_id)
     assert auth.user_for_session(session_id, token) is None
-
-    secret_store = SQLiteSecretStore(store, master_key_path=tmp_path / "master.key")
-    secret_store.set_secret(
-        owner_user_id=admin.user_id,
-        session_id="chat-1",
-        name="OPENAI_API_KEY",
-        value="plain-secret",
-    )
-    record = store.get_secret_record(
-        owner_user_id=admin.user_id,
-        session_id="chat-1",
-        name="OPENAI_API_KEY",
-    )
-    assert record is not None
-    assert "plain-secret" not in record.ciphertext
-    assert (
-        secret_store.get_secret(
-            owner_user_id=admin.user_id,
-            session_id="chat-1",
-            name="OPENAI_API_KEY",
-        )
-        == "plain-secret"
-    )
 
 
 def test_hosted_auth_validation_and_session_edges(tmp_path: Path) -> None:
@@ -283,81 +345,6 @@ def test_hosted_auth_validation_and_session_edges(tmp_path: Path) -> None:
     assert active_auth.user_for_session(active_session_id, active_token) is None
     with pytest.raises(ValueError, match="password"):
         active_auth.reset_password(user_id=user.user_id, password="")
-
-
-def test_encrypted_secret_store_edges(tmp_path: Path) -> None:
-    key_path = tmp_path / "master.key"
-    key = ensure_master_key(key_path)
-    assert key == ensure_master_key(key_path)
-    bad_key_path = tmp_path / "bad.key"
-    bad_key_path.write_text("not-a-fernet-key", encoding="utf-8")
-    with pytest.raises(NiceGUISecretStoreError, match="Invalid"):
-        ensure_master_key(bad_key_path)
-
-    store = _store(tmp_path)
-    auth = LocalAuthProvider(store)
-    owner_password = "owner-" + "value"
-    user = auth.create_user(username="owner", password=owner_password)
-    session = store.create_session(
-        NiceGUIRuntimeConfig(), owner_user_id=user.user_id
-    ).summary.session_id
-    secret_store = SQLiteSecretStore(store, master_key_path=key_path)
-    with pytest.raises(ValueError, match="secret name"):
-        secret_store.set_secret(
-            owner_user_id="user-1",
-            session_id="chat-1",
-            name=" ",
-            value="value",
-        )
-    secret_store.set_secret(
-        owner_user_id="user-1",
-        session_id="chat-1",
-        name="EMPTY",
-        value=" ",
-    )
-    assert (
-        secret_store.has_secret(
-            owner_user_id="user-1", session_id="chat-1", name="EMPTY"
-        )
-        is False
-    )
-    secret_store.set_secret(
-        owner_user_id=user.user_id,
-        session_id=session,
-        name="__provider_api_key__",
-        value="provider",
-    )
-    secret_store.set_secret(
-        owner_user_id=user.user_id,
-        session_id=session,
-        name="GITLAB_API_TOKEN",
-        value="tool-token",
-    )
-    assert secret_store.secret_names(
-        owner_user_id=user.user_id, session_id=session
-    ) == [
-        "GITLAB_API_TOKEN",
-        "__provider_api_key__",
-    ]
-    assert secret_store.tool_env(owner_user_id=user.user_id, session_id=session) == {
-        "GITLAB_API_TOKEN": "tool-token"
-    }
-    wrong_key_store = SQLiteSecretStore(store, master_key_path=tmp_path / "other.key")
-    with pytest.raises(NiceGUISecretStoreError, match="Could not decrypt"):
-        wrong_key_store.get_secret(
-            owner_user_id=user.user_id,
-            session_id=session,
-            name="GITLAB_API_TOKEN",
-        )
-    secret_store.delete_secret(
-        owner_user_id=user.user_id, session_id=session, name="GITLAB_API_TOKEN"
-    )
-    assert (
-        secret_store.get_secret(
-            owner_user_id=user.user_id, session_id=session, name="GITLAB_API_TOKEN"
-        )
-        is None
-    )
 
 
 def test_preferences_round_trip(tmp_path: Path) -> None:

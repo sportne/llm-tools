@@ -63,8 +63,7 @@ Included:
 - Provider/model/header controls.
 - Background turns, stop, status, approvals, and inspector workbench.
 - Settings sufficient to alter subsequent turns.
-- Optional hosted mode with local admin-created users, per-user sessions, and
-  encrypted SQLite-backed credentials.
+- Optional hosted mode with local admin-created users and per-user sessions.
 
 Deferred:
 
@@ -86,7 +85,9 @@ llm-tools-nicegui-chat --host 0.0.0.0 --auth-mode local
 The first hosted launch shows a local admin creation screen. Admins create later
 users from the settings UI; there is no public self-registration in v1. Each
 user sees only their own chats, preferences, workbench records, temporary
-sessions, and credentials.
+sessions, and in-memory credentials. NiceGUI persistence is always SQLCipher
+encrypted, and user-owned chat fields are encrypted with per-user keys wrapped by
+a local server key.
 
 For production-style hosting, put the app behind a TLS-terminating reverse proxy
 such as Caddy, nginx, or Traefik and set `--public-base-url` to the HTTPS URL.
@@ -95,5 +96,10 @@ self-signed certificate testing. Non-loopback HTTP can run, but secret entry is
 blocked unless `--allow-insecure-hosted-secrets` is passed.
 
 Provider API keys and tool credentials are not read from environment variables in
-hosted mode. They are stored as encrypted SQLite records scoped to the user and
-chat session. Non-secret URLs remain normal runtime configuration.
+hosted mode. They are typed into the app and held in server memory for the
+current browser/app session only, matching local loopback mode. Non-secret URLs
+remain normal runtime configuration.
+
+The SQLCipher database key and per-user key wrapping key are local server files.
+They must be protected and backed up; deleting them makes encrypted NiceGUI data
+unrecoverable.

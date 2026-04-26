@@ -72,15 +72,25 @@ examples. If you need local overrides, keep them in ignored files.
 
 The NiceGUI chat client intentionally does not use process environment variables
 as implicit provider or tool credentials. Provider API keys and tool credentials
-must be typed into the app for the active chat session. In local loopback mode
-those values are held in server memory. In hosted mode they are encrypted before
-being stored in SQLite and are scoped by user id, chat session id, and secret
-name. Stored secret values are never sent back to the browser; the UI only shows
-configured, replace, or clear state.
+must be typed into the app for the active browser/app session. In both local
+loopback mode and hosted mode those values are held in server memory only. They
+are not written to SQLite and are not restored after a server restart, browser
+session reset, or hosted logout.
 
 Non-secret service URLs, such as Atlassian or GitLab base URLs, are runtime
 configuration and may be persisted as normal chat settings. Keep bearer tokens,
 passwords, API keys, and PATs in the credential fields instead.
+
+NiceGUI persistence uses encrypted SQLite only. The database is opened through
+SQLCipher with a local database key file, and user-owned chat fields are also
+encrypted with per-user data keys wrapped by a local server key file. Deleting
+either key file makes the affected database data unrecoverable. Treat these
+files as server secrets and back them up separately from normal database copies:
+
+```text
+~/.llm-tools/assistant/nicegui/hosted/db.key
+~/.llm-tools/assistant/nicegui/hosted/user-kek.key
+```
 
 ### NiceGUI Hosted Mode
 
@@ -94,24 +104,18 @@ llm-tools-nicegui-chat --host 0.0.0.0 --auth-mode local
 Hosted mode uses local admin-created users only; there is no public
 self-registration. The first hosted launch requires creating an admin user.
 Users see only their own chat sessions, preferences, workbench records, temporary
-sessions, and encrypted secrets. Admins can create, disable, and reset local
-users, but v1 does not add a cross-user chat browser.
+sessions, and in-memory credential state. Admins can create, disable, and reset
+local users, but v1 does not add a cross-user chat browser.
 
 Passwords are stored as Argon2 hashes. Browser sessions use random server-side
 session tokens recorded as hashes in SQLite and transported through NiceGUI's
 signed session storage with HttpOnly SameSite cookie settings. The cookie is
 marked HTTPS-only when direct TLS is enabled.
 
-Hosted provider and tool secrets are encrypted with a local master key file
-outside the SQLite database, defaulting to:
-
-```text
-~/.llm-tools/assistant/nicegui/hosted/master.key
-```
-
-Protect this file like a production secret. A database backup without the master
-key should not reveal stored credentials; a backup with both the database and the
-master key is sufficient to decrypt them.
+Per-user chat encryption uses server-wrapped user keys. This keeps admin
+password resets practical, but it means a server-key compromise can decrypt user
+data. It protects against copied database files and accidental cross-user data
+exposure, not against a fully compromised web server.
 
 Use a TLS-terminating reverse proxy for normal hosted deployments. Set
 `--public-base-url` to the HTTPS URL. Direct `--tls-certfile` and
@@ -123,8 +127,9 @@ Future smart-card, OAuth, or OIDC authentication should plug in behind the auth
 provider boundary. In an OAuth/OIDC flow, the browser redirects to the identity
 provider, the user authenticates there, and this server exchanges the returned
 authorization code for tokens. Long-lived refresh tokens must stay server-side,
-preferably in the same encrypted secret-store boundary or a future local secret
-daemon.
+preferably in a future local secret-store boundary or local secret daemon. The
+current NiceGUI hosted mode does not persist provider API keys or tool
+credentials.
 
 ### Persisted data and caches
 
