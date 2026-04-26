@@ -64,6 +64,11 @@ class PromptToolAdapter:
         r"```(?P<kind>[A-Za-z_][A-Za-z0-9_-]*)\s*\n(?P<body>.*?)```",
         re.DOTALL,
     )
+    _UNFENCED_PROTOCOL_FIELD_RE = re.compile(
+        r"^\s*(tool_name|begin_arg|mode)\s*:",
+        re.IGNORECASE,
+    )
+    _UNFENCED_END_ARG_RE = re.compile(r"^\s*end_arg\s*$", re.IGNORECASE)
 
     def single_action_stage_messages(
         self,
@@ -461,6 +466,7 @@ class PromptToolAdapter:
         input_models: dict[str, type[BaseModel]],
         final_response_model: object,
     ) -> ParsedModelResponse:
+        allowed_tools = {spec.name for spec in tool_specs}
         try:
             kind, body = self._single_block(
                 text,
@@ -471,6 +477,7 @@ class PromptToolAdapter:
             plain_answer = self._plain_final_answer_candidate(
                 text,
                 protocol_kinds={"tool", "final"},
+                allowed_tools=allowed_tools,
             )
             if plain_answer is None:
                 raise
@@ -490,7 +497,6 @@ class PromptToolAdapter:
                     invalid_payload=text,
                 )
             )
-        allowed_tools = {spec.name for spec in tool_specs}
         parsed_name = self._tool_name_from_body(
             body,
             invalid_payload=text,
@@ -689,12 +695,15 @@ class PromptToolAdapter:
         text: str,
         *,
         protocol_kinds: set[str],
+        allowed_tools: set[str],
     ) -> str | None:
         stripped = text.strip()
         if not stripped:
             return None
         matches = list(self._BLOCK_RE.finditer(text))
         if not matches:
+            if self._looks_like_unfenced_protocol(stripped, allowed_tools):
+                return None
             return stripped
         if any(
             match.group("kind").strip().lower() in protocol_kinds for match in matches
@@ -703,12 +712,39 @@ class PromptToolAdapter:
         outside = self._text_outside_matches(text, matches).strip()
         if not outside:
             return None
+        if self._looks_like_unfenced_protocol(outside, allowed_tools):
+            return None
         if all(
             match.group("kind").strip().lower() in {"json", "jsonc"}
             for match in matches
         ):
             return outside
         return stripped
+
+    def _looks_like_unfenced_protocol(
+        self,
+        text: str,
+        allowed_tools: set[str],
+    ) -> bool:
+        first_content_line: str | None = None
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if first_content_line is None:
+                first_content_line = stripped
+            if self._UNFENCED_PROTOCOL_FIELD_RE.match(stripped):
+                return True
+            if self._UNFENCED_END_ARG_RE.match(stripped):
+                return True
+        if first_content_line is None:
+            return False
+        candidate = (
+            first_content_line[:-1]
+            if first_content_line.endswith(":")
+            else first_content_line
+        )
+        return candidate in allowed_tools
 
     @staticmethod
     def _text_outside_matches(

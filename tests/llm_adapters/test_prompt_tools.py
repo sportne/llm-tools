@@ -303,6 +303,18 @@ def test_parse_single_action_accepts_plain_text_final_answer() -> None:
         == "The repository stores chat session state in FileChatSessionStore."
     )
 
+    tool_mention = adapter.parse_single_action(
+        "The read_file tool was used to inspect README.md.",
+        tool_specs=_tool_specs(),
+        input_models={"read_file": _ReadFileInput},
+        final_response_model=ChatFinalResponse,
+    )
+
+    assert (
+        tool_mention.final_response["answer"]
+        == "The read_file tool was used to inspect README.md."
+    )
+
 
 def test_parse_single_action_accepts_prose_with_non_protocol_json_fence() -> None:
     adapter = PromptToolAdapter()
@@ -364,6 +376,20 @@ def test_parse_single_action_rejects_wrong_shape_and_category_constraints() -> N
     with pytest.raises(PromptToolProtocolError, match="Expected fenced block"):
         adapter.parse_single_action(
             '```json\n{"answer": "no prose outside this block"}\n```',
+            tool_specs=_tool_specs(),
+            input_models=input_models,
+            final_response_model=ChatFinalResponse,
+        )
+    with pytest.raises(PromptToolProtocolError, match="Expected exactly one"):
+        adapter.parse_single_action(
+            "TOOL_NAME: read_file\nBEGIN_ARG: path\nREADME.md\nEND_ARG",
+            tool_specs=_tool_specs(),
+            input_models=input_models,
+            final_response_model=ChatFinalResponse,
+        )
+    with pytest.raises(PromptToolProtocolError, match="Expected exactly one"):
+        adapter.parse_single_action(
+            "read_file\nBEGIN_ARG: path\nREADME.md\nEND_ARG",
             tool_specs=_tool_specs(),
             input_models=input_models,
             final_response_model=ChatFinalResponse,
