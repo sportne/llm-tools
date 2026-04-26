@@ -63,6 +63,8 @@ Included:
 - Provider/model/header controls.
 - Background turns, stop, status, approvals, and inspector workbench.
 - Settings sufficient to alter subsequent turns.
+- Optional hosted mode with local admin-created users, per-user sessions, and
+  encrypted SQLite-backed credentials.
 
 Deferred:
 
@@ -70,5 +72,28 @@ Deferred:
 - Project/folder workspaces.
 - Full Canvas/Artifacts editing, export, and version browsing.
 - Attachment ingestion.
-- Multi-user auth.
+- External smart-card/OIDC auth.
 
+## Hosted Mode
+
+Hosted mode is explicit and is separate from the default loopback desktop-style
+app:
+
+```text
+llm-tools-nicegui-chat --host 0.0.0.0 --auth-mode local
+```
+
+The first hosted launch shows a local admin creation screen. Admins create later
+users from the settings UI; there is no public self-registration in v1. Each
+user sees only their own chats, preferences, workbench records, temporary
+sessions, and credentials.
+
+For production-style hosting, put the app behind a TLS-terminating reverse proxy
+such as Caddy, nginx, or Traefik and set `--public-base-url` to the HTTPS URL.
+Direct `--tls-certfile` and `--tls-keyfile` are supported for short-term or
+self-signed certificate testing. Non-loopback HTTP can run, but secret entry is
+blocked unless `--allow-insecure-hosted-secrets` is passed.
+
+Provider API keys and tool credentials are not read from environment variables in
+hosted mode. They are stored as encrypted SQLite records scoped to the user and
+chat session. Non-secret URLs remain normal runtime configuration.

@@ -44,6 +44,7 @@ def build_assistant_context(
     config: StreamlitAssistantConfig,
     app_name: str,
     env_overrides: dict[str, str] | None = None,
+    include_process_env: bool = True,
 ) -> ToolContext:
     """Build the tool context passed into assistant workflow execution."""
     effective_read_limit = (
@@ -54,7 +55,7 @@ def build_assistant_context(
     effective_tool_limits = config.tool_limits.model_copy(
         update={"max_read_file_chars": effective_read_limit}
     )
-    env = dict(os.environ)
+    env = dict(os.environ) if include_process_env else {}
     for key, value in (env_overrides or {}).items():
         cleaned = value.strip()
         if cleaned:

@@ -3,12 +3,15 @@ from __future__ import annotations
 import runpy
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from pydantic import BaseModel
 
 from llm_tools.apps.assistant_config import StreamlitAssistantConfig
 from llm_tools.apps.chat_config import ProviderPreset
+from llm_tools.apps.nicegui_chat import app as nicegui_app_module
 from llm_tools.apps.nicegui_chat.app import (
     NICEGUI_APPROVAL_LABELS,
     NICEGUI_APPROVAL_OPTIONS,
@@ -32,6 +35,7 @@ from llm_tools.apps.nicegui_chat.app import (
     resolve_assistant_config,
     resolve_root_argument,
 )
+from llm_tools.apps.nicegui_chat.auth import LocalAuthProvider, validate_hosted_startup
 from llm_tools.apps.nicegui_chat.controller import (
     PROVIDER_API_KEY_FIELD,
     NiceGUIChatController,
@@ -40,9 +44,11 @@ from llm_tools.apps.nicegui_chat.controller import (
     _workbench_inspector_title,
 )
 from llm_tools.apps.nicegui_chat.models import (
+    NiceGUIHostedConfig,
     NiceGUIPreferences,
     NiceGUIRuntimeConfig,
 )
+from llm_tools.apps.nicegui_chat.secrets import SQLiteSecretStore
 from llm_tools.apps.nicegui_chat.store import SQLiteNiceGUIChatStore
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import SideEffectClass, ToolInvocationRequest
@@ -147,6 +153,117 @@ def test_package_import_and_cli_parser() -> None:
     assert config.llm.model_name == "qwen3:8b"
     assert config.llm.provider_mode_strategy.value == "json"
     assert args.db_path == Path("chat.sqlite3")
+
+
+def test_hosted_startup_validation() -> None:
+    loopback = validate_hosted_startup(
+        auth_mode="none",
+        host="127.0.0.1",
+        public_base_url=None,
+        tls_certfile=None,
+        tls_keyfile=None,
+        allow_insecure_hosted_secrets=False,
+    )
+    assert loopback.config.auth_mode == "none"
+    assert loopback.config.secret_entry_enabled is True
+
+    hosted_http = validate_hosted_startup(
+        auth_mode="local",
+        host="192.0.2.1",
+        public_base_url="http://example.test",
+        tls_certfile=None,
+        tls_keyfile=None,
+        allow_insecure_hosted_secrets=False,
+    )
+    assert hosted_http.config.secret_entry_enabled is False
+    assert hosted_http.config.insecure_hosted_warning
+
+    with pytest.raises(ValueError, match="requires --auth-mode local"):
+        validate_hosted_startup(
+            auth_mode="none",
+            host="192.0.2.1",
+            public_base_url=None,
+            tls_certfile=None,
+            tls_keyfile=None,
+            allow_insecure_hosted_secrets=False,
+        )
+
+
+def test_hosted_storage_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    storage = SimpleNamespace(user={})
+    monkeypatch.setattr(
+        nicegui_app_module, "nicegui_app", SimpleNamespace(storage=storage)
+    )
+
+    assert nicegui_app_module._hosted_storage_values() == (None, None)
+
+    nicegui_app_module._set_hosted_storage_values("session-1", "token-1")
+    assert nicegui_app_module._hosted_storage_values() == ("session-1", "token-1")
+
+    nicegui_app_module._clear_hosted_storage_values()
+    assert nicegui_app_module._hosted_storage_values() == (None, None)
+
+
+def test_hosted_page_routes_first_admin_login_and_chat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = SimpleNamespace(user={})
+    monkeypatch.setattr(
+        nicegui_app_module, "nicegui_app", SimpleNamespace(storage=storage)
+    )
+    store = SQLiteNiceGUIChatStore(tmp_path / "chat.sqlite3")
+    store.initialize()
+    auth = LocalAuthProvider(store)
+    secret_store = SQLiteSecretStore(store, master_key_path=tmp_path / "master.key")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        nicegui_app_module,
+        "render_first_admin_page",
+        lambda _auth: calls.append("first-admin"),
+    )
+    monkeypatch.setattr(
+        nicegui_app_module,
+        "render_login_page",
+        lambda _auth: calls.append("login"),
+    )
+    monkeypatch.setattr(
+        nicegui_app_module,
+        "build_nicegui_chat_ui",
+        lambda controller: calls.append(f"chat:{controller.current_user.username}"),
+    )
+
+    nicegui_app_module.render_hosted_nicegui_page(
+        store=store,
+        config=StreamlitAssistantConfig(),
+        root_path=tmp_path,
+        hosted_config=NiceGUIHostedConfig(auth_mode="local"),
+        auth_provider=auth,
+        secret_store=secret_store,
+    )
+
+    admin_password = "admin-" + "value"
+    user = auth.create_user(username="admin", password=admin_password, role="admin")
+    nicegui_app_module.render_hosted_nicegui_page(
+        store=store,
+        config=StreamlitAssistantConfig(),
+        root_path=tmp_path,
+        hosted_config=NiceGUIHostedConfig(auth_mode="local"),
+        auth_provider=auth,
+        secret_store=secret_store,
+    )
+
+    session_id, token = auth.create_session(user.user_id)
+    nicegui_app_module._set_hosted_storage_values(session_id, token)
+    nicegui_app_module.render_hosted_nicegui_page(
+        store=store,
+        config=StreamlitAssistantConfig(),
+        root_path=tmp_path,
+        hosted_config=NiceGUIHostedConfig(auth_mode="local"),
+        auth_provider=auth,
+        secret_store=secret_store,
+    )
+
+    assert calls == ["first-admin", "login", "chat:admin"]
 
 
 def test_composer_text_helpers_accept_server_and_js_payloads() -> None:
@@ -560,8 +677,10 @@ def test_controller_session_management_filters_and_temporary_chats(
 
 
 def test_controller_session_secrets_are_in_memory_and_session_scoped(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    ambient_value = "ambient-" + "value"
+    monkeypatch.setenv("GITLAB_API_TOKEN", ambient_value)
     controller = _controller(tmp_path, _FakeProvider([]))
     first_session_id = controller.active_session_id
     provider_value = "provider-value"
@@ -575,6 +694,7 @@ def test_controller_session_secrets_are_in_memory_and_session_scoped(
     assert controller.provider_api_key() == provider_value
     assert controller.session_tool_env() == {"GITLAB_API_TOKEN": tool_value}
     assert controller.effective_tool_env()["GITLAB_API_TOKEN"] == tool_value
+    assert controller.effective_tool_env()["GITLAB_API_TOKEN"] != ambient_value
     assert (
         controller.effective_tool_env()["GITLAB_BASE_URL"]
         == "https://gitlab.example.test"
@@ -603,6 +723,49 @@ def test_controller_session_secrets_are_in_memory_and_session_scoped(
     assert reloaded.provider_api_key() is None
     assert reloaded.session_tool_env() == {}
     assert second.summary.session_id in controller.sessions
+
+
+def test_controller_hosted_secrets_are_persisted_and_env_isolated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GITLAB_API_TOKEN", "ambient-token")
+    store = SQLiteNiceGUIChatStore(tmp_path / "chat.sqlite3")
+    store.initialize()
+    auth = LocalAuthProvider(store)
+    credential_value = "secret"
+    user = auth.create_user(username="admin", password=credential_value, role="admin")
+    secret_store = SQLiteSecretStore(store, master_key_path=tmp_path / "master.key")
+    controller = NiceGUIChatController(
+        store=store,
+        config=StreamlitAssistantConfig(),
+        root_path=tmp_path,
+        provider_factory=lambda _runtime: _FakeProvider([]),
+        current_user=user,
+        secret_store=secret_store,
+        auth_provider=auth,
+    )
+    session_id = controller.active_session_id
+
+    assert "GITLAB_API_TOKEN" not in controller.effective_tool_env()
+
+    controller.set_session_secret(PROVIDER_API_KEY_FIELD, "provider-token")
+    controller.set_session_secret("GITLAB_API_TOKEN", "session-token")
+
+    assert controller.provider_api_key() == "provider-token"
+    assert controller.session_tool_env() == {"GITLAB_API_TOKEN": "session-token"}
+
+    reloaded = NiceGUIChatController(
+        store=store,
+        config=StreamlitAssistantConfig(),
+        root_path=tmp_path,
+        provider_factory=lambda _runtime: _FakeProvider([]),
+        current_user=user,
+        secret_store=SQLiteSecretStore(store, master_key_path=tmp_path / "master.key"),
+        auth_provider=auth,
+    )
+    reloaded.select_session(session_id)
+    assert reloaded.provider_api_key() == "provider-token"
+    assert reloaded.session_tool_env() == {"GITLAB_API_TOKEN": "session-token"}
 
 
 def test_controller_switch_database_copies_durable_sessions(

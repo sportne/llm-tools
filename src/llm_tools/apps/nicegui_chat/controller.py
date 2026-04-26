@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import queue
 import threading
 from collections.abc import Callable
@@ -25,14 +24,18 @@ from llm_tools.apps.assistant_runtime import (
     resolve_assistant_default_enabled_tools,
 )
 from llm_tools.apps.chat_runtime import create_provider
+from llm_tools.apps.nicegui_chat.auth import LocalAuthProvider
 from llm_tools.apps.nicegui_chat.models import (
+    NiceGUIHostedConfig,
     NiceGUIInspectorEntry,
     NiceGUIPreferences,
     NiceGUIRuntimeConfig,
     NiceGUISessionRecord,
     NiceGUITranscriptEntry,
+    NiceGUIUser,
     NiceGUIWorkbenchItem,
 )
+from llm_tools.apps.nicegui_chat.secrets import SQLiteSecretStore
 from llm_tools.apps.nicegui_chat.store import (
     SQLiteNiceGUIChatStore,
     remember_default_db_path,
@@ -156,10 +159,6 @@ def _interaction_protocol(provider: ModelTurnProvider) -> str:
     return "native_tools"
 
 
-def _runtime_env() -> dict[str, str]:
-    return dict(os.environ)
-
-
 def _effective_assistant_config(
     *,
     config: StreamlitAssistantConfig,
@@ -254,12 +253,23 @@ class NiceGUIChatController:
         config: StreamlitAssistantConfig,
         root_path: Path | None = None,
         provider_factory: ProviderFactory | None = None,
+        hosted_config: NiceGUIHostedConfig | None = None,
+        current_user: NiceGUIUser | None = None,
+        secret_store: SQLiteSecretStore | None = None,
+        auth_provider: LocalAuthProvider | None = None,
     ) -> None:
         self.store = store
         self.config = config
         self.root_path = root_path
         self.provider_factory = provider_factory
-        self.preferences: NiceGUIPreferences = store.load_preferences()
+        self.hosted_config = hosted_config or NiceGUIHostedConfig()
+        self.current_user = current_user
+        self.secret_store = secret_store
+        self.auth_provider = auth_provider
+        self.owner_user_id = current_user.user_id if current_user is not None else None
+        self.preferences: NiceGUIPreferences = store.load_preferences(
+            owner_user_id=self.owner_user_id
+        )
         self.sessions: dict[str, NiceGUISessionRecord] = {}
         self.session_order: list[str] = []
         self.turn_states: dict[str, NiceGUITurnState] = {}
@@ -307,7 +317,9 @@ class NiceGUIChatController:
     def create_session(self, *, temporary: bool = False) -> NiceGUISessionRecord:
         """Create and activate a new session."""
         runtime = default_runtime_config(self.config, root_path=self.root_path)
-        record = self.store.create_session(runtime, temporary=temporary)
+        record = self.store.create_session(
+            runtime, temporary=temporary, owner_user_id=self.owner_user_id
+        )
         with self._lock:
             self.sessions[record.summary.session_id] = record
             self.turn_states[record.summary.session_id] = NiceGUITurnState()
@@ -315,7 +327,9 @@ class NiceGUIChatController:
             if not record.summary.temporary:
                 self.session_order.insert(0, record.summary.session_id)
                 self.preferences.active_session_id = record.summary.session_id
-                self.store.save_preferences(self.preferences)
+                self.store.save_preferences(
+                    self.preferences, owner_user_id=self.owner_user_id
+                )
             else:
                 self.preferences.active_session_id = record.summary.session_id
             return record
@@ -323,7 +337,9 @@ class NiceGUIChatController:
     def select_session(self, session_id: str) -> bool:
         """Activate a known session."""
         if session_id not in self.sessions:
-            loaded = self.store.load_session(session_id)
+            loaded = self.store.load_session(
+                session_id, owner_user_id=self.owner_user_id
+            )
             if loaded is None:
                 return False
             self.sessions[session_id] = loaded
@@ -331,7 +347,9 @@ class NiceGUIChatController:
             self.session_secrets.setdefault(session_id, {})
         self.preferences.active_session_id = session_id
         if not self.sessions[session_id].summary.temporary:
-            self.store.save_preferences(self.preferences)
+            self.store.save_preferences(
+                self.preferences, owner_user_id=self.owner_user_id
+            )
         return True
 
     def delete_session(self, session_id: str) -> None:
@@ -353,7 +371,9 @@ class NiceGUIChatController:
             if replacement is None:
                 replacement = self.create_session(temporary=False).summary.session_id
             self.preferences.active_session_id = replacement
-            self.store.save_preferences(self.preferences)
+            self.store.save_preferences(
+                self.preferences, owner_user_id=self.owner_user_id
+            )
 
     def rename_session(self, session_id: str, title: str) -> None:
         """Rename a session."""
@@ -367,6 +387,9 @@ class NiceGUIChatController:
         """Return transient turn state for a session."""
         return self.turn_states.setdefault(session_id, NiceGUITurnState())
 
+    def _uses_persisted_secrets(self) -> bool:
+        return self.secret_store is not None and self.owner_user_id is not None
+
     def set_session_secret(
         self, name: str, value: str, *, session_id: str | None = None
     ) -> None:
@@ -376,6 +399,16 @@ class NiceGUIChatController:
         if not cleaned_name:
             return
         effective_session_id = session_id or self.active_session_id
+        secret_store = self.secret_store
+        owner_user_id = self.owner_user_id
+        if secret_store is not None and owner_user_id is not None:
+            secret_store.set_secret(
+                owner_user_id=owner_user_id,
+                session_id=effective_session_id,
+                name=cleaned_name,
+                value=cleaned_value,
+            )
+            return
         secrets = self.session_secrets.setdefault(effective_session_id, {})
         if cleaned_value:
             secrets[cleaned_name] = cleaned_value
@@ -383,16 +416,40 @@ class NiceGUIChatController:
     def clear_session_secret(self, name: str, *, session_id: str | None = None) -> None:
         """Clear one in-memory secret for the selected session."""
         effective_session_id = session_id or self.active_session_id
+        secret_store = self.secret_store
+        owner_user_id = self.owner_user_id
+        if secret_store is not None and owner_user_id is not None:
+            secret_store.delete_secret(
+                owner_user_id=owner_user_id,
+                session_id=effective_session_id,
+                name=name,
+            )
+            return
         self.session_secrets.setdefault(effective_session_id, {}).pop(name, None)
 
     def has_session_secret(self, name: str, *, session_id: str | None = None) -> bool:
         """Return whether the selected session has an in-memory secret."""
         effective_session_id = session_id or self.active_session_id
+        secret_store = self.secret_store
+        owner_user_id = self.owner_user_id
+        if secret_store is not None and owner_user_id is not None:
+            return secret_store.has_secret(
+                owner_user_id=owner_user_id,
+                session_id=effective_session_id,
+                name=name,
+            )
         return bool(self.session_secrets.get(effective_session_id, {}).get(name))
 
     def session_tool_env(self, *, session_id: str | None = None) -> dict[str, str]:
         """Return session-scoped tool credentials without provider-only secrets."""
         effective_session_id = session_id or self.active_session_id
+        secret_store = self.secret_store
+        owner_user_id = self.owner_user_id
+        if secret_store is not None and owner_user_id is not None:
+            return secret_store.tool_env(
+                owner_user_id=owner_user_id,
+                session_id=effective_session_id,
+            )
         return {
             name: value
             for name, value in self.session_secrets.get(
@@ -425,14 +482,22 @@ class NiceGUIChatController:
         runtime: NiceGUIRuntimeConfig | None = None,
         session_id: str | None = None,
     ) -> dict[str, str]:
-        """Return the process environment plus session tool values."""
-        env = _runtime_env()
+        """Return NiceGUI session-scoped tool values without ambient env fallback."""
+        env: dict[str, str] = {}
         env.update(self.tool_env_overrides(runtime=runtime, session_id=session_id))
         return env
 
     def provider_api_key(self, *, session_id: str | None = None) -> str | None:
         """Return the selected session's in-memory provider API key."""
         effective_session_id = session_id or self.active_session_id
+        secret_store = self.secret_store
+        owner_user_id = self.owner_user_id
+        if secret_store is not None and owner_user_id is not None:
+            return secret_store.get_secret(
+                owner_user_id=owner_user_id,
+                session_id=effective_session_id,
+                name=PROVIDER_API_KEY_FIELD,
+            )
         return self.session_secrets.get(effective_session_id, {}).get(
             PROVIDER_API_KEY_FIELD
         )
@@ -558,7 +623,11 @@ class NiceGUIChatController:
     def save_active_session(self) -> None:
         """Persist the active record and preferences."""
         self._persist_record(self.active_record)
-        self.store.save_preferences(self.preferences)
+        self.save_preferences()
+
+    def save_preferences(self) -> None:
+        """Persist active user preferences."""
+        self.store.save_preferences(self.preferences, owner_user_id=self.owner_user_id)
 
     def switch_database(self, db_path: Path | str) -> None:
         """Switch persistence to a new SQLite database and copy active sessions."""
@@ -576,16 +645,20 @@ class NiceGUIChatController:
             self.preferences.active_session_id = (
                 self.session_order[0] if self.session_order else None
             )
-        new_store.save_preferences(self.preferences)
+        new_store.save_preferences(self.preferences, owner_user_id=self.owner_user_id)
         self.store = new_store
         remember_default_db_path(new_store.db_path)
 
     def _load_initial_state(self) -> None:
         self.store.initialize()
-        summaries = self.store.list_sessions(limit=100)
+        summaries = self.store.list_sessions(
+            limit=100, owner_user_id=self.owner_user_id
+        )
         self.session_order = [summary.session_id for summary in summaries]
         for summary in summaries:
-            loaded = self.store.load_session(summary.session_id)
+            loaded = self.store.load_session(
+                summary.session_id, owner_user_id=self.owner_user_id
+            )
             if loaded is not None:
                 self.sessions[summary.session_id] = loaded
                 self.turn_states[summary.session_id] = NiceGUITurnState()
@@ -596,10 +669,11 @@ class NiceGUIChatController:
         if active_id is None:
             active_id = self.create_session(temporary=False).summary.session_id
         self.preferences.active_session_id = active_id
-        self.store.save_preferences(self.preferences)
+        self.store.save_preferences(self.preferences, owner_user_id=self.owner_user_id)
 
     def _persist_record(self, record: NiceGUISessionRecord) -> None:
         record.summary.root_path = record.runtime.root_path
+        record.summary.owner_user_id = self.owner_user_id
         record.summary.provider = record.runtime.provider
         record.summary.model_name = record.runtime.model_name
         record.summary.message_count = len(
@@ -620,14 +694,12 @@ class NiceGUIChatController:
                 config=self.config, runtime=runtime
             ).llm
             api_key = self.provider_api_key(session_id=session_id)
-            metadata = llm_config.credential_prompt_metadata()
-            if not api_key and metadata.expects_api_key:
-                api_key = os.getenv(llm_config.api_key_env_var or "OPENAI_API_KEY")
             return create_provider(
                 llm_config,
                 api_key=api_key,
                 model_name=runtime.model_name,
                 mode_strategy=runtime.provider_mode_strategy,
+                allow_env_api_key=False,
             )
         return self.provider_factory(runtime)
 
@@ -696,6 +768,7 @@ class NiceGUIChatController:
                     runtime=runtime,
                     session_id=session_id,
                 ),
+                include_process_env=False,
             ),
             session_config=effective_config.session,
             tool_limits=effective_config.tool_limits,

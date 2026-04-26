@@ -38,9 +38,13 @@ from llm_tools.apps.nicegui_chat.models import (
     NiceGUIInspectorState,
     NiceGUIPreferences,
     NiceGUIRuntimeConfig,
+    NiceGUISecretRecord,
     NiceGUISessionRecord,
     NiceGUISessionSummary,
     NiceGUITranscriptEntry,
+    NiceGUIUser,
+    NiceGUIUserRole,
+    NiceGUIUserSession,
     NiceGUIWorkbenchItem,
 )
 from llm_tools.workflow_api import ChatFinalResponse, ChatSessionState, ChatTokenUsage
@@ -69,6 +73,7 @@ chat_sessions = Table(
     Column("confidence", Float, nullable=True),
     Column("temporary", Boolean, nullable=False, default=False),
     Column("project_id", String, nullable=True),
+    Column("owner_user_id", String, nullable=True),
 )
 
 chat_messages = Table(
@@ -118,6 +123,68 @@ app_preferences = Table(
     metadata,
     Column("key", String, primary_key=True),
     Column("payload_json", Text, nullable=False),
+)
+
+users = Table(
+    "users",
+    metadata,
+    Column("user_id", String, primary_key=True),
+    Column("username", String, nullable=False, unique=True),
+    Column("password_hash", Text, nullable=False),
+    Column("role", String, nullable=False),
+    Column("disabled", Boolean, nullable=False, default=False),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+    Column("last_login_at", String, nullable=True),
+)
+
+user_sessions = Table(
+    "user_sessions",
+    metadata,
+    Column("session_id", String, primary_key=True),
+    Column(
+        "user_id",
+        String,
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("token_hash", String, nullable=False),
+    Column("created_at", String, nullable=False),
+    Column("expires_at", String, nullable=False),
+    Column("revoked_at", String, nullable=True),
+)
+
+secret_records = Table(
+    "secret_records",
+    metadata,
+    Column("secret_id", String, primary_key=True),
+    Column(
+        "owner_user_id",
+        String,
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("session_id", String, nullable=False),
+    Column("name", String, nullable=False),
+    Column("ciphertext", Text, nullable=False),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+    UniqueConstraint(
+        "owner_user_id",
+        "session_id",
+        "name",
+        name="uq_secret_records_owner_session_name",
+    ),
+)
+
+auth_events = Table(
+    "auth_events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", String, nullable=True),
+    Column("event_type", String, nullable=False),
+    Column("detail_json", Text, nullable=False),
+    Column("created_at", String, nullable=False),
 )
 
 
@@ -176,6 +243,12 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _preferences_key(owner_user_id: str | None = None) -> str:
+    if owner_user_id is None:
+        return PREFERENCES_KEY
+    return f"{PREFERENCES_KEY}:{owner_user_id}"
+
+
 def _dump_model(model: BaseModel) -> str:
     return model.model_dump_json()
 
@@ -226,6 +299,7 @@ def _new_session_record(
     runtime_config: NiceGUIRuntimeConfig,
     title: str | None,
     temporary: bool,
+    owner_user_id: str | None = None,
 ) -> NiceGUISessionRecord:
     timestamp = _now_iso()
     session_id = f"chat-{uuid4().hex}"
@@ -239,6 +313,7 @@ def _new_session_record(
         provider=runtime.provider,
         model_name=runtime.model_name,
         temporary=temporary,
+        owner_user_id=owner_user_id,
     )
     return NiceGUISessionRecord(summary=summary, runtime=runtime)
 
@@ -264,29 +339,48 @@ class SQLiteNiceGUIChatStore:
 
     def _ensure_schema_columns(self) -> None:
         """Add additive columns for existing SQLite databases."""
-        required_columns = {
+        workbench_columns = {
             "started_at": "TEXT",
             "finished_at": "TEXT",
             "duration_seconds": "FLOAT",
         }
+        chat_session_columns = {"owner_user_id": "TEXT"}
         with self.engine.begin() as connection:
-            existing_columns = {
-                str(row[1])
-                for row in connection.exec_driver_sql(
-                    "PRAGMA table_info(workbench_items)"
+            self._ensure_table_columns(
+                connection,
+                table_name="workbench_items",
+                required_columns=workbench_columns,
+            )
+            self._ensure_table_columns(
+                connection,
+                table_name="chat_sessions",
+                required_columns=chat_session_columns,
+            )
+
+    def _ensure_table_columns(
+        self, connection: Any, *, table_name: str, required_columns: dict[str, str]
+    ) -> None:
+        existing_columns = {
+            str(row[1])
+            for row in connection.exec_driver_sql(f"PRAGMA table_info({table_name})")
+        }
+        for column_name, column_type in required_columns.items():
+            if column_name not in existing_columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
                 )
-            }
-            for column_name, column_type in required_columns.items():
-                if column_name not in existing_columns:
-                    connection.exec_driver_sql(
-                        f"ALTER TABLE workbench_items ADD COLUMN {column_name} {column_type}"
-                    )
 
     def list_sessions(
-        self, *, limit: int | None = None, query: str | None = None
+        self,
+        *,
+        limit: int | None = None,
+        query: str | None = None,
+        owner_user_id: str | None = None,
     ) -> list[NiceGUISessionSummary]:
         """Return durable session summaries newest first."""
         stmt = select(chat_sessions).where(chat_sessions.c.temporary.is_(False))
+        if owner_user_id is not None:
+            stmt = stmt.where(chat_sessions.c.owner_user_id == owner_user_id)
         cleaned_query = (query or "").strip()
         if cleaned_query:
             like_query = f"%{cleaned_query}%"
@@ -312,6 +406,7 @@ class SQLiteNiceGUIChatStore:
                 message_count=self._message_count(str(row["session_id"])),
                 temporary=bool(row["temporary"]),
                 project_id=row["project_id"],
+                owner_user_id=row["owner_user_id"],
             )
             for row in rows
         ]
@@ -322,29 +417,32 @@ class SQLiteNiceGUIChatStore:
         *,
         title: str | None = None,
         temporary: bool = False,
+        owner_user_id: str | None = None,
     ) -> NiceGUISessionRecord:
         """Create and optionally persist a new session record."""
         record = _new_session_record(
             runtime_config=runtime_config,
             title=title,
             temporary=temporary,
+            owner_user_id=owner_user_id,
         )
         if not temporary:
             self.save_session(record)
         return record
 
-    def load_session(self, session_id: str) -> NiceGUISessionRecord | None:
+    def load_session(
+        self, session_id: str, *, owner_user_id: str | None = None
+    ) -> NiceGUISessionRecord | None:
         """Load a durable session by id."""
         with self.engine.begin() as connection:
-            session_row = (
-                connection.execute(
-                    select(chat_sessions).where(
-                        chat_sessions.c.session_id == session_id
-                    )
-                )
-                .mappings()
-                .first()
+            session_stmt = select(chat_sessions).where(
+                chat_sessions.c.session_id == session_id
             )
+            if owner_user_id is not None:
+                session_stmt = session_stmt.where(
+                    chat_sessions.c.owner_user_id == owner_user_id
+                )
+            session_row = connection.execute(session_stmt).mappings().first()
             if session_row is None:
                 return None
             message_rows = (
@@ -404,6 +502,7 @@ class SQLiteNiceGUIChatStore:
                 ),
                 temporary=bool(session_row["temporary"]),
                 project_id=session_row["project_id"],
+                owner_user_id=session_row["owner_user_id"],
             ),
             runtime=runtime,  # type: ignore[arg-type]
             transcript=transcript,
@@ -516,13 +615,16 @@ class SQLiteNiceGUIChatStore:
                 delete(chat_sessions).where(chat_sessions.c.session_id == session_id)
             )
 
-    def load_preferences(self) -> NiceGUIPreferences:
+    def load_preferences(
+        self, *, owner_user_id: str | None = None
+    ) -> NiceGUIPreferences:
         """Load app preferences or return defaults."""
+        key = _preferences_key(owner_user_id)
         with self.engine.begin() as connection:
             row = (
                 connection.execute(
                     select(app_preferences.c.payload_json).where(
-                        app_preferences.c.key == PREFERENCES_KEY
+                        app_preferences.c.key == key
                     )
                 )
                 .mappings()
@@ -536,27 +638,327 @@ class SQLiteNiceGUIChatStore:
             field_name="app_preferences.payload_json",
         )  # type: ignore[return-value]
 
-    def save_preferences(self, preferences: NiceGUIPreferences) -> None:
+    def save_preferences(
+        self, preferences: NiceGUIPreferences, *, owner_user_id: str | None = None
+    ) -> None:
         """Persist app preferences."""
+        key = _preferences_key(owner_user_id)
         payload = _dump_model(preferences)
         with self.engine.begin() as connection:
             existing = connection.execute(
-                select(app_preferences.c.key).where(
-                    app_preferences.c.key == PREFERENCES_KEY
-                )
+                select(app_preferences.c.key).where(app_preferences.c.key == key)
             ).first()
             if existing is None:
                 connection.execute(
-                    insert(app_preferences).values(
-                        key=PREFERENCES_KEY, payload_json=payload
-                    )
+                    insert(app_preferences).values(key=key, payload_json=payload)
                 )
             else:
                 connection.execute(
                     update(app_preferences)
-                    .where(app_preferences.c.key == PREFERENCES_KEY)
+                    .where(app_preferences.c.key == key)
                     .values(payload_json=payload)
                 )
+
+    def create_user(
+        self,
+        *,
+        username: str,
+        password_hash: str,
+        role: NiceGUIUserRole = "user",
+    ) -> NiceGUIUser:
+        """Create a local hosted-mode user."""
+        timestamp = _now_iso()
+        user = NiceGUIUser(
+            user_id=f"user-{uuid4().hex}",
+            username=username.strip(),
+            password_hash=password_hash,
+            role=role,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        with self.engine.begin() as connection:
+            connection.execute(
+                insert(users).values(
+                    user_id=user.user_id,
+                    username=user.username,
+                    password_hash=user.password_hash,
+                    role=user.role,
+                    disabled=user.disabled,
+                    created_at=user.created_at,
+                    updated_at=user.updated_at,
+                    last_login_at=user.last_login_at,
+                )
+            )
+        return user
+
+    def list_users(self) -> list[NiceGUIUser]:
+        """Return local users ordered by username."""
+        with self.engine.begin() as connection:
+            rows = (
+                connection.execute(select(users).order_by(users.c.username.asc()))
+                .mappings()
+                .all()
+            )
+        return [self._user_from_row(row) for row in rows]
+
+    def get_user_by_username(self, username: str) -> NiceGUIUser | None:
+        """Return one local user by username."""
+        with self.engine.begin() as connection:
+            row = (
+                connection.execute(
+                    select(users).where(users.c.username == username.strip())
+                )
+                .mappings()
+                .first()
+            )
+        return None if row is None else self._user_from_row(row)
+
+    def get_user(self, user_id: str) -> NiceGUIUser | None:
+        """Return one local user by id."""
+        with self.engine.begin() as connection:
+            row = (
+                connection.execute(select(users).where(users.c.user_id == user_id))
+                .mappings()
+                .first()
+            )
+        return None if row is None else self._user_from_row(row)
+
+    def update_user_login(self, user_id: str) -> None:
+        """Record a successful login timestamp."""
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(users)
+                .where(users.c.user_id == user_id)
+                .values(last_login_at=_now_iso(), updated_at=_now_iso())
+            )
+
+    def set_user_disabled(self, user_id: str, disabled: bool) -> None:
+        """Enable or disable one local user."""
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(users)
+                .where(users.c.user_id == user_id)
+                .values(disabled=disabled, updated_at=_now_iso())
+            )
+
+    def update_user_password_hash(self, user_id: str, password_hash: str) -> None:
+        """Replace one local user's password hash."""
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(users)
+                .where(users.c.user_id == user_id)
+                .values(password_hash=password_hash, updated_at=_now_iso())
+            )
+
+    def create_user_session(
+        self, *, user_id: str, token_hash: str, expires_at: str
+    ) -> NiceGUIUserSession:
+        """Create a durable hosted-mode browser session record."""
+        session = NiceGUIUserSession(
+            session_id=f"session-{uuid4().hex}",
+            user_id=user_id,
+            token_hash=token_hash,
+            created_at=_now_iso(),
+            expires_at=expires_at,
+        )
+        with self.engine.begin() as connection:
+            connection.execute(
+                insert(user_sessions).values(
+                    session_id=session.session_id,
+                    user_id=session.user_id,
+                    token_hash=session.token_hash,
+                    created_at=session.created_at,
+                    expires_at=session.expires_at,
+                    revoked_at=session.revoked_at,
+                )
+            )
+        return session
+
+    def get_user_session(self, session_id: str) -> NiceGUIUserSession | None:
+        """Return one durable hosted-mode browser session."""
+        with self.engine.begin() as connection:
+            row = (
+                connection.execute(
+                    select(user_sessions).where(
+                        user_sessions.c.session_id == session_id
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        return None if row is None else self._user_session_from_row(row)
+
+    def revoke_user_session(self, session_id: str) -> None:
+        """Mark one hosted-mode browser session as revoked."""
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(user_sessions)
+                .where(user_sessions.c.session_id == session_id)
+                .values(revoked_at=_now_iso())
+            )
+
+    def upsert_secret_record(
+        self,
+        *,
+        owner_user_id: str,
+        session_id: str,
+        name: str,
+        ciphertext: str,
+    ) -> NiceGUISecretRecord:
+        """Create or replace one encrypted secret record."""
+        timestamp = _now_iso()
+        with self.engine.begin() as connection:
+            existing = (
+                connection.execute(
+                    select(secret_records).where(
+                        secret_records.c.owner_user_id == owner_user_id,
+                        secret_records.c.session_id == session_id,
+                        secret_records.c.name == name,
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if existing is None:
+                secret_id = f"secret-{uuid4().hex}"
+                connection.execute(
+                    insert(secret_records).values(
+                        secret_id=secret_id,
+                        owner_user_id=owner_user_id,
+                        session_id=session_id,
+                        name=name,
+                        ciphertext=ciphertext,
+                        created_at=timestamp,
+                        updated_at=timestamp,
+                    )
+                )
+                return NiceGUISecretRecord(
+                    secret_id=secret_id,
+                    owner_user_id=owner_user_id,
+                    session_id=session_id,
+                    name=name,
+                    ciphertext=ciphertext,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+            connection.execute(
+                update(secret_records)
+                .where(secret_records.c.secret_id == existing["secret_id"])
+                .values(ciphertext=ciphertext, updated_at=timestamp)
+            )
+        return NiceGUISecretRecord(
+            secret_id=str(existing["secret_id"]),
+            owner_user_id=owner_user_id,
+            session_id=session_id,
+            name=name,
+            ciphertext=ciphertext,
+            created_at=str(existing["created_at"]),
+            updated_at=timestamp,
+        )
+
+    def get_secret_record(
+        self, *, owner_user_id: str, session_id: str, name: str
+    ) -> NiceGUISecretRecord | None:
+        """Return one encrypted secret record."""
+        with self.engine.begin() as connection:
+            row = (
+                connection.execute(
+                    select(secret_records).where(
+                        secret_records.c.owner_user_id == owner_user_id,
+                        secret_records.c.session_id == session_id,
+                        secret_records.c.name == name,
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        return None if row is None else self._secret_record_from_row(row)
+
+    def list_secret_names(self, *, owner_user_id: str, session_id: str) -> list[str]:
+        """Return configured secret names for one user chat session."""
+        with self.engine.begin() as connection:
+            rows = (
+                connection.execute(
+                    select(secret_records.c.name)
+                    .where(
+                        secret_records.c.owner_user_id == owner_user_id,
+                        secret_records.c.session_id == session_id,
+                    )
+                    .order_by(secret_records.c.name.asc())
+                )
+                .scalars()
+                .all()
+            )
+        return [str(name) for name in rows]
+
+    def delete_secret_record(
+        self, *, owner_user_id: str, session_id: str, name: str
+    ) -> None:
+        """Delete one encrypted secret record."""
+        with self.engine.begin() as connection:
+            connection.execute(
+                delete(secret_records).where(
+                    secret_records.c.owner_user_id == owner_user_id,
+                    secret_records.c.session_id == session_id,
+                    secret_records.c.name == name,
+                )
+            )
+
+    def assign_unowned_sessions(self, owner_user_id: str) -> None:
+        """Assign legacy local sessions to the first hosted-mode admin."""
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(chat_sessions)
+                .where(chat_sessions.c.owner_user_id.is_(None))
+                .values(owner_user_id=owner_user_id)
+            )
+
+    def record_auth_event(
+        self, *, user_id: str | None, event_type: str, detail: object | None = None
+    ) -> None:
+        """Append a minimal hosted-mode auth audit event."""
+        with self.engine.begin() as connection:
+            connection.execute(
+                insert(auth_events).values(
+                    user_id=user_id,
+                    event_type=event_type,
+                    detail_json=_dump_json(detail or {}),
+                    created_at=_now_iso(),
+                )
+            )
+
+    def _user_from_row(self, row: Any) -> NiceGUIUser:
+        return NiceGUIUser(
+            user_id=str(row["user_id"]),
+            username=str(row["username"]),
+            password_hash=str(row["password_hash"]),
+            role=row["role"],
+            disabled=bool(row["disabled"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            last_login_at=row["last_login_at"],
+        )
+
+    def _user_session_from_row(self, row: Any) -> NiceGUIUserSession:
+        return NiceGUIUserSession(
+            session_id=str(row["session_id"]),
+            user_id=str(row["user_id"]),
+            token_hash=str(row["token_hash"]),
+            created_at=str(row["created_at"]),
+            expires_at=str(row["expires_at"]),
+            revoked_at=row["revoked_at"],
+        )
+
+    def _secret_record_from_row(self, row: Any) -> NiceGUISecretRecord:
+        return NiceGUISecretRecord(
+            secret_id=str(row["secret_id"]),
+            owner_user_id=str(row["owner_user_id"]),
+            session_id=str(row["session_id"]),
+            name=str(row["name"]),
+            ciphertext=str(row["ciphertext"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
 
     def _message_count(self, session_id: str) -> int:
         with self.engine.begin() as connection:
@@ -588,6 +990,7 @@ class SQLiteNiceGUIChatStore:
             "confidence": record.confidence,
             "temporary": record.summary.temporary,
             "project_id": record.summary.project_id,
+            "owner_user_id": record.summary.owner_user_id,
         }
 
     def _message_values(
@@ -656,11 +1059,15 @@ __all__ = [
     "NiceGUIChatStoreError",
     "SQLiteNiceGUIChatStore",
     "app_preferences",
+    "auth_events",
     "chat_messages",
     "chat_sessions",
     "create_sqlite_engine",
     "default_db_path",
     "metadata",
     "remember_default_db_path",
+    "secret_records",
+    "user_sessions",
+    "users",
     "workbench_items",
 ]

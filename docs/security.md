@@ -24,6 +24,7 @@ Security-sensitive shipped surfaces include:
 - OpenAI-compatible provider transport
 - persisted harness sessions and replay data
 - the Streamlit assistant and harness CLI entrypoints
+- the NiceGUI chat client, including optional hosted multi-user mode
 
 ## Operational guidance
 
@@ -58,15 +59,72 @@ The sidebar runtime controls are session-scoped. "New session from current
 setup" clones the current model, enabled tools, permissions, and approval
 settings into the new session.
 
-### Secret handling
+### Secret Handling
 
 Prefer one of these patterns for credentials:
 
 - environment variables consumed by providers or integrations
 - the Streamlit assistant's session-only API-key entry
+- the NiceGUI chat client's session-scoped credential entry
 
 Do not commit secrets into assistant YAML configs, scripted harness payloads, or
 examples. If you need local overrides, keep them in ignored files.
+
+The NiceGUI chat client intentionally does not use process environment variables
+as implicit provider or tool credentials. Provider API keys and tool credentials
+must be typed into the app for the active chat session. In local loopback mode
+those values are held in server memory. In hosted mode they are encrypted before
+being stored in SQLite and are scoped by user id, chat session id, and secret
+name. Stored secret values are never sent back to the browser; the UI only shows
+configured, replace, or clear state.
+
+Non-secret service URLs, such as Atlassian or GitLab base URLs, are runtime
+configuration and may be persisted as normal chat settings. Keep bearer tokens,
+passwords, API keys, and PATs in the credential fields instead.
+
+### NiceGUI Hosted Mode
+
+The default NiceGUI app is a local loopback app. Binding the app to a
+non-loopback interface requires explicit local authentication:
+
+```text
+llm-tools-nicegui-chat --host 0.0.0.0 --auth-mode local
+```
+
+Hosted mode uses local admin-created users only; there is no public
+self-registration. The first hosted launch requires creating an admin user.
+Users see only their own chat sessions, preferences, workbench records, temporary
+sessions, and encrypted secrets. Admins can create, disable, and reset local
+users, but v1 does not add a cross-user chat browser.
+
+Passwords are stored as Argon2 hashes. Browser sessions use random server-side
+session tokens recorded as hashes in SQLite and transported through NiceGUI's
+signed session storage with HttpOnly SameSite cookie settings. The cookie is
+marked HTTPS-only when direct TLS is enabled.
+
+Hosted provider and tool secrets are encrypted with a local master key file
+outside the SQLite database, defaulting to:
+
+```text
+~/.llm-tools/assistant/nicegui/hosted/master.key
+```
+
+Protect this file like a production secret. A database backup without the master
+key should not reveal stored credentials; a backup with both the database and the
+master key is sufficient to decrypt them.
+
+Use a TLS-terminating reverse proxy for normal hosted deployments. Set
+`--public-base-url` to the HTTPS URL. Direct `--tls-certfile` and
+`--tls-keyfile` support exists for bootstrap and self-signed certificate testing.
+If the app is reachable over non-loopback HTTP, secret entry is disabled unless
+`--allow-insecure-hosted-secrets` is passed as an explicit risk acceptance.
+
+Future smart-card, OAuth, or OIDC authentication should plug in behind the auth
+provider boundary. In an OAuth/OIDC flow, the browser redirects to the identity
+provider, the user authenticates there, and this server exchanges the returned
+authorization code for tokens. Long-lived refresh tokens must stay server-side,
+preferably in the same encrypted secret-store boundary or a future local secret
+daemon.
 
 ### Persisted data and caches
 
