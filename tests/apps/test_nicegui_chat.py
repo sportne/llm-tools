@@ -8,9 +8,16 @@ from typing import Any
 from pydantic import BaseModel
 
 from llm_tools.apps.assistant_config import StreamlitAssistantConfig
+from llm_tools.apps.chat_config import ProviderPreset
 from llm_tools.apps.nicegui_chat.app import (
+    _composer_action_icon,
+    _discover_model_names,
     _event_payload_text,
+    _extract_model_names_from_models_payload,
     _first_nonempty_text,
+    _models_endpoint_url,
+    _runtime_summary_parts,
+    _runtime_summary_text,
     _sidebar_container_classes,
     _workbench_container_classes,
     build_nicegui_chat_ui,
@@ -24,7 +31,10 @@ from llm_tools.apps.nicegui_chat.controller import (
     NiceGUIQueuedEvent,
     _serialize_workflow_event,
 )
-from llm_tools.apps.nicegui_chat.models import NiceGUIRuntimeConfig
+from llm_tools.apps.nicegui_chat.models import (
+    NiceGUIPreferences,
+    NiceGUIRuntimeConfig,
+)
 from llm_tools.apps.nicegui_chat.store import SQLiteNiceGUIChatStore
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import SideEffectClass, ToolInvocationRequest
@@ -141,12 +151,124 @@ def test_composer_text_helpers_accept_server_and_js_payloads() -> None:
         == "from target"
     )
     assert _event_payload_text(_FakeEvent({"target": {}})) == ""
+    assert _event_payload_text(_FakeEvent(123)) == ""
 
 
 def test_layout_container_class_helpers() -> None:
     assert _sidebar_container_classes(collapsed=False) == "llmt-sidebar"
     assert _sidebar_container_classes(collapsed=True) == "llmt-sidebar collapsed"
     assert _workbench_container_classes() == "llmt-workbench"
+    assert _workbench_container_classes(open=False) == "llmt-workbench closed"
+
+
+def test_composer_runtime_helpers() -> None:
+    runtime = NiceGUIRuntimeConfig(model_name="model-a", root_path="/repo")
+    assert _runtime_summary_parts(runtime) == [
+        ("provider", "ollama"),
+        ("model", "model-a"),
+        ("mode", "auto"),
+        ("workspace", "/repo"),
+    ]
+    assert _runtime_summary_text(runtime) == "ollama | model-a | auto | /repo"
+    assert _composer_action_icon(busy=False) == "send"
+    assert _composer_action_icon(busy=True) == "stop"
+
+
+def test_model_discovery_payload_helpers() -> None:
+    assert _models_endpoint_url("http://127.0.0.1:11434/v1/") == (
+        "http://127.0.0.1:11434/v1/models"
+    )
+    assert _models_endpoint_url("  ") == ""
+    assert _extract_model_names_from_models_payload(
+        {
+            "data": [
+                {"id": "z-model"},
+                {"id": "models/a-model"},
+                {"id": "z-model"},
+            ]
+        }
+    ) == ["a-model", "z-model"]
+    assert _extract_model_names_from_models_payload(
+        {"models": [{"name": "ollama-a"}, {"name": "ollama-b"}]}
+    ) == ["ollama-a", "ollama-b"]
+    assert _extract_model_names_from_models_payload({"data": "not-list"}) == []
+    assert _extract_model_names_from_models_payload(["not-dict"]) == []
+    assert _extract_model_names_from_models_payload({"data": ["plain-model"]}) == [
+        "plain-model"
+    ]
+
+
+def test_model_discovery_fetches_openai_compatible_models(
+    monkeypatch: Any,
+) -> None:
+    import llm_tools.apps.nicegui_chat.app as app_module
+
+    class _Response:
+        def __enter__(self) -> _Response:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def read(self) -> bytes:
+            return b'{"data": [{"id": "model-b"}, {"id": "model-a"}]}'
+
+    calls: list[tuple[str, str | None, float]] = []
+
+    def fake_urlopen(request: Any, *, timeout: float) -> _Response:
+        calls.append(
+            (
+                request.full_url,
+                request.get_header("Authorization"),
+                timeout,
+            )
+        )
+        return _Response()
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(app_module, "urlopen", fake_urlopen)
+
+    assert _discover_model_names(
+        provider=ProviderPreset.OPENAI,
+        base_url="https://example.test/v1",
+        timeout=1.5,
+    ) == ["model-a", "model-b"]
+    assert calls == [
+        ("https://example.test/v1/models", "Bearer test-key", 1.5),
+    ]
+
+
+def test_model_discovery_rejects_invalid_or_failed_endpoints(
+    monkeypatch: Any,
+) -> None:
+    import llm_tools.apps.nicegui_chat.app as app_module
+
+    def failing_urlopen(request: Any, *, timeout: float) -> object:
+        del request, timeout
+        raise OSError("offline")
+
+    monkeypatch.setattr(app_module, "urlopen", failing_urlopen)
+
+    assert _discover_model_names(provider=ProviderPreset.OLLAMA, base_url=None) == []
+    assert _discover_model_names(provider=ProviderPreset.OLLAMA, base_url="  ") == []
+    assert (
+        _discover_model_names(provider=ProviderPreset.OLLAMA, base_url="file:///tmp")
+        == []
+    )
+    assert (
+        _discover_model_names(
+            provider=ProviderPreset.OLLAMA,
+            base_url="http://127.0.0.1:11434/v1",
+        )
+        == []
+    )
+
+
+def test_nicegui_preferences_default_to_closed_workbench() -> None:
+    prefs = NiceGUIPreferences()
+
+    assert prefs.theme_mode == "light"
+    assert prefs.workbench_open is False
 
 
 def test_cli_config_resolution_covers_runtime_overrides(tmp_path: Path) -> None:
@@ -242,6 +364,20 @@ def test_main_resolves_arguments_and_delegates_run(
     assert calls[0]["root_path"] == tmp_path.resolve()
     assert calls[0]["port"] == 9999
     assert calls[0]["show"] is False
+
+
+def test_main_allows_no_workspace_root(monkeypatch: Any) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_run(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(
+        "llm_tools.apps.nicegui_chat.app.run_nicegui_chat_app", fake_run
+    )
+
+    assert main(["--no-browser"]) == 0
+    assert calls[0]["root_path"] is None
 
 
 def test_module_entrypoint_uses_package_main(monkeypatch: Any) -> None:

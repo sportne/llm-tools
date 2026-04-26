@@ -150,10 +150,10 @@ class NiceGUISessionRecord(BaseModel):
 class NiceGUIPreferences(BaseModel):
     """Persisted app-wide UI preferences and recents."""
 
-    theme_mode: Literal["dark", "light"] = "dark"
+    theme_mode: Literal["dark", "light"] = "light"
     active_session_id: str | None = None
     sidebar_collapsed: bool = False
-    workbench_open: bool = True
+    workbench_open: bool = False
     settings_open: bool = False
     recent_roots: list[str] = Field(default_factory=list)
     recent_models: dict[str, list[str]] = Field(default_factory=dict)
