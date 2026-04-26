@@ -27,7 +27,9 @@ def _b64decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value.encode("ascii"))
 
 
-def ensure_text_key_file(path: Path, *, token_bytes: int = 32) -> str:
+def ensure_text_key_file(
+    path: Path, *, token_bytes: int = 32, create: bool = True
+) -> str:
     """Return a persistent text key, creating it with restrictive permissions."""
     path = path.expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -35,6 +37,8 @@ def ensure_text_key_file(path: Path, *, token_bytes: int = 32) -> str:
         value = path.read_text(encoding="utf-8").strip()
         if value:
             return value
+    if not create:
+        raise NiceGUICryptoError(f"Required key file is missing or empty: {path}")
     value = secrets.token_urlsafe(token_bytes)
     path.write_text(value, encoding="utf-8")
     with suppress(PermissionError):
@@ -42,7 +46,7 @@ def ensure_text_key_file(path: Path, *, token_bytes: int = 32) -> str:
     return value
 
 
-def ensure_binary_key_file(path: Path) -> bytes:
+def ensure_binary_key_file(path: Path, *, create: bool = True) -> bytes:
     """Return a persistent 256-bit key, creating it with restrictive permissions."""
     path = path.expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -52,6 +56,8 @@ def ensure_binary_key_file(path: Path) -> bytes:
         if len(key) != 32:
             raise NiceGUICryptoError(f"Invalid 256-bit key file: {path}")
         return key
+    if not create:
+        raise NiceGUICryptoError(f"Required key file is missing or empty: {path}")
     key = AESGCM.generate_key(bit_length=256)
     path.write_text(_b64encode(key), encoding="utf-8")
     with suppress(PermissionError):
@@ -62,9 +68,9 @@ def ensure_binary_key_file(path: Path) -> bytes:
 class CryptoManager:
     """Authenticated envelope encryption for per-user persisted fields."""
 
-    def __init__(self, user_key_file: Path | str) -> None:
+    def __init__(self, user_key_file: Path | str, *, create_key: bool = True) -> None:
         self.key_path = Path(user_key_file).expanduser()
-        self._kek = ensure_binary_key_file(self.key_path)
+        self._kek = ensure_binary_key_file(self.key_path, create=create_key)
 
     def new_data_key(self) -> bytes:
         """Return a new per-user data encryption key."""

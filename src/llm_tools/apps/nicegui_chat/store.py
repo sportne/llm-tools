@@ -218,7 +218,16 @@ def create_sqlcipher_engine(
     """Create a SQLCipher-backed SQLite engine with app defaults."""
     path_text = str(path)
     key_path = Path(db_key_file).expanduser() if db_key_file else _DEFAULT_DB_KEY_PATH
-    passphrase = ensure_text_key_file(key_path)
+    db_path = Path(path_text).expanduser()
+    existing_database = (
+        path_text != ":memory:" and db_path.exists() and db_path.stat().st_size > 0
+    )
+    try:
+        passphrase = ensure_text_key_file(key_path, create=not existing_database)
+    except NiceGUICryptoError as exc:
+        raise NiceGUIChatStoreError(
+            f"Cannot open existing encrypted NiceGUI database without key file: {key_path}"
+        ) from exc
     try:
         import sqlcipher3  # type: ignore[import-untyped]
     except ImportError as exc:  # pragma: no cover - dependency guard
@@ -357,11 +366,32 @@ class SQLiteNiceGUIChatStore:
             if user_key_file
             else _DEFAULT_USER_KEY_PATH
         )
-        self.crypto = CryptoManager(self.user_key_file)
         self._data_key_cache: dict[str, bytes] = {}
         self.engine = create_sqlcipher_engine(
             self.db_path, db_key_file=self.db_key_file
         )
+        self.crypto = CryptoManager(
+            self.user_key_file,
+            create_key=not self._database_has_user_key_records(),
+        )
+
+    def _database_has_user_key_records(self) -> bool:
+        try:
+            with self.engine.begin() as connection:
+                table_exists = connection.exec_driver_sql(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='user_key_records'"
+                ).first()
+                if table_exists is None:
+                    return False
+                count = connection.execute(
+                    select(func.count()).select_from(user_key_records)
+                ).scalar_one()
+        except SQLAlchemyError as exc:
+            raise NiceGUIChatStoreError(
+                f"Could not inspect NiceGUI encryption key records: {exc}"
+            ) from exc
+        return int(count) > 0
 
     def initialize(self) -> None:
         """Create missing tables."""

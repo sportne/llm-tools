@@ -131,13 +131,51 @@ def test_sqlcipher_database_rejects_plain_sqlite_and_wrong_key(
 
     wrong_key = tmp_path / "wrong-db.key"
     wrong_key.write_text("wrong-passphrase", encoding="utf-8")
-    wrong_store = SQLiteNiceGUIChatStore(
-        db_path,
-        db_key_file=wrong_key,
-        user_key_file=tmp_path / "user-kek.key",
-    )
     with pytest.raises(Exception, match="initialize|file is encrypted|not a database"):
-        wrong_store.initialize()
+        SQLiteNiceGUIChatStore(
+            db_path,
+            db_key_file=wrong_key,
+            user_key_file=tmp_path / "user-kek.key",
+        )
+
+
+def test_existing_encrypted_database_requires_original_key_files(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "chat.sqlite3"
+    db_key = tmp_path / "db.key"
+    user_key = tmp_path / "user-kek.key"
+    store = SQLiteNiceGUIChatStore(
+        db_path,
+        db_key_file=db_key,
+        user_key_file=user_key,
+    )
+    store.initialize()
+    auth = LocalAuthProvider(store)
+    user = auth.create_user(username="admin", password="secret-" + "value")
+    store.create_session(
+        NiceGUIRuntimeConfig(model_name="secret-model"),
+        title="Alpha",
+        owner_user_id=user.user_id,
+    )
+    db_key_text = db_key.read_text(encoding="utf-8")
+
+    db_key.unlink()
+    with pytest.raises(Exception, match="database without key file"):
+        SQLiteNiceGUIChatStore(
+            db_path,
+            db_key_file=db_key,
+            user_key_file=user_key,
+        )
+
+    db_key.write_text(db_key_text, encoding="utf-8")
+    user_key.unlink()
+    with pytest.raises(Exception, match="Required key file"):
+        SQLiteNiceGUIChatStore(
+            db_path,
+            db_key_file=db_key,
+            user_key_file=user_key,
+        )
 
 
 def test_user_owned_fields_are_encrypted_inside_open_database(tmp_path: Path) -> None:
