@@ -29,13 +29,16 @@ dependencies = [
   "markitdown>=0.1.5,<0.2",
   "mpxj>=16,<17",
   "openai>=1,<2",
+  "nicegui>=3,<4",
   "pydantic>=2,<3",
   "PyYAML>=6,<7",
+  "SQLAlchemy>=2.0,<2.1",
   "streamlit>=1.41,<2",
 ]
 
 [project.scripts]
 llm-tools-harness = "llm_tools.apps.harness_cli:main"
+llm-tools-nicegui-chat = "llm_tools.apps.nicegui_chat:main"
 llm-tools-streamlit-assistant = "llm_tools.apps.streamlit_assistant:main"
 
 [project.optional-dependencies]
@@ -94,6 +97,10 @@ show_error_codes = true
 
 [[tool.mypy.overrides]]
 module = ["streamlit", "streamlit.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["nicegui", "nicegui.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

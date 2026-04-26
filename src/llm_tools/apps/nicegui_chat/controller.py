@@ -1,0 +1,906 @@
+"""Controller layer for the NiceGUI chat app."""
+
+from __future__ import annotations
+
+import os
+import queue
+import threading
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Literal
+from uuid import uuid4
+
+from llm_tools.apps.assistant_config import StreamlitAssistantConfig
+from llm_tools.apps.assistant_prompts import build_assistant_system_prompt
+from llm_tools.apps.assistant_runtime import (
+    build_assistant_available_tool_specs,
+    build_assistant_context,
+    build_assistant_executor,
+    build_assistant_policy,
+    build_protection_controller,
+    build_protection_environment,
+    build_tool_capabilities,
+    resolve_assistant_default_enabled_tools,
+)
+from llm_tools.apps.chat_runtime import create_provider
+from llm_tools.apps.nicegui_chat.models import (
+    NiceGUIInspectorEntry,
+    NiceGUIPreferences,
+    NiceGUIRuntimeConfig,
+    NiceGUISessionRecord,
+    NiceGUITranscriptEntry,
+    NiceGUIWorkbenchItem,
+)
+from llm_tools.apps.nicegui_chat.store import SQLiteNiceGUIChatStore
+from llm_tools.tool_api import ToolSpec
+from llm_tools.workflow_api import (
+    ChatSessionState,
+    ChatSessionTurnRunner,
+    ChatWorkflowApprovalEvent,
+    ChatWorkflowApprovalResolvedEvent,
+    ChatWorkflowApprovalState,
+    ChatWorkflowInspectorEvent,
+    ChatWorkflowResultEvent,
+    ChatWorkflowStatusEvent,
+    ChatWorkflowTurnResult,
+    ModelTurnProvider,
+    run_interactive_chat_session_turn,
+)
+
+TurnEventKind = Literal[
+    "status",
+    "approval_requested",
+    "approval_resolved",
+    "inspector",
+    "result",
+    "error",
+    "complete",
+]
+
+
+@dataclass
+class NiceGUITurnState:
+    """Transient turn state owned by the UI controller."""
+
+    busy: bool = False
+    status_text: str = ""
+    status_history: list[str] = field(default_factory=list)
+    pending_approval: ChatWorkflowApprovalState | None = None
+    approval_decision_in_flight: bool = False
+    active_turn_number: int = 0
+    queued_follow_up_prompt: str | None = None
+    cancelling: bool = False
+
+
+@dataclass
+class NiceGUIQueuedEvent:
+    """Workflow event serialized across the background turn boundary."""
+
+    kind: TurnEventKind
+    payload: object
+    turn_number: int
+    session_id: str
+
+
+@dataclass
+class NiceGUIActiveTurnHandle:
+    """Background runner handle for one active turn."""
+
+    session_id: str
+    runner: ChatSessionTurnRunner
+    event_queue: queue.Queue[NiceGUIQueuedEvent]
+    thread: threading.Thread
+    turn_number: int
+
+
+ProviderFactory = Callable[[NiceGUIRuntimeConfig], ModelTurnProvider]
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _remember_status(turn_state: NiceGUITurnState, status: str) -> None:
+    if not status:
+        return
+    if not turn_state.status_history or turn_state.status_history[-1] != status:
+        turn_state.status_history.append(status)
+    turn_state.status_history = turn_state.status_history[-8:]
+
+
+def _is_staged_schema_protocol(provider: ModelTurnProvider) -> bool:
+    preference = getattr(provider, "uses_staged_schema_protocol", None)
+    return bool(callable(preference) and preference())
+
+
+def _interaction_protocol(provider: ModelTurnProvider) -> str:
+    prompt_tool_preference = getattr(provider, "uses_prompt_tool_protocol", None)
+    if callable(prompt_tool_preference) and bool(prompt_tool_preference()):
+        return "prompt_tools"
+    if _is_staged_schema_protocol(provider):
+        return "staged_json"
+    return "native_tools"
+
+
+def _runtime_env() -> dict[str, str]:
+    return dict(os.environ)
+
+
+def _effective_assistant_config(
+    *,
+    config: StreamlitAssistantConfig,
+    runtime: NiceGUIRuntimeConfig,
+) -> StreamlitAssistantConfig:
+    workspace_default_root = runtime.default_workspace_root
+    if workspace_default_root is None:
+        workspace_default_root = config.workspace.default_root
+    return config.model_copy(
+        deep=True,
+        update={
+            "llm": config.llm.model_copy(
+                update={
+                    "provider": runtime.provider,
+                    "provider_mode_strategy": runtime.provider_mode_strategy,
+                    "model_name": runtime.model_name,
+                    "api_base_url": runtime.api_base_url,
+                    "temperature": runtime.temperature,
+                    "timeout_seconds": runtime.timeout_seconds,
+                }
+            ),
+            "session": runtime.session_config.model_copy(deep=True),
+            "tool_limits": runtime.tool_limits.model_copy(deep=True),
+            "policy": config.policy.model_copy(
+                update={
+                    "enabled_tools": list(runtime.enabled_tools),
+                    "require_approval_for": set(runtime.require_approval_for),
+                }
+            ),
+            "workspace": config.workspace.model_copy(
+                update={"default_root": workspace_default_root}
+            ),
+            "ui": config.ui.model_copy(
+                update={
+                    "show_token_usage": runtime.show_token_usage,
+                    "show_footer_help": runtime.show_footer_help,
+                    "inspector_open_by_default": runtime.inspector_open,
+                }
+            ),
+            "protection": runtime.protection.model_copy(deep=True),
+            "research": config.research.model_copy(
+                update=runtime.research.model_dump(mode="python", exclude_unset=True)
+            ),
+        },
+    )
+
+
+def default_runtime_config(
+    config: StreamlitAssistantConfig,
+    *,
+    root_path: Path | None,
+) -> NiceGUIRuntimeConfig:
+    """Build the default runtime for a new NiceGUI chat session."""
+    effective_root = root_path or (
+        Path(config.workspace.default_root).expanduser()
+        if config.workspace.default_root
+        else None
+    )
+    return NiceGUIRuntimeConfig(
+        provider=config.llm.provider,
+        provider_mode_strategy=config.llm.provider_mode_strategy,
+        model_name=config.llm.model_name,
+        api_base_url=config.llm.api_base_url,
+        temperature=config.llm.temperature,
+        timeout_seconds=config.llm.timeout_seconds,
+        root_path=str(effective_root) if effective_root is not None else None,
+        default_workspace_root=config.workspace.default_root,
+        enabled_tools=sorted(resolve_assistant_default_enabled_tools(config)),
+        require_approval_for=set(config.policy.require_approval_for),
+        allow_network=True,
+        allow_filesystem=effective_root is not None,
+        allow_subprocess=effective_root is not None,
+        inspector_open=config.ui.inspector_open_by_default,
+        show_token_usage=config.ui.show_token_usage,
+        show_footer_help=config.ui.show_footer_help,
+        session_config=config.session.model_copy(deep=True),
+        tool_limits=config.tool_limits.model_copy(deep=True),
+        research=config.research.model_copy(deep=True),
+        protection=config.protection.model_copy(deep=True),
+    )
+
+
+class NiceGUIChatController:
+    """Stateful controller for the NiceGUI app shell."""
+
+    def __init__(
+        self,
+        *,
+        store: SQLiteNiceGUIChatStore,
+        config: StreamlitAssistantConfig,
+        root_path: Path | None = None,
+        provider_factory: ProviderFactory | None = None,
+    ) -> None:
+        self.store = store
+        self.config = config
+        self.root_path = root_path
+        self.provider_factory = provider_factory
+        self.preferences: NiceGUIPreferences = store.load_preferences()
+        self.sessions: dict[str, NiceGUISessionRecord] = {}
+        self.session_order: list[str] = []
+        self.turn_states: dict[str, NiceGUITurnState] = {}
+        self.active_turns: dict[str, NiceGUIActiveTurnHandle] = {}
+        self._lock = threading.RLock()
+        self._load_initial_state()
+
+    @property
+    def active_session_id(self) -> str:
+        """Return the active session id, creating a session if needed."""
+        if self.preferences.active_session_id in self.sessions:
+            return str(self.preferences.active_session_id)
+        record = self.create_session(temporary=False)
+        return record.summary.session_id
+
+    @property
+    def active_record(self) -> NiceGUISessionRecord:
+        """Return the active session record."""
+        return self.sessions[self.active_session_id]
+
+    @property
+    def active_turn_state(self) -> NiceGUITurnState:
+        """Return the active session's turn state."""
+        return self.turn_state_for(self.active_session_id)
+
+    def list_session_summaries(self, *, query: str | None = None) -> list[Any]:
+        """Return summaries for the chat rail."""
+        summaries = [
+            self.sessions[session_id].summary
+            for session_id in self.session_order
+            if not self.sessions[session_id].summary.temporary
+        ]
+        cleaned = (query or "").strip().lower()
+        if not cleaned:
+            return summaries
+        return [
+            summary
+            for summary in summaries
+            if cleaned in summary.title.lower()
+            or cleaned in summary.model_name.lower()
+            or cleaned in (summary.root_path or "").lower()
+        ]
+
+    def create_session(self, *, temporary: bool = False) -> NiceGUISessionRecord:
+        """Create and activate a new session."""
+        runtime = default_runtime_config(self.config, root_path=self.root_path)
+        record = self.store.create_session(runtime, temporary=temporary)
+        with self._lock:
+            self.sessions[record.summary.session_id] = record
+            self.turn_states[record.summary.session_id] = NiceGUITurnState()
+            if not record.summary.temporary:
+                self.session_order.insert(0, record.summary.session_id)
+                self.preferences.active_session_id = record.summary.session_id
+                self.store.save_preferences(self.preferences)
+            else:
+                self.preferences.active_session_id = record.summary.session_id
+            return record
+
+    def select_session(self, session_id: str) -> bool:
+        """Activate a known session."""
+        if session_id not in self.sessions:
+            loaded = self.store.load_session(session_id)
+            if loaded is None:
+                return False
+            self.sessions[session_id] = loaded
+            self.turn_states[session_id] = NiceGUITurnState()
+        self.preferences.active_session_id = session_id
+        if not self.sessions[session_id].summary.temporary:
+            self.store.save_preferences(self.preferences)
+        return True
+
+    def delete_session(self, session_id: str) -> None:
+        """Delete a durable session."""
+        record = self.sessions.get(session_id)
+        if record is not None and record.summary.temporary:
+            self.sessions.pop(session_id, None)
+            self.turn_states.pop(session_id, None)
+        else:
+            self.store.delete_session(session_id)
+            self.sessions.pop(session_id, None)
+            self.turn_states.pop(session_id, None)
+            if session_id in self.session_order:
+                self.session_order.remove(session_id)
+        if self.preferences.active_session_id == session_id:
+            replacement = self.session_order[0] if self.session_order else None
+            if replacement is None:
+                replacement = self.create_session(temporary=False).summary.session_id
+            self.preferences.active_session_id = replacement
+            self.store.save_preferences(self.preferences)
+
+    def rename_session(self, session_id: str, title: str) -> None:
+        """Rename a session."""
+        record = self.sessions[session_id]
+        cleaned = title.strip() or "New chat"
+        record.summary.title = cleaned
+        record.summary.updated_at = _now_iso()
+        self._persist_record(record)
+
+    def turn_state_for(self, session_id: str) -> NiceGUITurnState:
+        """Return transient turn state for a session."""
+        return self.turn_states.setdefault(session_id, NiceGUITurnState())
+
+    def submit_prompt(self, prompt: str) -> str | None:
+        """Start a turn for the active session. Returns an error string when blocked."""
+        cleaned = prompt.strip()
+        if not cleaned:
+            return "Enter a message first."
+        session_id = self.active_session_id
+        turn_state = self.turn_state_for(session_id)
+        if turn_state.busy:
+            turn_state.queued_follow_up_prompt = cleaned
+            return None
+        record = self.sessions[session_id]
+        user_entry = NiceGUITranscriptEntry(
+            role="user",
+            text=cleaned,
+            created_at=_now_iso(),
+        )
+        record.transcript.append(user_entry)
+        if record.summary.title == "New chat":
+            record.summary.title = _title_from_prompt(cleaned)
+        self._persist_record(record)
+        try:
+            provider = self._create_provider(record.runtime)
+            runner = self._build_runner(
+                session_id=session_id,
+                runtime=record.runtime,
+                provider=provider,
+                session_state=record.workflow_session_state,
+                user_message=cleaned,
+            )
+        except Exception as exc:
+            record.transcript.append(
+                NiceGUITranscriptEntry(
+                    role="error", text=str(exc), created_at=_now_iso()
+                )
+            )
+            self._persist_record(record)
+            return str(exc)
+
+        event_queue: queue.Queue[NiceGUIQueuedEvent] = queue.Queue()
+        turn_state.busy = True
+        turn_state.cancelling = False
+        turn_state.status_text = "thinking"
+        turn_state.status_history = ["thinking"]
+        turn_state.pending_approval = None
+        turn_state.approval_decision_in_flight = False
+        turn_state.active_turn_number += 1
+        handle = NiceGUIActiveTurnHandle(
+            session_id=session_id,
+            runner=runner,
+            event_queue=event_queue,
+            thread=threading.Thread(target=lambda: None),
+            turn_number=turn_state.active_turn_number,
+        )
+        handle.thread = threading.Thread(
+            target=_worker_run_turn,
+            args=(handle,),
+            name=f"llm-tools-nicegui-turn-{session_id}",
+            daemon=True,
+        )
+        self.active_turns[session_id] = handle
+        handle.thread.start()
+        return None
+
+    def drain_events(self) -> list[NiceGUIQueuedEvent]:
+        """Drain queued workflow events and update controller state."""
+        applied: list[NiceGUIQueuedEvent] = []
+        for session_id, handle in list(self.active_turns.items()):
+            while True:
+                try:
+                    event = handle.event_queue.get_nowait()
+                except queue.Empty:
+                    break
+                applied.append(event)
+                try:
+                    pending_prompt = self._apply_queued_event(event)
+                    if pending_prompt is not None and event.kind != "complete":
+                        self.turn_state_for(
+                            session_id
+                        ).queued_follow_up_prompt = pending_prompt
+                except Exception as exc:
+                    self._apply_turn_error(
+                        session_id=session_id, error_message=str(exc)
+                    )
+                if event.kind == "complete":
+                    self.active_turns.pop(session_id, None)
+                    pending = self.turn_state_for(session_id).queued_follow_up_prompt
+                    if pending:
+                        self.turn_state_for(session_id).queued_follow_up_prompt = None
+                        if self.preferences.active_session_id == session_id:
+                            self.submit_prompt(pending)
+        return applied
+
+    def resolve_approval(self, *, approved: bool) -> bool:
+        """Resolve the active session's pending approval."""
+        session_id = self.active_session_id
+        handle = self.active_turns.get(session_id)
+        if handle is None:
+            return False
+        turn_state = self.turn_state_for(session_id)
+        resolved = handle.runner.resolve_pending_approval(approved)
+        if resolved:
+            turn_state.approval_decision_in_flight = True
+        return resolved
+
+    def cancel_active_turn(self) -> bool:
+        """Request cancellation for the active turn."""
+        session_id = self.active_session_id
+        handle = self.active_turns.get(session_id)
+        if handle is None:
+            return False
+        turn_state = self.turn_state_for(session_id)
+        turn_state.cancelling = True
+        turn_state.status_text = "stopping"
+        handle.runner.cancel()
+        return True
+
+    def save_active_session(self) -> None:
+        """Persist the active record and preferences."""
+        self._persist_record(self.active_record)
+        self.store.save_preferences(self.preferences)
+
+    def _load_initial_state(self) -> None:
+        self.store.initialize()
+        summaries = self.store.list_sessions(limit=100)
+        self.session_order = [summary.session_id for summary in summaries]
+        for summary in summaries:
+            loaded = self.store.load_session(summary.session_id)
+            if loaded is not None:
+                self.sessions[summary.session_id] = loaded
+                self.turn_states[summary.session_id] = NiceGUITurnState()
+        active_id = self.preferences.active_session_id
+        if active_id not in self.sessions:
+            active_id = self.session_order[0] if self.session_order else None
+        if active_id is None:
+            active_id = self.create_session(temporary=False).summary.session_id
+        self.preferences.active_session_id = active_id
+        self.store.save_preferences(self.preferences)
+
+    def _persist_record(self, record: NiceGUISessionRecord) -> None:
+        record.summary.root_path = record.runtime.root_path
+        record.summary.provider = record.runtime.provider
+        record.summary.model_name = record.runtime.model_name
+        record.summary.message_count = len(
+            [entry for entry in record.transcript if entry.show_in_transcript]
+        )
+        record.summary.updated_at = _now_iso()
+        if record.summary.temporary:
+            return
+        self.store.save_session(record)
+        if record.summary.session_id not in self.session_order:
+            self.session_order.insert(0, record.summary.session_id)
+
+    def _create_provider(self, runtime: NiceGUIRuntimeConfig) -> ModelTurnProvider:
+        if self.provider_factory is None:  # pragma: no cover
+            llm_config = _effective_assistant_config(
+                config=self.config, runtime=runtime
+            ).llm
+            api_key = None
+            metadata = llm_config.credential_prompt_metadata()
+            if metadata.expects_api_key:
+                api_key = os.getenv(llm_config.api_key_env_var or "OPENAI_API_KEY")
+            return create_provider(
+                llm_config,
+                api_key=api_key,
+                model_name=runtime.model_name,
+                mode_strategy=runtime.provider_mode_strategy,
+            )
+        return self.provider_factory(runtime)
+
+    def _build_runner(
+        self,
+        *,
+        session_id: str,
+        runtime: NiceGUIRuntimeConfig,
+        provider: ModelTurnProvider,
+        session_state: ChatSessionState,
+        user_message: str,
+    ) -> ChatSessionTurnRunner:
+        effective_config = _effective_assistant_config(
+            config=self.config, runtime=runtime
+        )
+        tool_specs = build_assistant_available_tool_specs()
+        root = Path(runtime.root_path) if runtime.root_path is not None else None
+        enabled_tools = set(runtime.enabled_tools)
+        policy = build_assistant_policy(
+            enabled_tools=enabled_tools,
+            tool_specs=tool_specs,
+            require_approval_for=set(runtime.require_approval_for),
+            allow_network=runtime.allow_network,
+            allow_filesystem=runtime.allow_filesystem and root is not None,
+            allow_subprocess=runtime.allow_subprocess and root is not None,
+            redaction_config=effective_config.policy.redaction,
+        )
+        registry, executor = build_assistant_executor(policy=policy)
+        exposed_tool_names = _exposed_tool_names_for_runtime(
+            tool_specs=tool_specs,
+            runtime=runtime,
+            root=root,
+            env=_runtime_env(),
+        )
+        protection_controller = build_protection_controller(
+            config=runtime.protection,
+            provider=provider,
+            environment=build_protection_environment(
+                app_name="nicegui_chat",
+                model_name=runtime.model_name,
+                workspace=runtime.root_path,
+                enabled_tools=sorted(exposed_tool_names),
+                allow_network=runtime.allow_network,
+                allow_filesystem=runtime.allow_filesystem and root is not None,
+                allow_subprocess=runtime.allow_subprocess and root is not None,
+            ),
+        )
+        return run_interactive_chat_session_turn(
+            user_message=user_message,
+            session_state=session_state,
+            executor=executor,
+            provider=provider,
+            system_prompt=build_assistant_system_prompt(
+                tool_registry=registry,
+                tool_limits=effective_config.tool_limits,
+                enabled_tool_names=exposed_tool_names,
+                workspace_enabled=root is not None,
+                staged_schema_protocol=_is_staged_schema_protocol(provider),
+                interaction_protocol=_interaction_protocol(provider),
+            ),
+            base_context=build_assistant_context(
+                root_path=root,
+                config=effective_config,
+                app_name=f"nicegui-chat-{session_id}",
+            ),
+            session_config=effective_config.session,
+            tool_limits=effective_config.tool_limits,
+            redaction_config=effective_config.policy.redaction,
+            temperature=effective_config.llm.temperature,
+            protection_controller=protection_controller,
+            enabled_tool_names=exposed_tool_names,
+        )
+
+    def _apply_queued_event(self, event: NiceGUIQueuedEvent) -> str | None:
+        if event.session_id not in self.sessions:
+            return None
+        record = self.sessions[event.session_id]
+        turn_state = self.turn_state_for(event.session_id)
+        if event.kind == "status":
+            if turn_state.cancelling:
+                return None
+            status_event = ChatWorkflowStatusEvent.model_validate(event.payload)
+            turn_state.status_text = status_event.status
+            _remember_status(turn_state, status_event.status)
+            return None
+        if event.kind == "approval_requested":
+            approval_event = ChatWorkflowApprovalEvent.model_validate(event.payload)
+            turn_state.pending_approval = approval_event.approval
+            turn_state.approval_decision_in_flight = False
+            turn_state.status_text = "approval required"
+            _remember_status(turn_state, "approval required")
+            record.transcript.append(
+                NiceGUITranscriptEntry(
+                    role="system",
+                    text=_approval_request_copy(approval_event.approval),
+                    created_at=_now_iso(),
+                )
+            )
+            self._persist_record(record)
+            return None
+        if event.kind == "approval_resolved":
+            approval_resolved_event = ChatWorkflowApprovalResolvedEvent.model_validate(
+                event.payload
+            )
+            turn_state.pending_approval = None
+            turn_state.approval_decision_in_flight = False
+            record.transcript.append(
+                NiceGUITranscriptEntry(
+                    role="system",
+                    text=_approval_resolution_copy(approval_resolved_event.resolution),
+                    created_at=_now_iso(),
+                )
+            )
+            turn_state.status_text = {
+                "approved": "resuming turn",
+                "denied": "continuing without approval",
+                "timed_out": "approval timed out",
+                "cancelled": "",
+            }[approval_resolved_event.resolution]
+            _remember_status(turn_state, turn_state.status_text)
+            self._persist_record(record)
+            return None
+        if event.kind == "inspector":
+            inspector_event = ChatWorkflowInspectorEvent.model_validate(event.payload)
+            label = (
+                f"Turn {event.turn_number} Round {inspector_event.round_index} "
+                f"{inspector_event.kind.replace('_', ' ')}"
+            )
+            entry = NiceGUIInspectorEntry(
+                label=label,
+                payload=inspector_event.payload,
+                created_at=_now_iso(),
+            )
+            if inspector_event.kind == "provider_messages":
+                record.inspector_state.provider_messages.append(entry)
+            elif inspector_event.kind == "tool_execution":
+                record.inspector_state.tool_executions.append(entry)
+            else:
+                record.inspector_state.parsed_responses.append(entry)
+            record.workbench_items.append(
+                NiceGUIWorkbenchItem(
+                    item_id=f"workbench-{uuid4().hex}",
+                    kind="inspector",
+                    title=label,
+                    payload=inspector_event.payload,
+                    version=1,
+                    active=True,
+                    created_at=_now_iso(),
+                    updated_at=_now_iso(),
+                )
+            )
+            self._persist_record(record)
+            return None
+        if event.kind == "result":
+            result_event = ChatWorkflowResultEvent.model_validate(event.payload)
+            return self._apply_turn_result(
+                session_id=event.session_id,
+                event=result_event,
+            )
+        if event.kind == "error":
+            return self._apply_turn_error(
+                session_id=event.session_id,
+                error_message=str(event.payload),
+            )
+        if event.kind == "complete":
+            if turn_state.busy and turn_state.cancelling:
+                pending = turn_state.queued_follow_up_prompt
+                self._reset_turn_state(turn_state)
+                record.transcript.append(
+                    NiceGUITranscriptEntry(
+                        role="system",
+                        text="Stopped the active turn.",
+                        created_at=_now_iso(),
+                    )
+                )
+                self._persist_record(record)
+                return pending
+            return None
+        raise ValueError(f"Unsupported queued event kind: {event.kind}")
+
+    def _apply_turn_result(
+        self,
+        *,
+        session_id: str,
+        event: ChatWorkflowResultEvent,
+    ) -> str | None:
+        record = self.sessions[session_id]
+        turn_state = self.turn_state_for(session_id)
+        result = ChatWorkflowTurnResult.model_validate(event.result)
+        record.workflow_session_state = (
+            result.session_state or record.workflow_session_state
+        )
+        record.token_usage = result.token_usage
+        turn_state.pending_approval = None
+        turn_state.approval_decision_in_flight = False
+        if result.context_warning:
+            record.transcript.append(
+                NiceGUITranscriptEntry(
+                    role="system",
+                    text=result.context_warning,
+                    created_at=_now_iso(),
+                )
+            )
+        if result.status == "needs_continuation" and result.continuation_reason:
+            record.transcript.append(
+                NiceGUITranscriptEntry(
+                    role="system",
+                    text=result.continuation_reason,
+                    created_at=_now_iso(),
+                )
+            )
+        if result.final_response is not None:
+            record.transcript.append(
+                NiceGUITranscriptEntry(
+                    role="assistant",
+                    text=result.final_response.answer,
+                    final_response=result.final_response,
+                    created_at=_now_iso(),
+                )
+            )
+            record.confidence = result.final_response.confidence
+        elif result.status == "interrupted":
+            interrupted = next(
+                (
+                    message
+                    for message in reversed(result.new_messages)
+                    if message.role == "assistant"
+                    and message.completion_state == "interrupted"
+                ),
+                None,
+            )
+            record.transcript.append(
+                NiceGUITranscriptEntry(
+                    role="assistant" if interrupted is not None else "system",
+                    text=(
+                        interrupted.content
+                        if interrupted is not None
+                        else result.interruption_reason or "Interrupted."
+                    ),
+                    assistant_completion_state="interrupted",
+                    created_at=_now_iso(),
+                )
+            )
+        pending = turn_state.queued_follow_up_prompt
+        self._reset_turn_state(turn_state)
+        self._persist_record(record)
+        return pending
+
+    def _apply_turn_error(
+        self,
+        *,
+        session_id: str,
+        error_message: str,
+    ) -> str | None:
+        record = self.sessions[session_id]
+        turn_state = self.turn_state_for(session_id)
+        record.transcript.append(
+            NiceGUITranscriptEntry(
+                role="error",
+                text=_user_facing_turn_error_message(error_message),
+                created_at=_now_iso(),
+            )
+        )
+        pending = turn_state.queued_follow_up_prompt
+        self._reset_turn_state(turn_state)
+        self._persist_record(record)
+        return pending
+
+    def _reset_turn_state(self, turn_state: NiceGUITurnState) -> None:
+        pending = turn_state.queued_follow_up_prompt
+        turn_state.busy = False
+        turn_state.status_text = ""
+        turn_state.status_history = []
+        turn_state.pending_approval = None
+        turn_state.approval_decision_in_flight = False
+        turn_state.queued_follow_up_prompt = pending
+        turn_state.cancelling = False
+
+
+def _exposed_tool_names_for_runtime(
+    *,
+    tool_specs: dict[str, ToolSpec],
+    runtime: NiceGUIRuntimeConfig,
+    root: Path | None,
+    env: dict[str, str],
+) -> set[str]:
+    capability_groups = build_tool_capabilities(
+        tool_specs=tool_specs,
+        enabled_tools=set(runtime.enabled_tools),
+        root_path=runtime.root_path,
+        env=env,
+        allow_network=runtime.allow_network,
+        allow_filesystem=runtime.allow_filesystem and root is not None,
+        allow_subprocess=runtime.allow_subprocess and root is not None,
+        require_approval_for=set(runtime.require_approval_for),
+    )
+    return {
+        tool.tool_name
+        for group in capability_groups.values()
+        for tool in group
+        if tool.exposed_to_model
+    }
+
+
+def _serialize_workflow_event(
+    event: object,
+    *,
+    turn_number: int,
+    session_id: str,
+) -> NiceGUIQueuedEvent:
+    if isinstance(event, ChatWorkflowStatusEvent):
+        return NiceGUIQueuedEvent(
+            kind="status",
+            payload=event.model_dump(mode="json"),
+            turn_number=turn_number,
+            session_id=session_id,
+        )
+    if isinstance(event, ChatWorkflowApprovalEvent):
+        return NiceGUIQueuedEvent(
+            kind="approval_requested",
+            payload=event.model_dump(mode="json"),
+            turn_number=turn_number,
+            session_id=session_id,
+        )
+    if isinstance(event, ChatWorkflowApprovalResolvedEvent):
+        return NiceGUIQueuedEvent(
+            kind="approval_resolved",
+            payload=event.model_dump(mode="json"),
+            turn_number=turn_number,
+            session_id=session_id,
+        )
+    if isinstance(event, ChatWorkflowInspectorEvent):
+        return NiceGUIQueuedEvent(
+            kind="inspector",
+            payload=event.model_dump(mode="json"),
+            turn_number=turn_number,
+            session_id=session_id,
+        )
+    if isinstance(event, ChatWorkflowResultEvent):
+        return NiceGUIQueuedEvent(
+            kind="result",
+            payload=event.model_dump(mode="json"),
+            turn_number=turn_number,
+            session_id=session_id,
+        )
+    raise TypeError(f"Unsupported workflow event type: {type(event)!r}")
+
+
+def _worker_run_turn(handle: NiceGUIActiveTurnHandle) -> None:
+    try:
+        for event in handle.runner:
+            handle.event_queue.put(
+                _serialize_workflow_event(
+                    event,
+                    turn_number=handle.turn_number,
+                    session_id=handle.session_id,
+                )
+            )
+    except Exception as exc:
+        handle.event_queue.put(
+            NiceGUIQueuedEvent(
+                kind="error",
+                payload=str(exc),
+                turn_number=handle.turn_number,
+                session_id=handle.session_id,
+            )
+        )
+    finally:
+        handle.event_queue.put(
+            NiceGUIQueuedEvent(
+                kind="complete",
+                payload=None,
+                turn_number=handle.turn_number,
+                session_id=handle.session_id,
+            )
+        )
+
+
+def _approval_request_copy(approval: ChatWorkflowApprovalState) -> str:
+    return (
+        f"Approval required for `{approval.tool_name}`. "
+        f"Reason: {approval.policy_reason}"
+    )
+
+
+def _approval_resolution_copy(resolution: str) -> str:
+    return f"Tool approval {resolution}."
+
+
+def _user_facing_turn_error_message(error_message: str) -> str:
+    if "All provider mode attempts failed." in error_message:
+        return (
+            "Provider compatibility error. The endpoint did not return a usable "
+            f"structured response in any fallback mode. {error_message}"
+        )
+    return error_message
+
+
+def _title_from_prompt(prompt: str) -> str:
+    first_line = prompt.strip().splitlines()[0] if prompt.strip() else "New chat"
+    return first_line[:60] + ("..." if len(first_line) > 60 else "")
+
+
+__all__ = [
+    "NiceGUIActiveTurnHandle",
+    "NiceGUIChatController",
+    "NiceGUIQueuedEvent",
+    "NiceGUITurnState",
+    "default_runtime_config",
+]
