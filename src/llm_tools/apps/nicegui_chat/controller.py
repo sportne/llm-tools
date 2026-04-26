@@ -51,6 +51,9 @@ from llm_tools.workflow_api import (
     ChatWorkflowStatusEvent,
     ChatWorkflowTurnResult,
     ModelTurnProvider,
+    ProtectionConfig,
+    ProtectionPendingPrompt,
+    inspect_protection_corpus,
     run_interactive_chat_session_turn,
 )
 
@@ -156,6 +159,33 @@ def _interaction_protocol(provider: ModelTurnProvider) -> str:
     if _is_staged_schema_protocol(provider):
         return "staged_json"
     return "native_tools"
+
+
+def _nicegui_protection_is_ready(config: ProtectionConfig) -> bool:
+    """Return whether NiceGUI should engage workflow protection for a turn."""
+    if (
+        not config.enabled
+        or not config.allowed_sensitivity_labels
+        or not config.document_paths
+    ):
+        return False
+    report = inspect_protection_corpus(config)
+    return report.usable_document_count > 0
+
+
+def _protection_feedback_message(
+    *,
+    analysis_is_correct: bool,
+    expected_sensitivity_label: str | None = None,
+    rationale: str | None = None,
+) -> str:
+    """Serialize protection feedback for the shared chat runner."""
+    lines = [f"analysis_is_correct: {str(analysis_is_correct).lower()}"]
+    if expected_sensitivity_label:
+        lines.append(f"expected_sensitivity_label: {expected_sensitivity_label}")
+    if rationale:
+        lines.append(f"rationale: {rationale}")
+    return "\n".join(lines)
 
 
 def _effective_assistant_config(
@@ -454,7 +484,9 @@ class NiceGUIChatController:
             PROVIDER_API_KEY_FIELD
         )
 
-    def submit_prompt(self, prompt: str) -> str | None:
+    def submit_prompt(
+        self, prompt: str, *, show_in_transcript: bool = True
+    ) -> str | None:
         """Start a turn for the active session. Returns an error string when blocked."""
         cleaned = prompt.strip()
         if not cleaned:
@@ -468,10 +500,11 @@ class NiceGUIChatController:
         user_entry = NiceGUITranscriptEntry(
             role="user",
             text=cleaned,
+            show_in_transcript=show_in_transcript,
             created_at=_now_iso(),
         )
         record.transcript.append(user_entry)
-        if record.summary.title == "New chat":
+        if show_in_transcript and record.summary.title == "New chat":
             record.summary.title = _title_from_prompt(cleaned)
         self._persist_record(record)
         try:
@@ -571,6 +604,48 @@ class NiceGUIChatController:
         turn_state.status_text = "stopping"
         handle.runner.cancel()
         return True
+
+    def pending_protection_prompt(self) -> ProtectionPendingPrompt | None:
+        """Return the active session's unresolved protection challenge."""
+        return self.active_record.workflow_session_state.pending_protection_prompt
+
+    def submit_protection_accept(self) -> str | None:
+        """Accept the active protection ruling through the shared feedback path."""
+        if self.pending_protection_prompt() is None:
+            return "No protection challenge is pending."
+        return self.submit_prompt(
+            _protection_feedback_message(analysis_is_correct=True),
+            show_in_transcript=False,
+        )
+
+    def submit_protection_overrule(
+        self,
+        *,
+        expected_sensitivity_label: str,
+        rationale: str,
+    ) -> str | None:
+        """Record a protection correction and requeue the original request."""
+        pending = self.pending_protection_prompt()
+        if pending is None:
+            return "No protection challenge is pending."
+        cleaned_label = expected_sensitivity_label.strip()
+        cleaned_rationale = rationale.strip()
+        if not cleaned_label:
+            return "Expected category is required."
+        if not cleaned_rationale:
+            return "Explanation is required."
+        turn_state = self.active_turn_state
+        if turn_state.busy:
+            return "Wait for the current turn to finish."
+        turn_state.queued_follow_up_prompt = pending.original_user_message
+        return self.submit_prompt(
+            _protection_feedback_message(
+                analysis_is_correct=False,
+                expected_sensitivity_label=cleaned_label,
+                rationale=cleaned_rationale,
+            ),
+            show_in_transcript=False,
+        )
 
     def save_active_session(self) -> None:
         """Persist the active record and preferences."""
@@ -692,10 +767,18 @@ class NiceGUIChatController:
             root=root,
             env=self.effective_tool_env(runtime=runtime, session_id=session_id),
         )
-        protection_controller = build_protection_controller(
-            config=runtime.protection,
-            provider=provider,
-            environment=build_protection_environment(
+        protection_controller = None
+        protection_is_ready = _nicegui_protection_is_ready(runtime.protection)
+        has_pending_protection_prompt = (
+            session_state.pending_protection_prompt is not None
+        )
+        if protection_is_ready or has_pending_protection_prompt:
+            protection_config = (
+                runtime.protection
+                if runtime.protection.enabled
+                else runtime.protection.model_copy(update={"enabled": True})
+            )
+            protection_environment = build_protection_environment(
                 app_name="nicegui_chat",
                 model_name=runtime.model_name,
                 workspace=runtime.root_path,
@@ -703,8 +786,15 @@ class NiceGUIChatController:
                 allow_network=runtime.allow_network,
                 allow_filesystem=runtime.allow_filesystem and root is not None,
                 allow_subprocess=runtime.allow_subprocess and root is not None,
-            ),
-        )
+            )
+            protection_environment["allowed_sensitivity_labels"] = list(
+                runtime.protection.allowed_sensitivity_labels
+            )
+            protection_controller = build_protection_controller(
+                config=protection_config,
+                provider=provider,
+                environment=protection_environment,
+            )
         return run_interactive_chat_session_turn(
             user_message=user_message,
             session_state=session_state,

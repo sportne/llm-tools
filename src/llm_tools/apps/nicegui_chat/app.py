@@ -44,6 +44,11 @@ from llm_tools.apps.nicegui_chat.models import (
 from llm_tools.apps.nicegui_chat.store import SQLiteNiceGUIChatStore, default_db_path
 from llm_tools.llm_providers import ProviderModeStrategy
 from llm_tools.tool_api import SideEffectClass
+from llm_tools.workflow_api import (
+    ProtectionConfig,
+    ProtectionPendingPrompt,
+    inspect_protection_corpus,
+)
 
 NICEGUI_PROVIDER_OPTIONS = [
     ProviderPreset.OLLAMA.value,
@@ -65,6 +70,8 @@ AUTH_DISABLED_WARNING = (
     "WARNING: NiceGUI auth is disabled. Use --auth-mode local for normal local "
     "or hosted use."
 )
+PROTECTION_UNDEFINED_LABEL = "Undefined"
+PROTECTION_CORRECTIONS_FILENAME = ".llm-tools-protection-corrections.json"
 
 
 def _first_nonempty_text(*values: object) -> str:
@@ -153,6 +160,68 @@ def _format_workbench_duration(seconds: float | None) -> str:
         return f"{seconds:.1f} s"
     minutes, remainder = divmod(seconds, 60.0)
     return f"{int(minutes)}m {remainder:.0f}s"
+
+
+def _parse_information_security_categories(value: str) -> list[str]:
+    """Parse user-entered sensitivity labels while preserving declared order."""
+    labels: list[str] = []
+    seen: set[str] = set()
+    for raw_entry in value.replace(",", "\n").splitlines():
+        label = raw_entry.strip()
+        if label and label not in seen:
+            labels.append(label)
+            seen.add(label)
+    return labels
+
+
+def _format_information_security_level(config: ProtectionConfig) -> str:
+    """Return the compact header level for the active protection config."""
+    if (
+        not config.enabled
+        or not config.allowed_sensitivity_labels
+        or not config.document_paths
+    ):
+        return PROTECTION_UNDEFINED_LABEL
+    return "/".join(config.allowed_sensitivity_labels)
+
+
+def _format_information_security_label(config: ProtectionConfig) -> str:
+    """Return the visible information-security header label."""
+    return (
+        f"Information Security Settings: {_format_information_security_level(config)}"
+    )
+
+
+def _default_protection_corrections_path(corpus_directory: str) -> str:
+    """Return the hidden corrections sidecar path for a corpus directory."""
+    cleaned = corpus_directory.strip()
+    if not cleaned:
+        return ""
+    return str(Path(cleaned).expanduser() / PROTECTION_CORRECTIONS_FILENAME)
+
+
+def _protection_corpus_readiness_text(config: ProtectionConfig) -> str:
+    """Return a compact corpus readiness summary."""
+    if not config.enabled:
+        return "Protection is disabled."
+    if not config.document_paths:
+        return "Choose a corpus directory before protection can engage."
+    if not config.allowed_sensitivity_labels:
+        return "Add at least one allowed category before protection can engage."
+    report = inspect_protection_corpus(config)
+    if report.usable_document_count:
+        return (
+            f"Ready: {report.usable_document_count} document(s), "
+            f"{len(report.corpus.feedback_entries)} correction(s)."
+        )
+    return "Not ready: no readable protection documents were found."
+
+
+def _referenced_document_text(prompt: ProtectionPendingPrompt) -> str:
+    """Return referenced document IDs for a challenge dialog."""
+    if not prompt.referenced_document_ids:
+        return "No referenced document IDs."
+    return ", ".join(prompt.referenced_document_ids)
 
 
 def _provider_api_key_env_var(
@@ -713,6 +782,19 @@ def build_nicegui_chat_ui(  # noqa: C901
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
             max-width: 100%;
         }
+        .llmt-header-security {
+            flex: 1 1 auto; justify-content: center; min-width: 160px;
+            overflow: hidden;
+        }
+        .llmt-info-security-button {
+            max-width: 100%; min-height: 28px; padding: 0 8px;
+            border: 1px solid #d4d2ca;
+        }
+        body.body--dark .llmt-info-security-button { border-color: #4b4d47; }
+        .llmt-info-security-button .q-btn__content {
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            display: block; min-width: 0;
+        }
         .llmt-header-actions {
             flex: 0 0 auto; flex-wrap: nowrap; min-width: max-content;
         }
@@ -886,6 +968,7 @@ def build_nicegui_chat_ui(  # noqa: C901
     session_column: Any = None
     workbench_column: Any = None
     header_title: Any = None
+    information_security_button: Any = None
     status_chip: Any = None
     selected_tools_row: Any = None
     tool_menu_column: Any = None
@@ -916,6 +999,19 @@ def build_nicegui_chat_ui(  # noqa: C901
     tool_credentials_column: Any = None
     tool_credential_inputs: dict[str, Any] = {}
     tool_url_inputs: dict[str, Any] = {}
+    protection_enabled_switch: Any = None
+    protection_categories_input: Any = None
+    protection_corpus_input: Any = None
+    protection_corrections_input: Any = None
+    protection_readiness_label: Any = None
+    protection_issues_column: Any = None
+    protection_predicted_label: Any = None
+    protection_reasoning_label: Any = None
+    protection_refs_label: Any = None
+    protection_original_request: Any = None
+    protection_overrule_category_input: Any = None
+    protection_overrule_rationale_input: Any = None
+    protection_dialog_state: dict[str, str | None] = {"challenge_key": None}
     workspace_browser_label: Any = None
     workspace_browser_title: Any = None
     workspace_browser_column: Any = None
@@ -932,6 +1028,7 @@ def build_nicegui_chat_ui(  # noqa: C901
         render_transcript()
         render_workbench()
         render_approval()
+        render_protection_challenge()
 
     def active_runtime() -> NiceGUIRuntimeConfig:
         return controller.active_record.runtime
@@ -1072,6 +1169,49 @@ def build_nicegui_chat_ui(  # noqa: C901
     def open_settings_dialog() -> None:
         sync_settings_inputs()
         dialogs["settings"].open()
+
+    def sync_information_security_inputs() -> None:
+        config = active_runtime().protection
+        if protection_enabled_switch is not None:
+            protection_enabled_switch.value = config.enabled
+        if protection_categories_input is not None:
+            protection_categories_input.value = "\n".join(
+                config.allowed_sensitivity_labels
+            )
+        corpus_directory = config.document_paths[0] if config.document_paths else ""
+        if protection_corpus_input is not None:
+            protection_corpus_input.value = corpus_directory
+        if protection_corrections_input is not None:
+            protection_corrections_input.value = (
+                config.corrections_path
+                or _default_protection_corrections_path(corpus_directory)
+            )
+        render_information_security_readiness(config)
+
+    def open_information_security_dialog() -> None:
+        sync_information_security_inputs()
+        dialogs["information_security"].open()
+
+    def render_information_security_readiness(config: ProtectionConfig) -> None:
+        if protection_readiness_label is not None:
+            protection_readiness_label.set_text(
+                _protection_corpus_readiness_text(config)
+            )
+        if protection_issues_column is None:
+            return
+        protection_issues_column.clear()
+        if not config.enabled or not config.document_paths:
+            return
+        report = inspect_protection_corpus(config)
+        if not report.issues:
+            return
+        with protection_issues_column:
+            for issue in report.issues[:5]:
+                ui.label(issue.message).classes("text-xs llmt-muted")
+            if len(report.issues) > 5:
+                ui.label(f"{len(report.issues) - 5} more issue(s)").classes(
+                    "text-xs llmt-muted"
+                )
 
     def open_provider_dialog() -> None:
         runtime = active_runtime()
@@ -1352,6 +1492,12 @@ def build_nicegui_chat_ui(  # noqa: C901
             database_path_input.value = str(Path(path) / filename)
         elif workspace_browser_target["value"] == "quick":
             workspace_quick_input.value = path
+        elif workspace_browser_target["value"] == "protection_corpus":
+            protection_corpus_input.value = path
+            if not str(protection_corrections_input.value or "").strip():
+                protection_corrections_input.value = (
+                    _default_protection_corrections_path(path)
+                )
         else:
             workspace_input.value = path
 
@@ -1429,6 +1575,9 @@ def build_nicegui_chat_ui(  # noqa: C901
         runtime = active_runtime()
         turn_state = controller.active_turn_state
         header_title.set_text(controller.active_record.summary.title)
+        information_security_button.set_text(
+            _format_information_security_label(runtime.protection)
+        )
         status_chip.set_text(turn_state.status_text or "ready")
         render_selected_tools()
         render_tool_menu()
@@ -1528,6 +1677,27 @@ def build_nicegui_chat_ui(  # noqa: C901
         approval_tool_label.set_text(f"{approval.tool_name}: {approval.policy_reason}")
         approval_args.set_content(approval.redacted_arguments)
         dialogs["approval"].open()
+
+    def render_protection_challenge() -> None:
+        prompt = controller.pending_protection_prompt()
+        if prompt is None:
+            protection_dialog_state["challenge_key"] = None
+            dialogs["protection_challenge"].close()
+            return
+        challenge_key = f"{prompt.created_at}:{prompt.original_user_message}"
+        protection_predicted_label.set_text(
+            prompt.predicted_sensitivity_label or "Unspecified"
+        )
+        protection_reasoning_label.set_text(prompt.reasoning)
+        protection_refs_label.set_text(_referenced_document_text(prompt))
+        protection_original_request.set_text(prompt.original_user_message)
+        if protection_dialog_state["challenge_key"] != challenge_key:
+            protection_overrule_category_input.value = (
+                prompt.predicted_sensitivity_label or ""
+            )
+            protection_overrule_rationale_input.value = ""
+            protection_dialog_state["challenge_key"] = challenge_key
+        dialogs["protection_challenge"].open()
 
     def new_chat(temporary: bool) -> None:
         controller.create_session(temporary=temporary)
@@ -1765,6 +1935,48 @@ def build_nicegui_chat_ui(  # noqa: C901
         apply_settings()
         dialogs["settings"].close()
 
+    def apply_information_security_settings() -> None:
+        protection = active_runtime().protection
+        corpus_directory = str(protection_corpus_input.value or "").strip()
+        corrections_path = str(protection_corrections_input.value or "").strip()
+        protection.enabled = bool(protection_enabled_switch.value)
+        protection.allowed_sensitivity_labels = _parse_information_security_categories(
+            str(protection_categories_input.value or "")
+        )
+        protection.document_paths = [corpus_directory] if corpus_directory else []
+        protection.corrections_path = (
+            corrections_path
+            or _default_protection_corrections_path(corpus_directory)
+            or None
+        )
+        controller.save_active_session()
+        refresh_all()
+
+    def apply_information_security_settings_and_close() -> None:
+        apply_information_security_settings()
+        dialogs["information_security"].close()
+
+    def accept_protection_ruling() -> None:
+        error = controller.submit_protection_accept()
+        if error:
+            ui.notify(error, type="negative")
+            return
+        dialogs["protection_challenge"].close()
+        refresh_all()
+
+    def overrule_protection_ruling() -> None:
+        error = controller.submit_protection_overrule(
+            expected_sensitivity_label=str(
+                protection_overrule_category_input.value or ""
+            ),
+            rationale=str(protection_overrule_rationale_input.value or ""),
+        )
+        if error:
+            ui.notify(error, type="negative")
+            return
+        dialogs["protection_challenge"].close()
+        refresh_all()
+
     def approve_current() -> None:
         controller.resolve_approval(approved=True)
         dialogs["approval"].close()
@@ -1863,12 +2075,19 @@ def build_nicegui_chat_ui(  # noqa: C901
             source_input = database_path_input
         elif workspace_browser_target["value"] == "quick":
             source_input = workspace_quick_input
+        elif workspace_browser_target["value"] == "protection_corpus":
+            source_input = protection_corpus_input
         else:
             source_input = workspace_input
         fallback = (
             str(controller.store.db_path)
             if workspace_browser_target["value"] == "database"
-            else active_runtime().root_path
+            else (
+                active_runtime().protection.document_paths[0]
+                if workspace_browser_target["value"] == "protection_corpus"
+                and active_runtime().protection.document_paths
+                else active_runtime().root_path
+            )
         )
         raw = str(source_input.value or fallback or Path.cwd())
         try:
@@ -1916,11 +2135,12 @@ def build_nicegui_chat_ui(  # noqa: C901
     def open_workspace_browser(*, target: str = "settings") -> None:
         workspace_browser_target["value"] = target
         if workspace_browser_title is not None:
-            workspace_browser_title.set_text(
-                "Select Database Folder"
-                if target == "database"
-                else "Select Workspace Root"
-            )
+            title = "Select Workspace Root"
+            if target == "database":
+                title = "Select Database Folder"
+            elif target == "protection_corpus":
+                title = "Select Protection Corpus"
+            workspace_browser_title.set_text(title)
         render_workspace_browser(workspace_start_path())
         dialogs["workspace_browser"].open()
 
@@ -1943,6 +2163,17 @@ def build_nicegui_chat_ui(  # noqa: C901
             ):
                 with ui.column().classes("llmt-header-title gap-0"):
                     header_title = ui.label("").classes("text-base")
+                with ui.row().classes("llmt-header-security items-center"):
+                    information_security_button = (
+                        ui.button(
+                            _format_information_security_label(
+                                controller.active_record.runtime.protection
+                            ),
+                            on_click=open_information_security_dialog,
+                        )
+                        .props("flat no-caps")
+                        .classes("llmt-info-security-button")
+                    )
                 with ui.row().classes("llmt-header-actions items-center gap-2"):
                     status_chip = ui.badge("ready").props("outline")
                     if controller.current_user is not None:
@@ -2159,6 +2390,52 @@ def build_nicegui_chat_ui(  # noqa: C901
             ui.button("Cancel", on_click=settings_dialog.close).props("flat")
             ui.button("Apply", on_click=apply_settings_and_close)
 
+    with (
+        ui.dialog() as information_security_dialog,
+        ui.card().classes("w-[560px] max-h-[88vh]"),
+    ):
+        dialogs["information_security"] = information_security_dialog
+        ui.label("Information Security Settings").classes("text-lg")
+        with (
+            ui.scroll_area().classes("llmt-settings-body"),
+            ui.column().classes("w-full gap-2 q-pr-sm"),
+        ):
+            protection_enabled_switch = ui.switch(
+                "Enable protection for this chat",
+                value=controller.active_record.runtime.protection.enabled,
+            ).classes("w-full")
+            protection_categories_input = (
+                ui.textarea(
+                    "Allowed categories",
+                    placeholder="TRIVIAL\nMINOR",
+                    value="\n".join(
+                        controller.active_record.runtime.protection.allowed_sensitivity_labels
+                    ),
+                )
+                .props("autogrow outlined")
+                .classes("w-full")
+            )
+            with ui.row().classes("w-full items-end gap-2 no-wrap"):
+                protection_corpus_input = ui.input(
+                    "Protection corpus directory"
+                ).classes("grow")
+                ui.button(
+                    icon="folder_open",
+                    on_click=lambda: open_workspace_browser(target="protection_corpus"),
+                ).props("flat round color=primary")
+            protection_corrections_input = ui.input(
+                "Corrections sidecar path",
+                placeholder="<corpus>/.llm-tools-protection-corrections.json",
+            ).classes("w-full")
+            protection_readiness_label = ui.label("").classes("text-sm")
+            with ui.column().classes("w-full gap-1") as protection_issues_column:
+                pass
+        with ui.row().classes("justify-end w-full"):
+            ui.button("Cancel", on_click=information_security_dialog.close).props(
+                "flat"
+            )
+            ui.button("Apply", on_click=apply_information_security_settings_and_close)
+
     with ui.dialog() as provider_settings_dialog, ui.card().classes("w-[460px]"):
         dialogs["provider_settings"] = provider_settings_dialog
         ui.label("Provider").classes("text-lg")
@@ -2263,6 +2540,44 @@ def build_nicegui_chat_ui(  # noqa: C901
         with ui.row().classes("justify-end w-full"):
             ui.button("Deny", on_click=deny_current).props("flat color=negative")
             ui.button("Approve", on_click=approve_current).props("color=primary")
+
+    with (
+        ui.dialog() as protection_challenge_dialog,
+        ui.card().classes("w-[620px] max-h-[88vh]"),
+    ):
+        dialogs["protection_challenge"] = protection_challenge_dialog
+        ui.label("Information Security Review").classes("text-lg")
+        with (
+            ui.scroll_area().classes("llmt-settings-body"),
+            ui.column().classes("w-full gap-3 q-pr-sm"),
+        ):
+            with ui.column().classes("w-full gap-1"):
+                ui.label("Predicted category").classes("text-xs llmt-muted")
+                protection_predicted_label = ui.label("").classes("text-base")
+            with ui.column().classes("w-full gap-1"):
+                ui.label("Justification").classes("text-xs llmt-muted")
+                protection_reasoning_label = ui.label("").classes("text-sm")
+            with ui.column().classes("w-full gap-1"):
+                ui.label("Referenced documents").classes("text-xs llmt-muted")
+                protection_refs_label = ui.label("").classes("text-sm")
+            with ui.column().classes("w-full gap-1"):
+                ui.label("Original request").classes("text-xs llmt-muted")
+                protection_original_request = ui.label("").classes("text-sm")
+            with ui.column().classes("llmt-settings-section w-full gap-2"):
+                ui.label("Overrule ruling").classes("text-base")
+                protection_overrule_category_input = ui.input(
+                    "Expected category"
+                ).classes("w-full")
+                protection_overrule_rationale_input = (
+                    ui.textarea("Explanation")
+                    .props("autogrow outlined")
+                    .classes("w-full")
+                )
+        with ui.row().classes("justify-end w-full"):
+            ui.button("Accept ruling", on_click=accept_protection_ruling).props("flat")
+            ui.button("Overrule", on_click=overrule_protection_ruling).props(
+                "color=primary"
+            )
 
     refresh_all()
     ui.timer(0.25, drain_timer)

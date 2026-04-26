@@ -29,6 +29,7 @@ class ProtectionConfig(BaseModel):
 
     enabled: bool = False
     document_paths: list[str] = Field(default_factory=list)
+    allowed_sensitivity_labels: list[str] = Field(default_factory=list)
     corrections_path: str | None = None
     challenge_interactively: bool = True
     review_final_answers: bool = True
@@ -39,6 +40,18 @@ class ProtectionConfig(BaseModel):
     @classmethod
     def validate_document_paths(cls, value: list[str]) -> list[str]:
         cleaned = [entry.strip() for entry in value if entry.strip()]
+        return cleaned
+
+    @field_validator("allowed_sensitivity_labels")
+    @classmethod
+    def validate_allowed_sensitivity_labels(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for entry in value:
+            label = entry.strip()
+            if label and label not in seen:
+                cleaned.append(label)
+                seen.add(label)
         return cleaned
 
     @field_validator("corrections_path")

@@ -4,7 +4,7 @@ import runpy
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from pydantic import BaseModel
@@ -18,14 +18,19 @@ from llm_tools.apps.nicegui_chat.app import (
     NICEGUI_PROVIDER_OPTIONS,
     _can_admin_disable_user,
     _composer_action_icon,
+    _default_protection_corrections_path,
     _discover_model_names,
     _event_payload_text,
     _extract_model_names_from_models_payload,
     _first_nonempty_text,
+    _format_information_security_label,
+    _format_information_security_level,
     _format_workbench_duration,
     _is_admin_user,
     _is_tool_url_setting,
     _models_endpoint_url,
+    _parse_information_security_categories,
+    _protection_corpus_readiness_text,
     _provider_api_key_env_var,
     _runtime_summary_parts,
     _runtime_summary_text,
@@ -43,6 +48,7 @@ from llm_tools.apps.nicegui_chat.controller import (
     PROVIDER_API_KEY_FIELD,
     NiceGUIChatController,
     NiceGUIQueuedEvent,
+    _nicegui_protection_is_ready,
     _serialize_workflow_event,
     _workbench_inspector_title,
 )
@@ -60,6 +66,8 @@ from llm_tools.workflow_api import (
     ChatWorkflowResultEvent,
     ChatWorkflowStatusEvent,
     ChatWorkflowTurnResult,
+    ProtectionConfig,
+    ProtectionPendingPrompt,
 )
 
 
@@ -359,6 +367,47 @@ def test_composer_runtime_helpers() -> None:
         SideEffectClass.EXTERNAL_READ,
         SideEffectClass.EXTERNAL_WRITE,
     ]
+
+
+def test_information_security_helpers(tmp_path: Path) -> None:
+    assert _parse_information_security_categories(" TRIVIAL\nMINOR,TRIVIAL\n") == [
+        "TRIVIAL",
+        "MINOR",
+    ]
+    assert _default_protection_corrections_path(str(tmp_path)) == str(
+        tmp_path / ".llm-tools-protection-corrections.json"
+    )
+    disabled = ProtectionConfig(enabled=False)
+    assert _format_information_security_level(disabled) == "Undefined"
+    assert _format_information_security_label(disabled).endswith("Undefined")
+    incomplete = ProtectionConfig(
+        enabled=True,
+        allowed_sensitivity_labels=["TRIVIAL", "MINOR"],
+    )
+    assert _format_information_security_level(incomplete) == "Undefined"
+    configured = ProtectionConfig(
+        enabled=True,
+        document_paths=[str(tmp_path)],
+        allowed_sensitivity_labels=["TRIVIAL", "MINOR"],
+    )
+    assert _format_information_security_level(configured) == "TRIVIAL/MINOR"
+
+
+def test_protection_readiness_requires_labels_and_corpus(tmp_path: Path) -> None:
+    document = tmp_path / "guidance.md"
+    document.write_text("TRIVIAL information may be discussed.", encoding="utf-8")
+    ready = ProtectionConfig(
+        enabled=True,
+        document_paths=[str(tmp_path)],
+        allowed_sensitivity_labels=["TRIVIAL"],
+    )
+    assert _nicegui_protection_is_ready(ready) is True
+    assert _protection_corpus_readiness_text(ready).startswith("Ready:")
+    no_labels = ready.model_copy(update={"allowed_sensitivity_labels": []})
+    assert _nicegui_protection_is_ready(no_labels) is False
+    assert "Add at least one allowed category" in _protection_corpus_readiness_text(
+        no_labels
+    )
 
 
 def test_workbench_inspector_titles_are_directional() -> None:
@@ -912,6 +961,71 @@ def test_controller_empty_submit_and_idle_controls(tmp_path: Path) -> None:
     assert controller.cancel_active_turn() is False
 
 
+def test_controller_protection_accept_and_overrule_feedback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _controller(tmp_path, _FakeProvider([]))
+    pending = ProtectionPendingPrompt(
+        original_user_message="show the protected plan",
+        reasoning="The request may exceed the allowed category.",
+        predicted_sensitivity_label="MAJOR",
+    )
+    controller.active_record.workflow_session_state.pending_protection_prompt = pending
+    submitted: list[str] = []
+
+    def capture_prompt(prompt: str, **_kwargs: object) -> None:
+        submitted.append(prompt)
+
+    monkeypatch.setattr(
+        controller,
+        "submit_prompt",
+        capture_prompt,
+    )
+
+    assert controller.pending_protection_prompt() == pending
+    assert controller.submit_protection_accept() is None
+    assert submitted[-1] == "analysis_is_correct: true"
+    assert (
+        controller.submit_protection_overrule(
+            expected_sensitivity_label="MINOR",
+            rationale="This is already cleared for MINOR.",
+        )
+        is None
+    )
+    assert "analysis_is_correct: false" in submitted[-1]
+    assert "expected_sensitivity_label: MINOR" in submitted[-1]
+    assert controller.active_turn_state.queued_follow_up_prompt == (
+        "show the protected plan"
+    )
+
+
+def test_controller_protection_overrule_requires_fields(tmp_path: Path) -> None:
+    controller = _controller(tmp_path, _FakeProvider([]))
+    controller.active_record.workflow_session_state.pending_protection_prompt = (
+        ProtectionPendingPrompt(
+            original_user_message="show the protected plan",
+            reasoning="The request may exceed the allowed category.",
+            predicted_sensitivity_label="MAJOR",
+        )
+    )
+
+    assert (
+        controller.submit_protection_overrule(
+            expected_sensitivity_label="",
+            rationale="because",
+        )
+        == "Expected category is required."
+    )
+    assert (
+        controller.submit_protection_overrule(
+            expected_sensitivity_label="MINOR",
+            rationale="",
+        )
+        == "Explanation is required."
+    )
+
+
 def test_controller_busy_turn_queues_follow_up(tmp_path: Path) -> None:
     controller = _controller(
         tmp_path,
@@ -991,7 +1105,9 @@ def test_controller_manual_events_cover_non_completed_paths(tmp_path: Path) -> N
     assert turn_state.status_text == "thinking"
     turn_state.cancelling = False
 
-    inspector_event_times = {
+    inspector_event_times: dict[
+        Literal["provider_messages", "parsed_response"], str
+    ] = {
         "provider_messages": "2026-04-26T10:00:03+00:00",
         "parsed_response": "2026-04-26T10:00:05+00:00",
     }
