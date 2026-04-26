@@ -939,7 +939,7 @@ def test_chat_session_runner_retries_ungrounded_repo_answer_with_tools(
         [
             ParsedModelResponse(
                 final_response=ChatFinalResponse(
-                    answer="The app probably wires state through Streamlit session state."
+                    answer="The app probably wires state through the chat controller."
                 ).model_dump(mode="json")
             ),
             ParsedModelResponse(
@@ -952,7 +952,7 @@ def test_chat_session_runner_retries_ungrounded_repo_answer_with_tools(
             ),
             ParsedModelResponse(
                 final_response=ChatFinalResponse(
-                    answer="It wires state through Streamlit session state.",
+                    answer="It wires state through the chat controller.",
                     citations=[{"source_path": "src/app.py", "line_start": 1}],
                 ).model_dump(mode="json")
             ),
@@ -992,7 +992,7 @@ def test_chat_session_runner_retries_ungrounded_repo_answer_with_tools(
     assert result_event.result.final_response is not None
     assert (
         result_event.result.final_response.answer
-        == "It wires state through Streamlit session state."
+        == "It wires state through the chat controller."
     )
 
 

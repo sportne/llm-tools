@@ -1,6 +1,6 @@
 # Enterprise-data assistant chat for Jira, Confluence, Bitbucket, and GitLab.
 # Requires the remote service env vars used by those tools, and network access
-# still must be enabled per session in the Streamlit sidebar.
+# still must be enabled per session in the NiceGUI settings.
 llm:
   provider: custom_openai_compatible
   provider_mode_strategy: json

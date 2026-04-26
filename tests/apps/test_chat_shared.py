@@ -15,7 +15,7 @@ from llm_tools.apps.chat_presentation import (
     format_transcript_text,
     pretty_json,
 )
-from llm_tools.apps.streamlit_models import StreamlitPreferences, StreamlitRuntimeConfig
+from llm_tools.apps.nicegui_chat.models import NiceGUIPreferences, NiceGUIRuntimeConfig
 from llm_tools.llm_providers import ProviderModeStrategy
 from llm_tools.tool_api.redaction import RedactionConfig
 from llm_tools.workflow_api import ChatCitation, ChatFinalResponse
@@ -59,8 +59,8 @@ def test_chat_config_validation_and_metadata() -> None:
         ChatPolicyConfig(enabled_tools=["read_file", " "])
 
 
-def test_streamlit_models_validate_and_normalize() -> None:
-    runtime = StreamlitRuntimeConfig(
+def test_nicegui_runtime_models_validate_and_normalize() -> None:
+    runtime = NiceGUIRuntimeConfig(
         model_name="  demo  ",
         api_base_url="  ",
         root_path="  ",
@@ -73,14 +73,14 @@ def test_streamlit_models_validate_and_normalize() -> None:
     assert runtime.enabled_tools == ["read_file", "search_text"]
     assert runtime.provider_mode_strategy.value == "prompt_tools"
 
-    assert StreamlitRuntimeConfig().protection.enabled is False
+    assert NiceGUIRuntimeConfig().protection.enabled is False
 
     with pytest.raises(ValueError):
-        StreamlitRuntimeConfig(model_name="   ")
+        NiceGUIRuntimeConfig(model_name="   ")
     with pytest.raises(ValueError):
-        StreamlitRuntimeConfig(enabled_tools=["read_file", " "])
+        NiceGUIRuntimeConfig(enabled_tools=["read_file", " "])
 
-    prefs = StreamlitPreferences(
+    prefs = NiceGUIPreferences(
         recent_roots=["  /a  ", ""],
         recent_models={" ollama ": [" gemma ", " "]},
         recent_base_urls={" ": ["skip"], "openai": [" https://api.example.com ", " "]},

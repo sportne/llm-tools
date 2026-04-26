@@ -16,8 +16,8 @@ from urllib.request import Request, urlopen
 from nicegui import app as nicegui_app
 
 from llm_tools.apps.assistant_config import (
-    StreamlitAssistantConfig,
-    load_streamlit_assistant_config,
+    AssistantConfig,
+    load_assistant_config,
 )
 from llm_tools.apps.assistant_tool_capabilities import (
     AssistantToolCapability,
@@ -393,12 +393,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def resolve_assistant_config(args: argparse.Namespace) -> StreamlitAssistantConfig:
+def resolve_assistant_config(args: argparse.Namespace) -> AssistantConfig:
     """Resolve config file and CLI overrides."""
     base_config = (
-        load_streamlit_assistant_config(args.config)
+        load_assistant_config(args.config)
         if args.config is not None
-        else StreamlitAssistantConfig()
+        else AssistantConfig()
     )
     raw = base_config.model_dump(mode="python")
     raw.setdefault("llm", {})
@@ -436,12 +436,12 @@ def resolve_assistant_config(args: argparse.Namespace) -> StreamlitAssistantConf
         value = getattr(args, field_name)
         if value is not None:
             raw["tool_limits"][field_name] = value
-    return StreamlitAssistantConfig.model_validate(raw)
+    return AssistantConfig.model_validate(raw)
 
 
 def resolve_root_argument(
     args: argparse.Namespace,
-    config: StreamlitAssistantConfig,
+    config: AssistantConfig,
 ) -> Path | None:
     """Resolve the workspace root from CLI or config."""
     candidate = args.directory_override or args.directory
@@ -456,7 +456,7 @@ def resolve_root_argument(
 def run_nicegui_chat_app(
     *,
     root_path: Path | None,
-    config: StreamlitAssistantConfig,
+    config: AssistantConfig,
     db_path: Path | None = None,
     db_key_file: Path | None = None,
     user_key_file: Path | None = None,
@@ -568,7 +568,7 @@ def clear_hosted_session(auth_provider: LocalAuthProvider | None) -> None:
 def render_hosted_nicegui_page(
     *,
     store: SQLiteNiceGUIChatStore,
-    config: StreamlitAssistantConfig,
+    config: AssistantConfig,
     root_path: Path | None,
     hosted_config: NiceGUIHostedConfig,
     auth_provider: LocalAuthProvider,

@@ -1,3 +1,3 @@
 """Optional application layers built on top of the llm-tools library."""
 
-__all__ = ["harness_cli", "nicegui_chat", "streamlit_assistant", "streamlit_models"]
+__all__ = ["harness_cli", "nicegui_chat"]

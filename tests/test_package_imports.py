@@ -29,7 +29,8 @@ def test_pyproject_includes_current_app_runtime_dependencies_in_base_install() -
     pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
     dependencies = pyproject["project"]["dependencies"]
 
-    assert any(dep.startswith("streamlit>=") for dep in dependencies)
+    assert any(dep.startswith("nicegui>=") for dep in dependencies)
+    assert all(not dep.startswith("streamlit") for dep in dependencies)
     assert any(dep.startswith("PyYAML>=") for dep in dependencies)
 
 

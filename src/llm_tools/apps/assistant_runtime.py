@@ -1,6 +1,6 @@
 """Runtime helpers for the assistant-focused app surfaces."""
 
-from llm_tools.apps.assistant_config import StreamlitAssistantConfig
+from llm_tools.apps.assistant_config import AssistantConfig
 from llm_tools.apps.assistant_execution import (
     build_assistant_context,
     build_assistant_policy,
@@ -36,7 +36,7 @@ from llm_tools.tool_api import ToolRegistry
 
 def build_live_harness_provider(
     *,
-    config: StreamlitAssistantConfig,
+    config: AssistantConfig,
     provider_config: ChatLLMConfig,
     model_name: str,
     api_key: str | None,
@@ -60,7 +60,7 @@ def build_live_harness_provider(
         config=config.protection,
         provider=provider,
         environment=build_protection_environment(
-            app_name="streamlit_assistant_research",
+            app_name="nicegui_chat_research",
             model_name=model_name,
             workspace=workspace,
             enabled_tools=enabled_tool_names,

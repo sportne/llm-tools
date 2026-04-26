@@ -2,7 +2,7 @@
 
 `llm-tools` includes multiple sensitive execution surfaces: local filesystem
 tools, subprocess-backed Git helpers, remote enterprise read integrations,
-structured provider calls, a Streamlit assistant client, and durable
+structured provider calls, a NiceGUI assistant client, and durable
 harness-backed research sessions. Treat configs, examples, caches, and
 persisted session state as part of the security surface.
 
@@ -23,7 +23,7 @@ Security-sensitive shipped surfaces include:
 - filesystem, subprocess, and network-capable tools
 - OpenAI-compatible provider transport
 - persisted harness sessions and replay data
-- the Streamlit assistant and harness CLI entrypoints
+- the NiceGUI assistant and harness CLI entrypoints
 - the NiceGUI chat client, including optional hosted multi-user mode
 
 ## Operational guidance
@@ -39,13 +39,13 @@ Runtime dependency exposure includes:
 - `markitdown` for office and document conversion during read-oriented
   filesystem access
 - `mpxj` plus Java for Microsoft Project file reads
-- `streamlit` and `PyYAML` for the shipped assistant UX and config loading
+- `nicegui` and `PyYAML` for the shipped assistant UX and config loading
 
 Only enable the integrations you actually need in the current environment.
 
 ### Assistant permissions and approvals
 
-In `llm_tools.apps.streamlit_assistant`:
+In `llm_tools.apps.nicegui_chat`:
 
 - selecting a workspace root only picks the directory available to local file
   and subprocess tools
@@ -64,7 +64,7 @@ settings into the new session.
 Prefer one of these patterns for credentials:
 
 - environment variables consumed by providers or integrations
-- the Streamlit assistant's session-only API-key entry
+- the NiceGUI assistant's session-only API-key entry
 - the NiceGUI chat client's session-scoped credential entry
 
 Do not commit secrets into assistant YAML configs, scripted harness payloads, or
@@ -138,8 +138,8 @@ credentials.
 
 Default storage locations:
 
-- Streamlit assistant state: `~/.llm-tools/assistant/streamlit`
-- Streamlit assistant research store: `~/.llm-tools/assistant/streamlit/research`
+- NiceGUI assistant state: `~/.llm-tools/assistant/nicegui/chat.sqlite3`
+- NiceGUI assistant key files: `~/.llm-tools/assistant/nicegui/hosted`
 - Harness CLI state: `~/.llm-tools/harness`
 
 Cache locations are split by feature:
@@ -194,8 +194,8 @@ turn is dropped and replayed.
 
 Protection-triggered purge is broader than final-answer replacement. Persisted
 tool-result payloads, logs, artifacts, and execution-record outputs are scrubbed
-from stored harness turns so replay, raw inspection payloads, and Streamlit
-research detail views do not re-render the protected material.
+from stored harness turns so replay, raw inspection payloads, and NiceGUI
+deep-task detail views do not re-render the protected material.
 
 ### Remote enterprise tools
 
@@ -221,7 +221,7 @@ Open work:
 - `workflow_api` and model mediation: identify remaining attack paths where
   model-controlled content could trigger unexpected tool execution, unbounded
   work, or sensitive data disclosure
-- `apps`: finish review of shared app config, prompt helpers, `streamlit_assistant`,
+- `apps`: finish review of shared app config, prompt helpers, `nicegui_chat`,
   app compatibility surfaces, and `harness_cli`
 - project-wide: re-run relevant tests for confirmed security issues and produce
   a final confidence summary

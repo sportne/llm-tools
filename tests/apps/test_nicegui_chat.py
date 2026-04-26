@@ -11,7 +11,7 @@ from typing import Any, Literal
 import pytest
 from pydantic import BaseModel
 
-from llm_tools.apps.assistant_config import StreamlitAssistantConfig
+from llm_tools.apps.assistant_config import AssistantConfig
 from llm_tools.apps.chat_config import ProviderPreset
 from llm_tools.apps.nicegui_chat import app as nicegui_app_module
 from llm_tools.apps.nicegui_chat.app import (
@@ -150,7 +150,7 @@ def _controller(
     store.initialize()
     return NiceGUIChatController(
         store=store,
-        config=StreamlitAssistantConfig(),
+        config=AssistantConfig(),
         root_path=tmp_path,
         provider_factory=lambda _runtime: provider,
     )
@@ -324,7 +324,7 @@ def test_hosted_page_routes_first_admin_login_and_chat(
 
     nicegui_app_module.render_hosted_nicegui_page(
         store=store,
-        config=StreamlitAssistantConfig(),
+        config=AssistantConfig(),
         root_path=tmp_path,
         hosted_config=NiceGUIHostedConfig(auth_mode="local"),
         auth_provider=auth,
@@ -334,7 +334,7 @@ def test_hosted_page_routes_first_admin_login_and_chat(
     user = auth.create_user(username="admin", password=admin_password, role="admin")
     nicegui_app_module.render_hosted_nicegui_page(
         store=store,
-        config=StreamlitAssistantConfig(),
+        config=AssistantConfig(),
         root_path=tmp_path,
         hosted_config=NiceGUIHostedConfig(auth_mode="local"),
         auth_provider=auth,
@@ -344,7 +344,7 @@ def test_hosted_page_routes_first_admin_login_and_chat(
     nicegui_app_module._set_hosted_storage_values(session_id, token)
     nicegui_app_module.render_hosted_nicegui_page(
         store=store,
-        config=StreamlitAssistantConfig(),
+        config=AssistantConfig(),
         root_path=tmp_path,
         hosted_config=NiceGUIHostedConfig(auth_mode="local"),
         auth_provider=auth,
@@ -654,11 +654,11 @@ def test_cli_config_resolution_covers_runtime_overrides(tmp_path: Path) -> None:
 def test_root_resolution_uses_config_default_and_none() -> None:
     parser = build_parser()
     no_root_args = parser.parse_args([])
-    config_with_root = StreamlitAssistantConfig.model_validate(
+    config_with_root = AssistantConfig.model_validate(
         {"workspace": {"default_root": "."}}
     )
 
-    assert resolve_root_argument(no_root_args, StreamlitAssistantConfig()) is None
+    assert resolve_root_argument(no_root_args, AssistantConfig()) is None
     assert resolve_root_argument(no_root_args, config_with_root) == Path(".").resolve()
 
 
@@ -912,7 +912,7 @@ def test_controller_restores_deep_task_pending_approval(
 
     reloaded = NiceGUIChatController(
         store=controller.store,
-        config=StreamlitAssistantConfig(),
+        config=AssistantConfig(),
         root_path=tmp_path,
         provider_factory=lambda _runtime: _FakeProvider([]),
     )
@@ -1019,7 +1019,7 @@ def test_controller_session_secrets_are_in_memory_and_session_scoped(
 
     reloaded = NiceGUIChatController(
         store=controller.store,
-        config=StreamlitAssistantConfig(),
+        config=AssistantConfig(),
         root_path=tmp_path,
         provider_factory=lambda _runtime: _FakeProvider([]),
     )
@@ -1040,7 +1040,7 @@ def test_controller_hosted_secrets_are_memory_only_and_env_isolated(
     user = auth.create_user(username="admin", password=credential_value, role="admin")
     controller = NiceGUIChatController(
         store=store,
-        config=StreamlitAssistantConfig(),
+        config=AssistantConfig(),
         root_path=tmp_path,
         provider_factory=lambda _runtime: _FakeProvider([]),
         current_user=user,
@@ -1058,7 +1058,7 @@ def test_controller_hosted_secrets_are_memory_only_and_env_isolated(
 
     reloaded = NiceGUIChatController(
         store=store,
-        config=StreamlitAssistantConfig(),
+        config=AssistantConfig(),
         root_path=tmp_path,
         provider_factory=lambda _runtime: _FakeProvider([]),
         current_user=user,
@@ -1103,7 +1103,7 @@ def test_hosted_controller_cannot_switch_database(tmp_path: Path) -> None:
     user = auth.create_user(username="admin", password=password, role="admin")
     controller = NiceGUIChatController(
         store=store,
-        config=StreamlitAssistantConfig(),
+        config=AssistantConfig(),
         root_path=tmp_path,
         provider_factory=lambda _runtime: _FakeProvider([]),
         current_user=user,
@@ -1123,7 +1123,7 @@ def test_controller_loads_existing_session_and_deletes_active_session(
 
     controller = NiceGUIChatController(
         store=store,
-        config=StreamlitAssistantConfig(),
+        config=AssistantConfig(),
         root_path=tmp_path,
         provider_factory=lambda _runtime: _FakeProvider([]),
     )
@@ -1143,7 +1143,7 @@ def test_controller_provider_creation_failure_persists_error(tmp_path: Path) -> 
     store.initialize()
     controller = NiceGUIChatController(
         store=store,
-        config=StreamlitAssistantConfig(),
+        config=AssistantConfig(),
         root_path=tmp_path,
         provider_factory=lambda _runtime: (_ for _ in ()).throw(RuntimeError("boom")),
     )

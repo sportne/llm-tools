@@ -1,4 +1,4 @@
-"""Config models and loading helpers for the Streamlit assistant app."""
+"""Config models and loading helpers for the NiceGUI assistant app."""
 
 from __future__ import annotations
 
@@ -53,8 +53,8 @@ class AssistantResearchConfig(BaseModel):
         return cleaned
 
 
-class StreamlitAssistantConfig(BaseModel):
-    """Shared configuration for the Streamlit assistant app."""
+class AssistantConfig(BaseModel):
+    """Shared configuration for the NiceGUI assistant app."""
 
     llm: ChatLLMConfig = Field(default_factory=ChatLLMConfig)
     session: ChatSessionConfig = Field(default_factory=ChatSessionConfig)
@@ -84,8 +84,8 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return raw
 
 
-def load_streamlit_assistant_config(path: Path) -> StreamlitAssistantConfig:
-    """Load and validate the Streamlit assistant configuration file."""
+def load_assistant_config(path: Path) -> AssistantConfig:
+    """Load and validate the NiceGUI assistant configuration file."""
     raw = _load_yaml(path)
     for section_name in (
         "llm",
@@ -101,7 +101,7 @@ def load_streamlit_assistant_config(path: Path) -> StreamlitAssistantConfig:
         if section_value is not None and not isinstance(section_value, dict):
             raise ValueError(f"assistant config '{section_name}' must be a mapping")
     try:
-        return StreamlitAssistantConfig.model_validate(raw)
+        return AssistantConfig.model_validate(raw)
     except PydanticValidationError as exc:
         raise ValueError(f"Invalid assistant config at {path}: {exc}") from exc
 
@@ -109,6 +109,6 @@ def load_streamlit_assistant_config(path: Path) -> StreamlitAssistantConfig:
 __all__ = [
     "AssistantResearchConfig",
     "AssistantWorkspaceConfig",
-    "StreamlitAssistantConfig",
-    "load_streamlit_assistant_config",
+    "AssistantConfig",
+    "load_assistant_config",
 ]

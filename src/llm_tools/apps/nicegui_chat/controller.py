@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from llm_tools.apps.assistant_config import StreamlitAssistantConfig
+from llm_tools.apps.assistant_config import AssistantConfig
 from llm_tools.apps.assistant_prompts import (
     build_assistant_system_prompt,
     build_research_system_prompt,
@@ -267,9 +267,9 @@ class NiceGUIHarnessContextBuilder:
 
 def _effective_assistant_config(
     *,
-    config: StreamlitAssistantConfig,
+    config: AssistantConfig,
     runtime: NiceGUIRuntimeConfig,
-) -> StreamlitAssistantConfig:
+) -> AssistantConfig:
     workspace_default_root = runtime.default_workspace_root
     if workspace_default_root is None:
         workspace_default_root = config.workspace.default_root
@@ -314,7 +314,7 @@ def _effective_assistant_config(
 
 
 def default_runtime_config(
-    config: StreamlitAssistantConfig,
+    config: AssistantConfig,
     *,
     root_path: Path | None,
 ) -> NiceGUIRuntimeConfig:
@@ -356,7 +356,7 @@ class NiceGUIChatController:
         self,
         *,
         store: SQLiteNiceGUIChatStore,
-        config: StreamlitAssistantConfig,
+        config: AssistantConfig,
         root_path: Path | None = None,
         provider_factory: ProviderFactory | None = None,
         hosted_config: NiceGUIHostedConfig | None = None,

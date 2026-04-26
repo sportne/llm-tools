@@ -3,8 +3,8 @@
 ## Goal
 
 The NiceGUI client uses SQLCipher-backed SQLite through SQLAlchemy 2.x for
-durable chat state. This replaces the file-per-session approach for the new app
-only; Streamlit storage remains unchanged.
+durable chat state. NiceGUI is the supported interactive chat client; legacy
+file-per-session app storage is not migrated in v1.
 
 ## Location
 

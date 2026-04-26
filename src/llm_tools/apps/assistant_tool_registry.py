@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from llm_tools.apps.assistant_config import StreamlitAssistantConfig
+from llm_tools.apps.assistant_config import AssistantConfig
 from llm_tools.tool_api import SideEffectClass, ToolPolicy, ToolRegistry, ToolSpec
 from llm_tools.tool_api.redaction import RedactionConfig
 from llm_tools.tools import (
@@ -59,7 +59,7 @@ def build_assistant_available_tool_specs() -> dict[str, ToolSpec]:
 
 
 def resolve_assistant_default_enabled_tools(
-    config: StreamlitAssistantConfig,
+    config: AssistantConfig,
 ) -> set[str]:
     """Return the default tool set for a new assistant chat session."""
     configured = config.policy.enabled_tools

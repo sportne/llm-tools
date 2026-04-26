@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
-from llm_tools.apps.assistant_config import StreamlitAssistantConfig
+from llm_tools.apps.assistant_config import AssistantConfig
 from llm_tools.tool_api import SideEffectClass, ToolContext, ToolPolicy, ToolSpec
 from llm_tools.tool_api.redaction import RedactionConfig
 
@@ -41,7 +41,7 @@ def build_assistant_policy(
 def build_assistant_context(
     *,
     root_path: Path | None,
-    config: StreamlitAssistantConfig,
+    config: AssistantConfig,
     app_name: str,
     env_overrides: dict[str, str] | None = None,
     include_process_env: bool = True,
@@ -67,7 +67,7 @@ def build_assistant_context(
         env=env,
         metadata={
             "tool_limits": effective_tool_limits.model_dump(mode="json"),
-            "assistant_mode": "streamlit_assistant",
+            "assistant_mode": "nicegui_chat",
         },
     )
 

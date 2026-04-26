@@ -1,4 +1,4 @@
-"""Run temporary backend E2E probes for the Streamlit assistant."""
+"""Run temporary backend E2E probes for the NiceGUI assistant."""
 
 from __future__ import annotations
 
@@ -6,24 +6,24 @@ import argparse
 import os
 import queue
 import threading
+import time
 from collections import Counter
 from functools import partial
 from pathlib import Path
+from tempfile import gettempdir
 from typing import Any
 from uuid import uuid4
 
 import common
 
-import llm_tools.apps.streamlit_assistant.app as assistant_app
+import llm_tools.apps.nicegui_chat.controller as nicegui_controller_module
+from llm_tools.apps.nicegui_chat.controller import NiceGUIChatController
+from llm_tools.apps.nicegui_chat.models import NiceGUITranscriptEntry
+from llm_tools.apps.nicegui_chat.store import SQLiteNiceGUIChatStore
 from llm_tools.apps.protection_runtime import build_protection_environment
-from llm_tools.apps.streamlit_assistant.research import _build_research_controller
-from llm_tools.apps.streamlit_assistant.runtime import (
-    _build_assistant_runner,
-    _create_provider_for_runtime,
-    _llm_config_for_runtime,
-)
 from llm_tools.harness_api import (
     ApprovalResolution,
+    HarnessSessionInspection,
     HarnessStopReason,
     ResumeDisposition,
     ScriptedParsedResponseProvider,
@@ -33,12 +33,6 @@ from llm_tools.llm_providers import ProviderModeStrategy
 from llm_tools.tool_api import SideEffectClass
 from llm_tools.workflow_api import (
     ChatSessionState,
-    ChatWorkflowApprovalEvent,
-    ChatWorkflowApprovalResolvedEvent,
-    ChatWorkflowInspectorEvent,
-    ChatWorkflowResultEvent,
-    ChatWorkflowStatusEvent,
-    ChatWorkflowTurnResult,
     DefaultEnvironmentComparator,
     ProtectionAction,
     ProtectionAssessment,
@@ -158,7 +152,7 @@ def _run_with_timeout(*, timeout_seconds: float, fn: Any) -> Any:
 def build_parser() -> argparse.ArgumentParser:
     """Build the backend probe CLI."""
     parser = argparse.ArgumentParser(
-        description="Temporary backend E2E probes for the Streamlit assistant."
+        description="Temporary backend E2E probes for the NiceGUI assistant."
     )
     parser.add_argument("--workspace", type=Path, default=common.REPO_ROOT)
     parser.add_argument(
@@ -257,13 +251,13 @@ def _select_provider_mode_variants(
 def _chat_prompt_for(name: str) -> str:
     prompts = {
         "chat_repo_lookup": (
-            "Explain how the Streamlit assistant supports durable research sessions. "
+            "Explain how the NiceGUI assistant supports durable research sessions. "
             "You must use one or more local workspace tools before answering, cite the "
             "most relevant local files, and keep the answer focused on app/runtime flow."
         ),
         "chat_multi_turn_back_and_forth": (
             "Use local workspace tools to find the two most relevant files for tracing "
-            "normal chat and durable research in the Streamlit assistant. Keep the "
+            "normal chat and durable research in the NiceGUI assistant. Keep the "
             "answer short."
         ),
         "chat_git_inspection": (
@@ -272,11 +266,83 @@ def _chat_prompt_for(name: str) -> str:
         ),
         "chat_remote_request_blocked": (
             "Find the latest Jira tickets, Confluence notes, and GitLab merge requests "
-            "related to the Streamlit assistant. If you cannot access those systems, "
+            "related to the NiceGUI assistant. If you cannot access those systems, "
             "say that clearly instead of guessing."
         ),
     }
     return prompts[name]
+
+
+def _build_probe_controller(
+    *,
+    session_id: str,
+    config: Any,
+    runtime: Any,
+    provider: Any | None,
+) -> NiceGUIChatController:
+    """Build a NiceGUI controller with isolated encrypted probe persistence."""
+    store_dir = Path(gettempdir()) / "llm-tools-e2e-nicegui" / session_id
+    store_dir.mkdir(parents=True, exist_ok=True)
+    store = SQLiteNiceGUIChatStore(
+        store_dir / "chat.sqlite3",
+        db_key_file=store_dir / "db.key",
+        user_key_file=store_dir / "user-kek.key",
+    )
+    store.initialize()
+
+    def _factory(active_runtime: Any) -> Any:
+        if provider is not None:
+            return provider
+        return common.create_provider_for_runtime(
+            config,
+            active_runtime,
+            api_key=None,
+            model_name=active_runtime.model_name,
+        )
+
+    controller = NiceGUIChatController(
+        store=store,
+        config=config,
+        root_path=Path(runtime.root_path) if runtime.root_path else None,
+        provider_factory=_factory,
+    )
+    record = controller.active_record
+    record.runtime = runtime.model_copy(deep=True)
+    controller.save_active_session()
+    return controller
+
+
+def _drain_controller(
+    controller: NiceGUIChatController, *, timeout_seconds: float
+) -> None:
+    """Drain a NiceGUI controller until its background turn is idle."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        controller.drain_events()
+        if controller.active_turn_state.pending_approval is not None:
+            controller.resolve_approval(approved=False)
+        if not controller.active_turns:
+            controller.drain_events()
+            return
+        time.sleep(0.01)
+    raise TimeoutError(
+        f"NiceGUI controller did not finish within {timeout_seconds:.1f}s."
+    )
+
+
+def _serialized_transcript(
+    entries: list[NiceGUITranscriptEntry],
+) -> list[dict[str, Any]]:
+    return [entry.model_dump(mode="json") for entry in entries]
+
+
+def _tool_sequence_from_workbench(controller: NiceGUIChatController) -> list[str]:
+    executions = [
+        item.payload
+        for item in controller.active_record.workbench_items
+        if item.title.endswith("Tool To LLM") and isinstance(item.payload, dict)
+    ]
+    return common.tool_sequence_from_inspector(executions)
 
 
 def _run_chat_turn(
@@ -292,121 +358,90 @@ def _run_chat_turn(
 ) -> dict[str, Any]:
     turn_provider = provider
     if turn_provider is None:
-        llm_config = _llm_config_for_runtime(config, runtime)
-        turn_provider = _create_provider_for_runtime(
-            llm_config,
-            runtime,
-            api_key=None,
-            model_name=runtime.model_name,
-        )
-    original_build_protection_controller = assistant_app.build_protection_controller
+        turn_provider = common.create_provider_for_runtime(config, runtime)
+    original_build_protection_controller = (
+        nicegui_controller_module.build_protection_controller
+    )
     if protection_controller_factory is not None:
-        assistant_app.build_protection_controller = protection_controller_factory
-    transcript_entries = [common.transcript_entry("user", prompt)]
-    status_events: list[str] = []
-    inspector_payloads: dict[str, list[dict[str, Any]]] = {
-        "provider_messages": [],
-        "provider_responses": [],
-        "parsed_responses": [],
-        "tool_executions": [],
-    }
-    approvals: list[dict[str, Any]] = []
+        nicegui_controller_module.build_protection_controller = (
+            protection_controller_factory
+        )
     result_payload: dict[str, Any] | None = None
     final_response_payload: dict[str, Any] | None = None
     token_usage_payload: dict[str, Any] | None = None
     session_state_payload: dict[str, Any] | None = None
     failure_payload: dict[str, Any] | None = None
+    controller = _build_probe_controller(
+        session_id=session_id,
+        config=config,
+        runtime=runtime,
+        provider=turn_provider,
+    )
+    controller.active_record.workflow_session_state = session_state
+    controller.save_active_session()
 
     try:
-        runner = _build_assistant_runner(
-            session_id=session_id,
-            config=config,
-            runtime=runtime,
-            provider=turn_provider,
-            session_state=session_state,
-            user_message=prompt,
+        error = controller.submit_prompt(prompt)
+        if error is not None:
+            raise RuntimeError(error)
+        _drain_controller(controller, timeout_seconds=max(runtime.timeout_seconds, 5.0))
+        record = controller.active_record
+        session_state_payload = common.dump_model(record.workflow_session_state)
+        token_usage_payload = common.dump_model(record.token_usage)
+        last_turn = (
+            record.workflow_session_state.turns[-1]
+            if record.workflow_session_state.turns
+            else None
         )
-        for event in runner:
-            if isinstance(event, ChatWorkflowStatusEvent):
-                status_events.append(event.status)
-                continue
-            if isinstance(event, ChatWorkflowApprovalEvent):
-                approvals.append(common.dump_model(event.approval))
-                transcript_entries.append(
-                    common.transcript_entry(
-                        "system",
-                        f"Approval requested for {event.approval.tool_name}.",
-                    )
-                )
-                runner.resolve_pending_approval(False)
-                continue
-            if isinstance(event, ChatWorkflowApprovalResolvedEvent):
-                transcript_entries.append(
-                    common.transcript_entry(
-                        "system",
-                        f"Approval resolution: {event.resolution}.",
-                    )
-                )
-                continue
-            if isinstance(event, ChatWorkflowInspectorEvent):
-                target = {
-                    "provider_messages": "provider_messages",
-                    "provider_response": "provider_responses",
-                    "parsed_response": "parsed_responses",
-                    "tool_execution": "tool_executions",
-                }[event.kind]
-                inspector_payloads[target].append(common.dump_model(event.payload))
-                continue
-            if isinstance(event, ChatWorkflowResultEvent):
-                result = ChatWorkflowTurnResult.model_validate(event.result)
-                result_payload = common.dump_model(result)
-                final_response_payload = common.dump_model(result.final_response)
-                token_usage_payload = common.dump_model(result.token_usage)
-                session_state_payload = common.dump_model(result.session_state)
-                if result.context_warning:
-                    transcript_entries.append(
-                        common.transcript_entry("system", result.context_warning)
-                    )
-                if result.continuation_reason:
-                    transcript_entries.append(
-                        common.transcript_entry("system", result.continuation_reason)
-                    )
-                if result.interruption_reason:
-                    transcript_entries.append(
-                        common.transcript_entry("system", result.interruption_reason)
-                    )
-                if result.final_response is not None:
-                    transcript_entries.append(
-                        common.transcript_entry(
-                            "assistant",
-                            result.final_response.answer,
-                            final_response=common.dump_model(result.final_response),
-                        )
-                    )
+        if last_turn is not None:
+            result_payload = common.dump_model(last_turn)
+            final_response_payload = common.dump_model(last_turn.final_response)
     except Exception as exc:
         failure_payload = common.failure_payload(exc)
-        failure_payload["stage"] = status_events[-1] if status_events else None
-        transcript_entries.append(
-            common.transcript_entry(
-                "system",
-                (
+        failure_payload["stage"] = controller.active_turn_state.status_text or None
+        controller.active_record.transcript.append(
+            NiceGUITranscriptEntry(
+                role="system",
+                text=(
                     "Scenario execution raised an exception after partial chat "
                     f"artifacts were captured: {type(exc).__name__}: {exc}"
                 ),
             )
         )
     finally:
-        assistant_app.build_protection_controller = original_build_protection_controller
+        nicegui_controller_module.build_protection_controller = (
+            original_build_protection_controller
+        )
 
+    record = controller.active_record
+    provider_responses = [
+        item.payload
+        for item in record.workbench_items
+        if item.title.endswith("From LLM") and isinstance(item.payload, dict)
+    ]
     payload = {
         "prompt": prompt,
-        "status_events": status_events,
-        "approvals": approvals,
-        "transcript_entries": transcript_entries,
-        "inspector": inspector_payloads,
-        "tool_sequence": common.tool_sequence_from_inspector(
-            inspector_payloads["tool_executions"]
-        ),
+        "status_events": list(controller.active_turn_state.status_history),
+        "approvals": [],
+        "transcript_entries": _serialized_transcript(record.transcript),
+        "inspector": {
+            "provider_messages": [
+                common.dump_model(entry.payload)
+                for entry in record.inspector_state.provider_messages
+            ],
+            "provider_responses": [
+                common.dump_model(payload) for payload in provider_responses
+            ],
+            "parsed_responses": [
+                common.dump_model(entry.payload)
+                for entry in record.inspector_state.parsed_responses
+            ],
+            "tool_executions": [
+                common.dump_model(entry.payload)
+                for entry in record.inspector_state.tool_executions
+            ],
+        },
+        "tool_sequence": _tool_sequence_from_workbench(controller),
         "result": result_payload,
         "final_response": final_response_payload,
         "token_usage": token_usage_payload,
@@ -563,7 +598,7 @@ def _run_chat_multi_turn_scenario(
     prompts = [
         (
             "Use local workspace tools to find the two most relevant files for tracing "
-            "normal chat and durable research in the Streamlit assistant. Keep the "
+            "normal chat and durable research in the NiceGUI assistant. Keep the "
             "answer short."
         ),
         (
@@ -847,7 +882,7 @@ def _run_chat_protection_demo(
     ]
     result["sanitize_provenance_paths"] = sanitize_provenance_paths
     result["protection_environment"] = build_protection_environment(
-        app_name="streamlit_assistant",
+        app_name="nicegui_chat",
         model_name=runtime.model_name,
         workspace=runtime.root_path,
         enabled_tools=runtime.enabled_tools,
@@ -939,7 +974,7 @@ def _run_chat_scenario(
 
 def _research_prompt() -> str:
     return (
-        "Investigate how the Streamlit assistant distinguishes normal chat from "
+        "Investigate how the NiceGUI assistant distinguishes normal chat from "
         "durable research sessions in this repository. Focus on the assistant app, "
         "runtime wiring, and the harness-backed research controller."
     )
@@ -971,9 +1006,29 @@ def _run_research_launch(
         )
         return result
 
-    controller = _build_research_controller(config=config, runtime=runtime)
-    inspection = controller.launch(prompt=prompt)
-    inspection_payload = common.dump_model(inspection)
+    deep_runtime = runtime.model_copy(update={"interaction_mode": "deep_task"})
+    controller = _build_probe_controller(
+        session_id=f"e2e-research-launch-{uuid4().hex[:8]}",
+        config=config,
+        runtime=deep_runtime,
+        provider=None,
+    )
+    controller.set_deep_task_mode_enabled(True)
+    error = controller.submit_prompt(prompt)
+    if error is not None:
+        raise RuntimeError(error)
+    _drain_controller(controller, timeout_seconds=max(runtime.timeout_seconds, 5.0))
+    inspection_payload = next(
+        (
+            item.payload
+            for item in reversed(controller.active_record.workbench_items)
+            if item.kind == "result" and isinstance(item.payload, dict)
+        ),
+        None,
+    )
+    if inspection_payload is None:
+        raise RuntimeError("Deep task did not produce an inspection artifact.")
+    inspection = HarnessSessionInspection.model_validate(inspection_payload)
     checks = {
         "session_created": bool(inspection.snapshot.session_id),
         "summary_present": inspection.summary.total_turns >= 0,
@@ -983,7 +1038,13 @@ def _run_research_launch(
     result.update(
         {
             "inspection": inspection_payload,
-            "summary_text": controller.summary_text(inspection),
+            "summary_text": "\n".join(
+                [
+                    f"session: {inspection.summary.session_id}",
+                    f"turns: {inspection.summary.total_turns}",
+                    f"stop: {inspection.summary.stop_reason}",
+                ]
+            ),
             "session_id": inspection.snapshot.session_id,
             "checks": checks,
             "status": (
@@ -1030,28 +1091,46 @@ def _run_research_approval_flow(
             ),
         ]
     )
-    original_build_live_harness_provider = assistant_app.build_live_harness_provider
-    original_current_api_key = assistant_app._current_api_key
-    assistant_app.build_live_harness_provider = lambda **kwargs: provider
-    assistant_app._current_api_key = lambda llm_config: None
-    try:
-        controller = assistant_app._build_research_controller(
-            config=config,
-            runtime=runtime,
-        )
-        waiting = controller.launch(
-            prompt=(
-                "List the scratch workspace, then write an approval-gated note and "
-                "confirm completion."
-            )
-        )
-        resumed = controller.resume(
-            waiting.snapshot.session_id,
-            approval_resolution=approval_resolution,
-        )
-    finally:
-        assistant_app.build_live_harness_provider = original_build_live_harness_provider
-        assistant_app._current_api_key = original_current_api_key
+    deep_runtime = runtime.model_copy(update={"interaction_mode": "deep_task"})
+    controller = _build_probe_controller(
+        session_id=f"e2e-research-approval-{uuid4().hex[:8]}",
+        config=config,
+        runtime=deep_runtime,
+        provider=provider,
+    )
+    controller.set_deep_task_mode_enabled(True)
+    error = controller.submit_prompt(
+        "List the scratch workspace, then write an approval-gated note and "
+        "confirm completion."
+    )
+    if error is not None:
+        raise RuntimeError(error)
+    _drain_controller(controller, timeout_seconds=max(runtime.timeout_seconds, 5.0))
+    waiting_payload = next(
+        (
+            item.payload
+            for item in reversed(controller.active_record.workbench_items)
+            if item.kind == "result" and isinstance(item.payload, dict)
+        ),
+        None,
+    )
+    if waiting_payload is None:
+        raise RuntimeError("Deep task did not produce waiting inspection.")
+    controller.resolve_approval(
+        approved=approval_resolution is ApprovalResolution.APPROVE
+    )
+    _drain_controller(controller, timeout_seconds=max(runtime.timeout_seconds, 5.0))
+    resumed_payload = next(
+        (
+            item.payload
+            for item in reversed(controller.active_record.workbench_items)
+            if item.kind == "result" and isinstance(item.payload, dict)
+        ),
+        None,
+    )
+    if resumed_payload is None:
+        raise RuntimeError("Deep task did not produce resumed inspection.")
+    resumed = HarnessSessionInspection.model_validate(resumed_payload)
     trace = resumed.snapshot.artifacts.trace
     replay = resumed.replay
     tool_name_counts: Counter[str] = Counter()
@@ -1066,8 +1145,8 @@ def _run_research_approval_flow(
     return {
         "workspace_root": str(workspace_root),
         "output_path": str(output_path),
-        "waiting": common.dump_model(waiting),
-        "resumed": common.dump_model(resumed),
+        "waiting": waiting_payload,
+        "resumed": resumed_payload,
         "file_exists": output_path.exists(),
         "file_content": (
             output_path.read_text(encoding="utf-8") if output_path.exists() else None
@@ -1210,19 +1289,9 @@ def _run_research_followup(
         "provider_health": provider_health,
         "prompt": "Inspect the durable state the UI would show for the active session.",
     }
-    controller = _build_research_controller(config=config, runtime=runtime)
     bootstrap_created = False
     session_id = known_session_id
-    if session_id is None:
-        recent = controller.list_recent()
-        if recent.sessions:
-            session_id = recent.sessions[0].snapshot.session_id
-        elif provider_health.get("ok", False):
-            bootstrap = controller.launch(prompt=_research_prompt())
-            bootstrap_created = True
-            session_id = bootstrap.snapshot.session_id
-
-    if session_id is None:
+    if session_id is None and not provider_health.get("ok", False):
         result.update(
             {
                 "status": common.SCENARIO_STATUS_INFRA,
@@ -1234,8 +1303,15 @@ def _run_research_followup(
         )
         return result
 
-    inspection = controller.inspect(session_id)
-    inspection_payload = common.dump_model(inspection)
+    launch = _run_research_launch(
+        provider_mode=provider_mode,
+        provider_health=provider_health,
+        config=config,
+        runtime=runtime,
+    )
+    bootstrap_created = True
+    session_id = str(launch.get("session_id") or session_id or "")
+    inspection_payload = launch["inspection"]
     summary_payload = inspection_payload["summary"]
     checks = {
         "session_summary_present": bool(summary_payload.get("session_id")),

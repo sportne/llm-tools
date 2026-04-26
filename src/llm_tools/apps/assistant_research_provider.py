@@ -9,7 +9,7 @@ from typing import TypeVar, cast
 
 from pydantic import BaseModel
 
-from llm_tools.apps.assistant_config import StreamlitAssistantConfig
+from llm_tools.apps.assistant_config import AssistantConfig
 from llm_tools.apps.assistant_prompts import build_research_system_prompt
 from llm_tools.apps.chat_config import ChatLLMConfig
 from llm_tools.apps.chat_runtime import create_provider
@@ -824,7 +824,7 @@ class AssistantHarnessTurnProvider:
 
 def build_live_harness_provider(
     *,
-    config: StreamlitAssistantConfig,
+    config: AssistantConfig,
     provider_config: ChatLLMConfig,
     model_name: str,
     api_key: str | None,
@@ -848,7 +848,7 @@ def build_live_harness_provider(
         config=config.protection,
         provider=provider,
         environment=build_protection_environment(
-            app_name="streamlit_assistant_research",
+            app_name="nicegui_chat_research",
             model_name=model_name,
             workspace=workspace,
             enabled_tools=enabled_tool_names,

@@ -119,7 +119,7 @@ _REPOSITORY_GROUNDING_HINTS = (
     "project",
     "local files",
     "source tree",
-    "streamlit assistant",
+    "interactive assistant",
     "app/runtime",
     "runtime flow",
     "wires together",

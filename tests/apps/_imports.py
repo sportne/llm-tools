@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from contextlib import contextmanager
 from enum import StrEnum
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import ModuleType
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -213,36 +213,6 @@ def _import_modules(
         return tuple(
             importlib.import_module(module_name) for module_name in module_names
         )
-
-
-_STREAMLIT_ASSISTANT_MODULES: SimpleNamespace | None = None
-
-
-def import_streamlit_assistant_modules() -> SimpleNamespace:
-    """Import Streamlit assistant modules while shielding heavy provider imports."""
-    global _STREAMLIT_ASSISTANT_MODULES
-    if _STREAMLIT_ASSISTANT_MODULES is None:
-        package, app, main, models = _import_modules(
-            (
-                "llm_tools.apps.streamlit_assistant",
-                "llm_tools.apps.streamlit_assistant.app",
-                "llm_tools.apps.streamlit_assistant.__main__",
-                "llm_tools.apps.streamlit_models",
-            ),
-            reset_modules=(
-                "llm_tools.apps.streamlit_assistant",
-                "llm_tools.apps.streamlit_assistant.app",
-                "llm_tools.apps.streamlit_assistant.__main__",
-                "llm_tools.apps.streamlit_models",
-            ),
-        )
-        _STREAMLIT_ASSISTANT_MODULES = SimpleNamespace(
-            package=package,
-            app=app,
-            main=main,
-            models=models,
-        )
-    return _STREAMLIT_ASSISTANT_MODULES
 
 
 def load_module_from_path(

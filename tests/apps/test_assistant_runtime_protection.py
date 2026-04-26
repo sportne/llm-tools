@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from llm_tools.apps.assistant_config import StreamlitAssistantConfig
+from llm_tools.apps.assistant_config import AssistantConfig
 from llm_tools.apps.assistant_runtime import (
     AssistantHarnessTurnProvider,
     build_assistant_available_tool_specs,
@@ -326,7 +326,7 @@ def test_assistant_runtime_helper_edges_cover_intersection_permissions_and_missi
 ):
     import llm_tools.apps.assistant_runtime as assistant_runtime
 
-    config = StreamlitAssistantConfig(
+    config = AssistantConfig(
         policy=ChatPolicyConfig(enabled_tools=["read_file", "missing_tool"])
     )
     tool_specs = build_assistant_available_tool_specs()
@@ -532,12 +532,12 @@ def test_build_live_harness_provider_wraps_created_provider_and_wires_protection
     )
 
     harness_provider = build_live_harness_provider(
-        config=StreamlitAssistantConfig(
+        config=AssistantConfig(
             protection=ProtectionConfig(
                 enabled=True, document_paths=[str(tmp_path / "policy.txt")]
             )
         ),
-        provider_config=StreamlitAssistantConfig().llm,
+        provider_config=AssistantConfig().llm,
         model_name="demo-model",
         api_key=None,
         mode_strategy="auto",
@@ -715,8 +715,8 @@ def test_direct_research_provider_builder_module_is_wired(
     )
 
     harness_provider = provider_module.build_live_harness_provider(
-        config=StreamlitAssistantConfig(),
-        provider_config=StreamlitAssistantConfig().llm,
+        config=AssistantConfig(),
+        provider_config=AssistantConfig().llm,
         model_name="demo-model",
         api_key=None,
         mode_strategy="auto",

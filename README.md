@@ -12,7 +12,7 @@ floor includes:
 - OpenAI-compatible transport in `llm_providers`
 - one-turn execution primitives in `workflow_api`
 - durable orchestration in `harness_api`
-- a Streamlit assistant and a persisted harness CLI in `apps`
+- a NiceGUI assistant and a persisted harness CLI in `apps`
 - bundled built-in tools for local files, Git, text search, GitLab, and
   Atlassian products
 
@@ -44,7 +44,7 @@ git worktrees at `~/.venvs/llm-tools`. Re-run `make install-dev` from the
 checkout you are actively using so the shared environment's editable install
 points at that tree.
 
-The base package includes the current Streamlit assistant runtime and its
+The base package includes the current NiceGUI assistant runtime and its
 config-loading dependencies. `.[dev]` adds the toolchain used for local
 development and CI.
 
@@ -72,11 +72,11 @@ Supported library surfaces:
 
 Supported product entrypoints:
 
-- `llm_tools.apps.streamlit_assistant`
+- `llm_tools.apps.nicegui_chat`
 - `llm_tools.apps.harness_cli`
 
 `apps/*` are supported product surfaces, but they are not the default extension
-API for downstream consumers. The Streamlit assistant is the primary interactive
+API for downstream consumers. The NiceGUI assistant is the primary interactive
 product surface for internal deployments; the harness CLI is the lower-level
 operator surface for durable session management.
 
@@ -196,19 +196,19 @@ result = service.run_session(HarnessSessionRunRequest(session_id=created.session
 
 ### Run the shipped apps
 
-Launch the Streamlit assistant:
+Launch the NiceGUI assistant:
 
 ```bash
-python -m llm_tools.apps.streamlit_assistant <directory>
+python -m llm_tools.apps.nicegui_chat <directory>
 ```
 
 or with an optional reusable YAML preset:
 
 ```bash
-llm-tools-streamlit-assistant <directory> --config <path>
+llm-tools-nicegui-chat <directory> --config <path>
 ```
 
-The config YAML is optional. The Streamlit UI can also generate and save a
+The config YAML is optional. The NiceGUI UI can also generate and save a
 non-secret config preset from the current session. Remote integration
 credentials stay session-only and are never written into the exported YAML.
 
@@ -224,7 +224,7 @@ or:
 llm-tools-harness start --title "Task" --intent "Do work"
 ```
 
-The Streamlit assistant is the main interactive client for private-network
+The NiceGUI assistant is the main interactive client for private-network
 deployments. It supports explicit provider-mode selection for OpenAI-compatible
 endpoints, per-integration remote credentials entered in the UI, and optional
 proprietary-protection corpus paths that can be saved as part of exported
@@ -240,7 +240,7 @@ The base package currently includes:
 - `markitdown` and `mpxj` for document-conversion support in read-oriented local
   tools
 
-These integrations are supported product scope. The Streamlit assistant treats
+These integrations are supported product scope. The NiceGUI assistant treats
 local workspace, GitLab, Jira, Confluence, and Bitbucket as first-class source
 groups, with readiness and credential requirements surfaced explicitly in the
 UI.

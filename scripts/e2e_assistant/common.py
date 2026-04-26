@@ -19,15 +19,12 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from llm_tools.apps.assistant_config import (  # noqa: E402
-    StreamlitAssistantConfig,
-    load_streamlit_assistant_config,
+    AssistantConfig,
+    load_assistant_config,
 )
-from llm_tools.apps.chat_config import ProviderPreset  # noqa: E402
-from llm_tools.apps.streamlit_assistant.runtime import (  # noqa: E402
-    _create_provider_for_runtime,
-    _llm_config_for_runtime,
-)
-from llm_tools.apps.streamlit_models import StreamlitRuntimeConfig  # noqa: E402
+from llm_tools.apps.chat_config import ChatLLMConfig, ProviderPreset  # noqa: E402
+from llm_tools.apps.chat_runtime import create_provider  # noqa: E402
+from llm_tools.apps.nicegui_chat.models import NiceGUIRuntimeConfig  # noqa: E402
 from llm_tools.llm_providers import ProviderModeStrategy  # noqa: E402
 from llm_tools.tool_api import SideEffectClass  # noqa: E402
 
@@ -94,11 +91,11 @@ def build_assistant_config(
     provider: str = "ollama",
     api_base_url: str | None = None,
     api_key_env_var: str | None = None,
-) -> StreamlitAssistantConfig:
+) -> AssistantConfig:
     """Build the local-only assistant config used by the probe scripts."""
     effective_base_url = api_base_url or ollama_base_url
     provider_preset = ProviderPreset(provider)
-    template = load_streamlit_assistant_config(
+    template = load_assistant_config(
         REPO_ROOT / "examples" / "assistant_configs" / "harness-research-chat.yaml"
     )
     return template.model_copy(
@@ -137,19 +134,20 @@ def build_assistant_config(
 
 
 def build_runtime_config(
-    config: StreamlitAssistantConfig,
+    config: AssistantConfig,
     *,
     workspace: Path,
-) -> StreamlitRuntimeConfig:
+) -> NiceGUIRuntimeConfig:
     """Build the runtime controls used by the temporary probes."""
     default_approvals = set(config.policy.require_approval_for).union(
         {SideEffectClass.LOCAL_WRITE, SideEffectClass.EXTERNAL_WRITE}
     )
-    return StreamlitRuntimeConfig(
+    return NiceGUIRuntimeConfig(
         provider=config.llm.provider,
         provider_mode_strategy=config.llm.provider_mode_strategy,
         model_name=config.llm.model_name,
         api_base_url=config.llm.api_base_url,
+        api_key_env_var=config.llm.api_key_env_var,
         temperature=config.llm.temperature,
         timeout_seconds=config.llm.timeout_seconds,
         root_path=str(workspace.resolve()),
@@ -166,6 +164,41 @@ def build_runtime_config(
         tool_limits=config.tool_limits.model_copy(deep=True),
         research=config.research.model_copy(deep=True),
         protection=config.protection.model_copy(deep=True),
+    )
+
+
+def llm_config_for_runtime(
+    config: AssistantConfig,
+    runtime: NiceGUIRuntimeConfig,
+) -> ChatLLMConfig:
+    """Return the effective LLM config for one NiceGUI runtime."""
+    return config.llm.model_copy(
+        update={
+            "provider": runtime.provider,
+            "provider_mode_strategy": runtime.provider_mode_strategy,
+            "model_name": runtime.model_name,
+            "api_base_url": runtime.api_base_url,
+            "api_key_env_var": runtime.api_key_env_var,
+            "temperature": runtime.temperature,
+            "timeout_seconds": runtime.timeout_seconds,
+        }
+    )
+
+
+def create_provider_for_runtime(
+    config: AssistantConfig,
+    runtime: NiceGUIRuntimeConfig,
+    *,
+    api_key: str | None = None,
+    model_name: str | None = None,
+) -> Any:
+    """Create an OpenAI-compatible provider for one NiceGUI E2E runtime."""
+    return create_provider(
+        llm_config_for_runtime(config, runtime),
+        api_key=api_key,
+        model_name=model_name or runtime.model_name,
+        mode_strategy=runtime.provider_mode_strategy,
+        allow_env_api_key=True,
     )
 
 
@@ -214,17 +247,11 @@ def mode_output_dir(parent: Path, mode: ProviderModeStrategy) -> Path:
 
 
 def build_provider_health(
-    config: StreamlitAssistantConfig,
-    runtime: StreamlitRuntimeConfig,
+    config: AssistantConfig,
+    runtime: NiceGUIRuntimeConfig,
 ) -> dict[str, Any]:
     """Return provider preflight details for the configured runtime."""
-    llm_config = _llm_config_for_runtime(config, runtime)
-    provider = _create_provider_for_runtime(
-        llm_config,
-        runtime,
-        api_key=None,
-        model_name=runtime.model_name,
-    )
+    provider = create_provider_for_runtime(config, runtime)
     preflight = provider.preflight(
         request_params={"temperature": config.llm.temperature}
     )
@@ -287,7 +314,7 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def write_generated_config(config: StreamlitAssistantConfig, path: Path) -> None:
+def write_generated_config(config: AssistantConfig, path: Path) -> None:
     """Persist one reusable config file for debugging the probe run."""
     payload = config.model_dump(mode="json")
     path.parent.mkdir(parents=True, exist_ok=True)

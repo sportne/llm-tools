@@ -385,7 +385,7 @@ def _answer_quality(*, scenario: str, answer: object) -> dict[str, Any]:
         "harnesssessionservice",
         "assistantresearchsessioncontroller",
         "assistant_research_provider",
-        "streamlit_assistant",
+        "nicegui_chat",
         "durable orchestration",
         "resume",
         "inspect",

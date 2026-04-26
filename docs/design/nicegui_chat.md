@@ -3,8 +3,8 @@
 ## Goal
 
 The NiceGUI chat client is a new app surface for `llm-tools` that follows the
-conventional web-chat layout used by ChatGPT, Gemini, and Claude. It is not a
-Streamlit migration. The first version reuses the existing assistant runtime and
+conventional web-chat layout used by ChatGPT, Gemini, and Claude. It reuses the
+existing assistant runtime and
 adds a purpose-built browser UI plus SQLite persistence.
 
 ## Product Shape
@@ -67,7 +67,7 @@ Included:
 
 Deferred:
 
-- Streamlit JSON-file migration.
+- Legacy JSON-file migration.
 - Project/folder workspaces.
 - Full Canvas/Artifacts editing, export, and version browsing.
 - Attachment ingestion.
