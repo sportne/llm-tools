@@ -27,7 +27,9 @@ from llm_tools.harness_api import (
     HarnessStopReason,
     ResumeDisposition,
     ScriptedParsedResponseProvider,
+    resume_session,
 )
+from llm_tools.harness_api.replay import replay_session
 from llm_tools.llm_adapters import ParsedModelResponse
 from llm_tools.llm_providers import ProviderModeStrategy
 from llm_tools.tool_api import SideEffectClass
@@ -57,6 +59,7 @@ PROMPT_TOOL_VARIANT_MODES = {
     "prompt_tools_single_action": "single_action",
     "prompt_tools_category": "category",
 }
+RESEARCH_SESSION_TO_PROBE_SESSION: dict[str, str] = {}
 CONTINUATION_REFUSAL_PROMPT = (
     "Do not continue with more tool use. Use only the local tool evidence already "
     "available in this chat session and answer now. Mention uncertainty if the "
@@ -313,13 +316,19 @@ def _build_probe_controller(
 
 
 def _drain_controller(
-    controller: NiceGUIChatController, *, timeout_seconds: float
+    controller: NiceGUIChatController,
+    *,
+    timeout_seconds: float,
+    auto_resolve_approvals: bool = True,
 ) -> None:
     """Drain a NiceGUI controller until its background turn is idle."""
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         controller.drain_events()
-        if controller.active_turn_state.pending_approval is not None:
+        if (
+            auto_resolve_approvals
+            and controller.active_turn_state.pending_approval is not None
+        ):
             controller.resolve_approval(approved=False)
         if not controller.active_turns:
             controller.drain_events()
@@ -1007,8 +1016,9 @@ def _run_research_launch(
         return result
 
     deep_runtime = runtime.model_copy(update={"interaction_mode": "deep_task"})
+    probe_session_id = f"e2e-research-launch-{uuid4().hex[:8]}"
     controller = _build_probe_controller(
-        session_id=f"e2e-research-launch-{uuid4().hex[:8]}",
+        session_id=probe_session_id,
         config=config,
         runtime=deep_runtime,
         provider=None,
@@ -1029,6 +1039,7 @@ def _run_research_launch(
     if inspection_payload is None:
         raise RuntimeError("Deep task did not produce an inspection artifact.")
     inspection = HarnessSessionInspection.model_validate(inspection_payload)
+    RESEARCH_SESSION_TO_PROBE_SESSION[inspection.snapshot.session_id] = probe_session_id
     checks = {
         "session_created": bool(inspection.snapshot.session_id),
         "summary_present": inspection.summary.total_turns >= 0,
@@ -1105,7 +1116,11 @@ def _run_research_approval_flow(
     )
     if error is not None:
         raise RuntimeError(error)
-    _drain_controller(controller, timeout_seconds=max(runtime.timeout_seconds, 5.0))
+    _drain_controller(
+        controller,
+        timeout_seconds=max(runtime.timeout_seconds, 5.0),
+        auto_resolve_approvals=False,
+    )
     waiting_payload = next(
         (
             item.payload
@@ -1303,15 +1318,58 @@ def _run_research_followup(
         )
         return result
 
-    launch = _run_research_launch(
-        provider_mode=provider_mode,
-        provider_health=provider_health,
-        config=config,
-        runtime=runtime,
-    )
-    bootstrap_created = True
-    session_id = str(launch.get("session_id") or session_id or "")
-    inspection_payload = launch["inspection"]
+    if session_id is not None:
+        probe_session_id = RESEARCH_SESSION_TO_PROBE_SESSION.get(session_id)
+        if probe_session_id is None:
+            result.update(
+                {
+                    "status": common.SCENARIO_STATUS_FAILED,
+                    "summary": (
+                        "Known durable research session id was not available in the "
+                        "NiceGUI-backed probe store."
+                    ),
+                }
+            )
+            return result
+        controller = _build_probe_controller(
+            session_id=probe_session_id,
+            config=config,
+            runtime=runtime.model_copy(update={"interaction_mode": "deep_task"}),
+            provider=None,
+        )
+        harness_store = controller.store.harness_store(
+            chat_session_id=controller.active_session_id,
+            owner_user_id=controller.active_record.summary.owner_user_id,
+        )
+        snapshot = harness_store.load_session(session_id)
+        if snapshot is None or snapshot.artifacts.summary is None:
+            result.update(
+                {
+                    "status": common.SCENARIO_STATUS_FAILED,
+                    "summary": (
+                        "Known durable research session could not be loaded from "
+                        "NiceGUI persistence."
+                    ),
+                }
+            )
+            return result
+        inspection = HarnessSessionInspection(
+            snapshot=snapshot,
+            resumed=resume_session(snapshot),
+            summary=snapshot.artifacts.summary,
+            replay=replay_session(snapshot),
+        )
+        inspection_payload = common.dump_model(inspection)
+    else:
+        launch = _run_research_launch(
+            provider_mode=provider_mode,
+            provider_health=provider_health,
+            config=config,
+            runtime=runtime,
+        )
+        bootstrap_created = True
+        session_id = str(launch.get("session_id") or "")
+        inspection_payload = launch["inspection"]
     summary_payload = inspection_payload["summary"]
     checks = {
         "session_summary_present": bool(summary_payload.get("session_id")),
