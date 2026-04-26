@@ -1,4 +1,5 @@
 chat.yaml
+.nicegui
 
 # Python bytecode and caches
 __pycache__/

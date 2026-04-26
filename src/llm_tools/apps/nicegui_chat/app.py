@@ -38,6 +38,7 @@ from llm_tools.apps.nicegui_chat.controller import (
 )
 from llm_tools.apps.nicegui_chat.models import (
     NiceGUIHostedConfig,
+    NiceGUIInteractionMode,
     NiceGUIRuntimeConfig,
     NiceGUIUser,
 )
@@ -72,6 +73,16 @@ AUTH_DISABLED_WARNING = (
 )
 PROTECTION_UNDEFINED_LABEL = "Undefined"
 PROTECTION_CORRECTIONS_FILENAME = ".llm-tools-protection-corrections.json"
+INTERACTION_MODE_LABELS: dict[NiceGUIInteractionMode, str] = {
+    "chat": "Chat",
+    "deep_task": "Deep Task",
+}
+INTERACTION_MODE_TOOLTIPS: dict[NiceGUIInteractionMode, str] = {
+    "chat": "Fast conversational replies for quick back-and-forth.",
+    "deep_task": (
+        "Durable multi-step work with task state, approvals, trace, and summary."
+    ),
+}
 
 
 def _first_nonempty_text(*values: object) -> str:
@@ -592,6 +603,8 @@ def render_first_admin_page(
     """Render first-run hosted admin creation."""
     from nicegui import ui
 
+    ui.dark_mode(value=True)
+    _add_auth_page_styles()
     username_input: Any = None
     password_input: Any = None
 
@@ -628,6 +641,8 @@ def render_login_page(auth_provider: LocalAuthProvider) -> None:  # pragma: no c
     """Render hosted-mode login."""
     from nicegui import ui
 
+    ui.dark_mode(value=True)
+    _add_auth_page_styles()
     username_input: Any = None
     password_input: Any = None
 
@@ -651,6 +666,38 @@ def render_login_page(auth_provider: LocalAuthProvider) -> None:  # pragma: no c
         password_input = ui.input("Password").props("type=password").classes("w-full")
         password_input.on("keydown.enter", lambda: login())
         ui.button("Sign in", on_click=login).classes("w-full")
+
+
+def _add_auth_page_styles() -> None:
+    """Apply the default unauthenticated NiceGUI dark theme."""
+    from nicegui import ui
+
+    ui.add_head_html(
+        """
+        <style>
+        html, body, #app {
+            min-height: 100%; margin: 0;
+            background: #161715; color: #e8e6de;
+        }
+        body.body--dark {
+            --q-primary: #d2d2ce;
+            --q-negative: #d2d2ce;
+        }
+        body.body--dark .q-card {
+            background: #20221f; color: #e8e6de;
+            border: 1px solid #3a3d37;
+        }
+        body.body--dark .q-field__native,
+        body.body--dark .q-field__label {
+            color: #e8e6de;
+        }
+        body.body--dark .q-btn.bg-primary {
+            background: #d2d2ce !important; color: #161715 !important;
+        }
+        .llmt-muted { color: #aaa79e; }
+        </style>
+        """
+    )
 
 
 def build_nicegui_chat_ui(  # noqa: C901
@@ -1375,88 +1422,143 @@ def build_nicegui_chat_ui(  # noqa: C901
         tool_menu_column.clear()
         groups = current_tool_capability_groups()
         summaries = build_tool_group_capability_summaries(groups)
+        mode_locked = controller.interaction_mode_locked()
+        runtime = active_runtime()
         with tool_menu_column:
-            ui.label("Tool changes apply to the next message.").classes(
-                "llmt-tool-menu-note llmt-muted"
-            )
-            for group_name, capabilities in groups.items():
-                summary = summaries[group_name]
-                all_enabled = bool(capabilities) and all(
-                    capability.enabled for capability in capabilities
-                )
-                some_enabled = any(capability.enabled for capability in capabilities)
-                icon = (
-                    "check_box"
-                    if all_enabled
-                    else "indeterminate_check_box"
-                    if some_enabled
-                    else "check_box_outline_blank"
-                )
-                with ui.column().classes("llmt-tool-group-header w-full gap-1"):
-                    with ui.row().classes(
-                        "w-full items-center justify-between no-wrap"
-                    ):
-                        ui.button(
-                            group_name,
-                            icon=icon,
-                            on_click=lambda _event, name=group_name: toggle_tool_group(
-                                name
-                            ),
-                        ).props("flat dense no-caps align=left").classes("grow")
-                        ui.label(
-                            f"{summary.exposed_tools}/{summary.total_tools}"
-                        ).classes("text-xs llmt-muted")
-                    for capability in capabilities:
-                        icon_name = (
-                            _selected_tool_icon(capability)
-                            if capability.enabled
-                            else None
-                        )
-                        button = ui.button(
-                            capability.tool_name,
-                            icon=icon_name,
-                            on_click=lambda _event, name=capability.tool_name: (
-                                toggle_runtime_tool(name)
-                            ),
-                        ).props("flat dense no-caps align=left")
-                        button.classes(
-                            "llmt-tool-name "
-                            + (
-                                _selected_tool_chip_classes(capability)
+            ui.label(
+                "Choose mode before the first message. Tool changes apply to the next message."
+            ).classes("llmt-tool-menu-note llmt-muted")
+            with ui.expansion("Mode", icon="tune", value=True).classes("w-full"):
+                for mode, label in INTERACTION_MODE_LABELS.items():
+                    selected = runtime.interaction_mode == mode
+                    button = ui.button(
+                        label,
+                        icon="radio_button_checked"
+                        if selected
+                        else "radio_button_unchecked",
+                        on_click=lambda _event, selected_mode=mode: (
+                            set_interaction_mode(selected_mode)
+                        ),
+                    ).props("flat dense no-caps align=left")
+                    button.classes("llmt-tool-name")
+                    if mode_locked:
+                        button.disable()
+                    with button:
+                        tooltip = INTERACTION_MODE_TOOLTIPS[mode]
+                        if mode_locked:
+                            tooltip += " Mode is locked after the first message."
+                        ui.tooltip(tooltip).props("delay=700")
+            with ui.expansion("Tools", icon="construction", value=True).classes(
+                "w-full"
+            ):
+                for group_name, capabilities in groups.items():
+                    summary = summaries[group_name]
+                    all_enabled = bool(capabilities) and all(
+                        capability.enabled for capability in capabilities
+                    )
+                    some_enabled = any(
+                        capability.enabled for capability in capabilities
+                    )
+                    icon = (
+                        "check_box"
+                        if all_enabled
+                        else "indeterminate_check_box"
+                        if some_enabled
+                        else "check_box_outline_blank"
+                    )
+                    with ui.column().classes("llmt-tool-group-header w-full gap-1"):
+                        with ui.row().classes(
+                            "w-full items-center justify-between no-wrap"
+                        ):
+                            ui.button(
+                                group_name,
+                                icon=icon,
+                                on_click=lambda _event, name=group_name: (
+                                    toggle_tool_group(name)
+                                ),
+                            ).props("flat dense no-caps align=left").classes("grow")
+                            ui.label(
+                                f"{summary.exposed_tools}/{summary.total_tools}"
+                            ).classes("text-xs llmt-muted")
+                        for capability in capabilities:
+                            icon_name = (
+                                _selected_tool_icon(capability)
                                 if capability.enabled
-                                else ""
+                                else None
                             )
-                        )
-                        with button:
-                            ui.tooltip(_tool_capability_tooltip(capability)).props(
-                                "delay=700"
+                            button = ui.button(
+                                capability.tool_name,
+                                icon=icon_name,
+                                on_click=lambda _event, name=capability.tool_name: (
+                                    toggle_runtime_tool(name)
+                                ),
+                            ).props("flat dense no-caps align=left")
+                            button.classes(
+                                "llmt-tool-name "
+                                + (
+                                    _selected_tool_chip_classes(capability)
+                                    if capability.enabled
+                                    else ""
+                                )
                             )
+                            with button:
+                                ui.tooltip(_tool_capability_tooltip(capability)).props(
+                                    "delay=700"
+                                )
 
     def render_selected_tools() -> None:
         if selected_tools_row is None:
             return
         selected_tools_row.clear()
+        runtime = active_runtime()
         capabilities_by_name = current_tool_capabilities_by_name()
         selected = [
             capabilities_by_name[tool_name]
-            for tool_name in sorted(set(active_runtime().enabled_tools))
+            for tool_name in sorted(set(runtime.enabled_tools))
             if tool_name in capabilities_by_name
         ]
-        if not selected:
-            return
         with selected_tools_row:
-            ui.label("Tools").classes("text-xs llmt-muted")
-            for capability in selected:
-                button = ui.button(
-                    capability.tool_name,
-                    icon=_selected_tool_icon(capability),
-                    on_click=lambda _event, name=capability.tool_name: (
-                        toggle_runtime_tool(name)
-                    ),
-                ).props("flat dense no-caps")
-                button.classes(_selected_tool_chip_classes(capability))
-                with button:
-                    ui.tooltip(_tool_capability_tooltip(capability)).props("delay=700")
+            ui.label("Mode").classes("text-xs llmt-muted")
+            mode_label = INTERACTION_MODE_LABELS[runtime.interaction_mode]
+            mode_button = ui.button(
+                mode_label,
+                icon=(
+                    "manage_search"
+                    if runtime.interaction_mode == "deep_task"
+                    else "chat_bubble_outline"
+                ),
+                on_click=lambda _event: render_tool_menu(),
+            ).props("flat dense no-caps")
+            mode_button.classes("llmt-tool-chip llmt-tool-chip-enabled")
+            if controller.interaction_mode_locked():
+                mode_button.disable()
+            with mode_button:
+                tooltip = INTERACTION_MODE_TOOLTIPS[runtime.interaction_mode]
+                if controller.interaction_mode_locked():
+                    tooltip += " Mode is locked after the first message."
+                ui.tooltip(tooltip).props("delay=700")
+            if selected:
+                ui.label("Tools").classes("text-xs llmt-muted")
+                for capability in selected:
+                    button = ui.button(
+                        capability.tool_name,
+                        icon=_selected_tool_icon(capability),
+                        on_click=lambda _event, name=capability.tool_name: (
+                            toggle_runtime_tool(name)
+                        ),
+                    ).props("flat dense no-caps")
+                    button.classes(_selected_tool_chip_classes(capability))
+                    with button:
+                        ui.tooltip(_tool_capability_tooltip(capability)).props(
+                            "delay=700"
+                        )
+
+    def set_interaction_mode(mode: NiceGUIInteractionMode) -> None:
+        if controller.set_interaction_mode(mode):
+            render_selected_tools()
+            render_tool_menu()
+        else:
+            ui.notify("Mode is locked after the first message.", type="warning")
 
     def toggle_runtime_tool(tool_name: str) -> None:
         runtime = active_runtime()

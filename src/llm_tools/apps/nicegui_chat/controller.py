@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,7 +12,11 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from llm_tools.apps.assistant_config import StreamlitAssistantConfig
-from llm_tools.apps.assistant_prompts import build_assistant_system_prompt
+from llm_tools.apps.assistant_prompts import (
+    build_assistant_system_prompt,
+    build_research_system_prompt,
+)
+from llm_tools.apps.assistant_research_provider import AssistantHarnessTurnProvider
 from llm_tools.apps.assistant_runtime import (
     build_assistant_available_tool_specs,
     build_assistant_context,
@@ -39,6 +43,19 @@ from llm_tools.apps.nicegui_chat.store import (
     SQLiteNiceGUIChatStore,
     remember_default_db_path,
 )
+from llm_tools.harness_api import (
+    ApprovalResolution,
+    BudgetPolicy,
+    DefaultHarnessContextBuilder,
+    HarnessSessionCreateRequest,
+    HarnessSessionInspection,
+    HarnessSessionInspectRequest,
+    HarnessSessionResumeRequest,
+    HarnessSessionRunRequest,
+    HarnessSessionService,
+    HarnessSessionStopRequest,
+)
+from llm_tools.harness_api.context import TurnContextBundle
 from llm_tools.tool_api import ToolSpec
 from llm_tools.workflow_api import (
     ChatSessionState,
@@ -63,6 +80,7 @@ TurnEventKind = Literal[
     "approval_resolved",
     "inspector",
     "result",
+    "harness_result",
     "error",
     "complete",
 ]
@@ -86,6 +104,7 @@ class NiceGUITurnState:
     active_turn_number: int = 0
     active_turn_started_at: str | None = None
     last_workbench_entry_at: str | None = None
+    pending_harness_session_id: str | None = None
     queued_follow_up_prompt: str | None = None
     cancelling: bool = False
 
@@ -106,10 +125,13 @@ class NiceGUIActiveTurnHandle:
     """Background runner handle for one active turn."""
 
     session_id: str
-    runner: ChatSessionTurnRunner
+    mode: Literal["chat", "deep_task"]
     event_queue: queue.Queue[NiceGUIQueuedEvent]
     thread: threading.Thread
     turn_number: int
+    runner: ChatSessionTurnRunner | None = None
+    harness_service: HarnessSessionService | None = None
+    harness_session_id: str | None = None
 
 
 ProviderFactory = Callable[[NiceGUIRuntimeConfig], ModelTurnProvider]
@@ -186,6 +208,58 @@ def _protection_feedback_message(
     if rationale:
         lines.append(f"rationale: {rationale}")
     return "\n".join(lines)
+
+
+def _deep_task_summary_text(summary: Any) -> str:
+    """Return the assistant transcript summary for one deep task session."""
+    lines = [
+        f"Deep task session: {summary.session_id}",
+        f"Stop reason: {summary.stop_reason.value if summary.stop_reason else 'running'}",
+        f"Turns: {summary.total_turns}",
+        ("Completed tasks: " + (", ".join(summary.completed_task_ids) or "none")),
+        f"Active tasks: {', '.join(summary.active_task_ids) or 'none'}",
+    ]
+    if summary.pending_approval_ids:
+        lines.append("Pending approvals: " + ", ".join(summary.pending_approval_ids))
+    if summary.latest_decision_summary:
+        lines.append(f"Latest decision: {summary.latest_decision_summary}")
+    return "\n".join(lines)
+
+
+class NiceGUIHarnessContextBuilder:
+    """Harness context builder that uses NiceGUI session-scoped tool values."""
+
+    def __init__(self, *, env_overrides: dict[str, str] | None = None) -> None:
+        self._delegate = DefaultHarnessContextBuilder()
+        self._env_overrides = dict(env_overrides or {})
+
+    def build(
+        self,
+        *,
+        state: Any,
+        selected_task_ids: Sequence[str],
+        turn_index: int,
+        workspace: str | None = None,
+    ) -> TurnContextBundle:
+        bundle = self._delegate.build(
+            state=state,
+            selected_task_ids=selected_task_ids,
+            turn_index=turn_index,
+            workspace=workspace,
+        )
+        metadata = dict(bundle.tool_context.metadata)
+        metadata["assistant_mode"] = "nicegui_deep_task"
+        return bundle.model_copy(
+            update={
+                "tool_context": bundle.tool_context.model_copy(
+                    update={
+                        "env": dict(self._env_overrides),
+                        "metadata": metadata,
+                    }
+                )
+            },
+            deep=True,
+        )
 
 
 def _effective_assistant_config(
@@ -484,6 +558,24 @@ class NiceGUIChatController:
             PROVIDER_API_KEY_FIELD
         )
 
+    def interaction_mode_locked(self, *, session_id: str | None = None) -> bool:
+        """Return whether the session has sent its first visible user message."""
+        effective_session_id = session_id or self.active_session_id
+        record = self.sessions[effective_session_id]
+        return any(
+            entry.role == "user" and entry.show_in_transcript
+            for entry in record.transcript
+        )
+
+    def set_interaction_mode(self, mode: Literal["chat", "deep_task"]) -> bool:
+        """Set the active session mode when the session has no user messages."""
+        if self.interaction_mode_locked():
+            return False
+        record = self.active_record
+        record.runtime.interaction_mode = mode
+        self._persist_record(record)
+        return True
+
     def submit_prompt(
         self, prompt: str, *, show_in_transcript: bool = True
     ) -> str | None:
@@ -507,6 +599,12 @@ class NiceGUIChatController:
         if show_in_transcript and record.summary.title == "New chat":
             record.summary.title = _title_from_prompt(cleaned)
         self._persist_record(record)
+        if record.runtime.interaction_mode == "deep_task":
+            return self._submit_deep_task_prompt(
+                session_id=session_id,
+                record=record,
+                prompt=cleaned,
+            )
         try:
             provider = self._create_provider(record.runtime, session_id=session_id)
             runner = self._build_runner(
@@ -537,10 +635,11 @@ class NiceGUIChatController:
         turn_state.active_turn_number += 1
         handle = NiceGUIActiveTurnHandle(
             session_id=session_id,
-            runner=runner,
+            mode="chat",
             event_queue=event_queue,
             thread=threading.Thread(target=lambda: None),
             turn_number=turn_state.active_turn_number,
+            runner=runner,
         )
         handle.thread = threading.Thread(
             target=_worker_run_turn,
@@ -551,6 +650,128 @@ class NiceGUIChatController:
         self.active_turns[session_id] = handle
         handle.thread.start()
         return None
+
+    def _submit_deep_task_prompt(
+        self,
+        *,
+        session_id: str,
+        record: NiceGUISessionRecord,
+        prompt: str,
+    ) -> str | None:
+        """Start a durable harness session for one deep task prompt."""
+        turn_state = self.turn_state_for(session_id)
+        try:
+            service = self._build_harness_service(session_id=session_id, record=record)
+            budget_policy = BudgetPolicy(
+                max_turns=record.runtime.research.default_max_turns,
+                max_tool_invocations=record.runtime.research.default_max_tool_invocations,
+                max_elapsed_seconds=record.runtime.research.default_max_elapsed_seconds,
+            )
+            created = service.create_session(
+                HarnessSessionCreateRequest(
+                    title=_title_from_prompt(prompt),
+                    intent=prompt,
+                    budget_policy=budget_policy,
+                )
+            )
+        except Exception as exc:
+            record.transcript.append(
+                NiceGUITranscriptEntry(
+                    role="error", text=str(exc), created_at=_now_iso()
+                )
+            )
+            self._persist_record(record)
+            return str(exc)
+
+        record.transcript.append(
+            NiceGUITranscriptEntry(
+                role="system",
+                text=f"Started deep task `{created.session_id}`.",
+                created_at=_now_iso(),
+            )
+        )
+        self._persist_record(record)
+        event_queue: queue.Queue[NiceGUIQueuedEvent] = queue.Queue()
+        turn_state.busy = True
+        turn_state.cancelling = False
+        turn_state.status_text = "running deep task"
+        turn_state.status_history = ["running deep task"]
+        turn_state.active_turn_started_at = _now_iso()
+        turn_state.last_workbench_entry_at = turn_state.active_turn_started_at
+        turn_state.pending_approval = None
+        turn_state.approval_decision_in_flight = False
+        turn_state.active_turn_number += 1
+        handle = NiceGUIActiveTurnHandle(
+            session_id=session_id,
+            mode="deep_task",
+            event_queue=event_queue,
+            thread=threading.Thread(target=lambda: None),
+            turn_number=turn_state.active_turn_number,
+            harness_service=service,
+            harness_session_id=created.session_id,
+        )
+        handle.thread = threading.Thread(
+            target=_worker_run_harness,
+            args=(handle,),
+            name=f"llm-tools-nicegui-deep-task-{session_id}",
+            daemon=True,
+        )
+        self.active_turns[session_id] = handle
+        handle.thread.start()
+        return None
+
+    def _resume_deep_task_approval(
+        self,
+        *,
+        session_id: str,
+        harness_session_id: str,
+        approved: bool,
+    ) -> bool:
+        """Resume a deep task after a durable harness approval decision."""
+        if session_id in self.active_turns:
+            return False
+        record = self.sessions[session_id]
+        turn_state = self.turn_state_for(session_id)
+        try:
+            service = self._build_harness_service(session_id=session_id, record=record)
+        except Exception as exc:
+            record.transcript.append(
+                NiceGUITranscriptEntry(
+                    role="error", text=str(exc), created_at=_now_iso()
+                )
+            )
+            self._persist_record(record)
+            return False
+        turn_state.busy = True
+        turn_state.cancelling = False
+        turn_state.status_text = "resuming deep task"
+        _remember_status(turn_state, "resuming deep task")
+        turn_state.approval_decision_in_flight = True
+        turn_state.active_turn_started_at = _now_iso()
+        turn_state.last_workbench_entry_at = turn_state.active_turn_started_at
+        turn_state.active_turn_number += 1
+        event_queue: queue.Queue[NiceGUIQueuedEvent] = queue.Queue()
+        handle = NiceGUIActiveTurnHandle(
+            session_id=session_id,
+            mode="deep_task",
+            event_queue=event_queue,
+            thread=threading.Thread(target=lambda: None),
+            turn_number=turn_state.active_turn_number,
+            harness_service=service,
+            harness_session_id=harness_session_id,
+        )
+        handle.thread = threading.Thread(
+            target=_worker_resume_harness,
+            args=(
+                handle,
+                ApprovalResolution.APPROVE if approved else ApprovalResolution.DENY,
+            ),
+            name=f"llm-tools-nicegui-deep-task-resume-{session_id}",
+            daemon=True,
+        )
+        self.active_turns[session_id] = handle
+        handle.thread.start()
+        return True
 
     def drain_events(self) -> list[NiceGUIQueuedEvent]:
         """Drain queued workflow events and update controller state."""
@@ -574,9 +795,10 @@ class NiceGUIChatController:
                     )
                 if event.kind == "complete":
                     self.active_turns.pop(session_id, None)
-                    pending = self.turn_state_for(session_id).queued_follow_up_prompt
-                    if pending:
-                        self.turn_state_for(session_id).queued_follow_up_prompt = None
+                    completed_turn_state = self.turn_state_for(session_id)
+                    pending = completed_turn_state.queued_follow_up_prompt
+                    if pending and completed_turn_state.pending_approval is None:
+                        completed_turn_state.queued_follow_up_prompt = None
                         if self.preferences.active_session_id == session_id:
                             self.submit_prompt(pending)
         return applied
@@ -585,9 +807,26 @@ class NiceGUIChatController:
         """Resolve the active session's pending approval."""
         session_id = self.active_session_id
         handle = self.active_turns.get(session_id)
-        if handle is None:
-            return False
         turn_state = self.turn_state_for(session_id)
+        if handle is None:
+            if turn_state.pending_harness_session_id is None:
+                return False
+            return self._resume_deep_task_approval(
+                session_id=session_id,
+                harness_session_id=turn_state.pending_harness_session_id,
+                approved=approved,
+            )
+        if handle.mode == "deep_task":
+            if handle.harness_session_id is None:
+                return False
+            return self._resume_deep_task_approval(
+                session_id=session_id,
+                harness_session_id=handle.harness_session_id,
+                approved=approved,
+            )
+        turn_state = self.turn_state_for(session_id)
+        if handle.runner is None:
+            return False
         resolved = handle.runner.resolve_pending_approval(approved)
         if resolved:
             turn_state.approval_decision_in_flight = True
@@ -602,7 +841,17 @@ class NiceGUIChatController:
         turn_state = self.turn_state_for(session_id)
         turn_state.cancelling = True
         turn_state.status_text = "stopping"
-        handle.runner.cancel()
+        if handle.mode == "chat" and handle.runner is not None:
+            handle.runner.cancel()
+        elif handle.mode == "deep_task" and handle.harness_service is not None:
+            try:
+                handle.harness_service.stop_session(
+                    HarnessSessionStopRequest(
+                        session_id=str(handle.harness_session_id or "")
+                    )
+                )
+            except Exception:
+                return False
         return True
 
     def pending_protection_prompt(self) -> ProtectionPendingPrompt | None:
@@ -830,6 +1079,80 @@ class NiceGUIChatController:
             enabled_tool_names=exposed_tool_names,
         )
 
+    def _build_harness_service(
+        self, *, session_id: str, record: NiceGUISessionRecord
+    ) -> HarnessSessionService:
+        """Build the shared harness service for a NiceGUI deep task."""
+        runtime = record.runtime
+        effective_config = _effective_assistant_config(
+            config=self.config, runtime=runtime
+        )
+        provider = self._create_provider(runtime, session_id=session_id)
+        tool_specs = build_assistant_available_tool_specs()
+        root = Path(runtime.root_path) if runtime.root_path is not None else None
+        enabled_tools = set(runtime.enabled_tools)
+        policy = build_assistant_policy(
+            enabled_tools=enabled_tools,
+            tool_specs=tool_specs,
+            require_approval_for=set(runtime.require_approval_for),
+            allow_network=runtime.allow_network,
+            allow_filesystem=runtime.allow_filesystem and root is not None,
+            allow_subprocess=runtime.allow_subprocess and root is not None,
+            redaction_config=effective_config.policy.redaction,
+        )
+        registry, workflow_executor = build_assistant_executor(policy=policy)
+        env_overrides = self.tool_env_overrides(
+            runtime=runtime,
+            session_id=session_id,
+        )
+        exposed_tool_names = _exposed_tool_names_for_runtime(
+            tool_specs=tool_specs,
+            runtime=runtime,
+            root=root,
+            env=env_overrides,
+        )
+        protection_controller = None
+        if _nicegui_protection_is_ready(runtime.protection):
+            protection_environment = build_protection_environment(
+                app_name="nicegui_deep_task",
+                model_name=runtime.model_name,
+                workspace=runtime.root_path,
+                enabled_tools=sorted(exposed_tool_names),
+                allow_network=runtime.allow_network,
+                allow_filesystem=runtime.allow_filesystem and root is not None,
+                allow_subprocess=runtime.allow_subprocess and root is not None,
+            )
+            protection_environment["allowed_sensitivity_labels"] = list(
+                runtime.protection.allowed_sensitivity_labels
+            )
+            protection_controller = build_protection_controller(
+                config=runtime.protection,
+                provider=provider,
+                environment=protection_environment,
+            )
+        harness_provider = AssistantHarnessTurnProvider(
+            provider=provider,  # type: ignore[arg-type]
+            temperature=effective_config.llm.temperature,
+            system_prompt=build_research_system_prompt(
+                tool_registry=registry,
+                tool_limits=effective_config.tool_limits,
+                enabled_tool_names=exposed_tool_names,
+                workspace_enabled=root is not None,
+                staged_schema_protocol=_is_staged_schema_protocol(provider),
+            ),
+            protection_controller=protection_controller,
+        )
+        return HarnessSessionService(
+            store=self.store.harness_store(
+                chat_session_id=session_id,
+                owner_user_id=record.summary.owner_user_id,
+            ),
+            workflow_executor=workflow_executor,
+            provider=harness_provider,
+            context_builder=NiceGUIHarnessContextBuilder(env_overrides=env_overrides),
+            workspace=str(root) if root is not None else None,
+        )
+
     def _apply_queued_event(self, event: NiceGUIQueuedEvent) -> str | None:
         if event.session_id not in self.sessions:
             return None
@@ -926,6 +1249,14 @@ class NiceGUIChatController:
                 session_id=event.session_id,
                 event=result_event,
             )
+        if event.kind == "harness_result":
+            inspection = HarnessSessionInspection.model_validate(event.payload)
+            return self._apply_harness_result(
+                session_id=event.session_id,
+                turn_number=event.turn_number,
+                inspection=inspection,
+                event_created_at=event.created_at,
+            )
         if event.kind == "error":
             return self._apply_turn_error(
                 session_id=event.session_id,
@@ -1015,6 +1346,78 @@ class NiceGUIChatController:
         self._persist_record(record)
         return pending
 
+    def _apply_harness_result(
+        self,
+        *,
+        session_id: str,
+        turn_number: int,
+        inspection: HarnessSessionInspection,
+        event_created_at: str,
+    ) -> str | None:
+        record = self.sessions[session_id]
+        turn_state = self.turn_state_for(session_id)
+        pending_approval = inspection.resumed.pending_approval
+        turn_state.pending_approval = None
+        turn_state.approval_decision_in_flight = False
+        turn_state.pending_harness_session_id = None
+        if pending_approval is not None:
+            approval_request = pending_approval.approval_request
+            turn_state.pending_approval = ChatWorkflowApprovalState(
+                approval_request=approval_request,
+                tool_name=approval_request.tool_name,
+                redacted_arguments=dict(approval_request.request.arguments),
+                policy_reason=approval_request.policy_reason,
+                policy_metadata=dict(approval_request.policy_metadata),
+            )
+            turn_state.pending_harness_session_id = inspection.summary.session_id
+            turn_state.status_text = "approval required"
+            _remember_status(turn_state, "approval required")
+            record.transcript.append(
+                NiceGUITranscriptEntry(
+                    role="system",
+                    text=_approval_request_copy(turn_state.pending_approval),
+                    created_at=_now_iso(),
+                )
+            )
+        else:
+            record.transcript.append(
+                NiceGUITranscriptEntry(
+                    role="assistant",
+                    text=_deep_task_summary_text(inspection.summary),
+                    created_at=_now_iso(),
+                )
+            )
+        started_at = (
+            turn_state.last_workbench_entry_at or turn_state.active_turn_started_at
+        )
+        duration_seconds = _seconds_between_iso(started_at, event_created_at)
+        record.workbench_items.append(
+            NiceGUIWorkbenchItem(
+                item_id=f"workbench-{uuid4().hex}",
+                kind="result",
+                title=f"T{turn_number}: Deep Task",
+                payload=inspection.model_dump(mode="json"),
+                version=1,
+                active=True,
+                started_at=started_at,
+                finished_at=event_created_at,
+                duration_seconds=duration_seconds,
+                created_at=_now_iso(),
+                updated_at=_now_iso(),
+            )
+        )
+        pending = turn_state.queued_follow_up_prompt
+        keep_approval = turn_state.pending_approval
+        keep_harness_session_id = turn_state.pending_harness_session_id
+        self._reset_turn_state(turn_state)
+        turn_state.pending_approval = keep_approval
+        turn_state.pending_harness_session_id = keep_harness_session_id
+        if keep_approval is not None:
+            turn_state.status_text = "approval required"
+            turn_state.status_history = ["approval required"]
+        self._persist_record(record)
+        return pending
+
     def _apply_turn_error(
         self,
         *,
@@ -1043,6 +1446,7 @@ class NiceGUIChatController:
         turn_state.active_turn_started_at = None
         turn_state.last_workbench_entry_at = None
         turn_state.pending_approval = None
+        turn_state.pending_harness_session_id = None
         turn_state.approval_decision_in_flight = False
         turn_state.queued_follow_up_prompt = pending
         turn_state.cancelling = False
@@ -1119,6 +1523,8 @@ def _serialize_workflow_event(
 
 def _worker_run_turn(handle: NiceGUIActiveTurnHandle) -> None:
     try:
+        if handle.runner is None:
+            raise RuntimeError("Chat turn handle is missing a runner.")
         for event in handle.runner:
             handle.event_queue.put(
                 _serialize_workflow_event(
@@ -1127,6 +1533,93 @@ def _worker_run_turn(handle: NiceGUIActiveTurnHandle) -> None:
                     session_id=handle.session_id,
                 )
             )
+    except Exception as exc:
+        handle.event_queue.put(
+            NiceGUIQueuedEvent(
+                kind="error",
+                payload=str(exc),
+                turn_number=handle.turn_number,
+                session_id=handle.session_id,
+            )
+        )
+    finally:
+        handle.event_queue.put(
+            NiceGUIQueuedEvent(
+                kind="complete",
+                payload=None,
+                turn_number=handle.turn_number,
+                session_id=handle.session_id,
+            )
+        )
+
+
+def _worker_run_harness(handle: NiceGUIActiveTurnHandle) -> None:
+    try:
+        if handle.harness_service is None or handle.harness_session_id is None:
+            raise RuntimeError("Deep task handle is missing a harness session.")
+        handle.harness_service.run_session(
+            HarnessSessionRunRequest(session_id=handle.harness_session_id)
+        )
+        inspection = handle.harness_service.inspect_session(
+            HarnessSessionInspectRequest(
+                session_id=handle.harness_session_id,
+                include_replay=True,
+            )
+        )
+        handle.event_queue.put(
+            NiceGUIQueuedEvent(
+                kind="harness_result",
+                payload=inspection.model_dump(mode="json"),
+                turn_number=handle.turn_number,
+                session_id=handle.session_id,
+            )
+        )
+    except Exception as exc:
+        handle.event_queue.put(
+            NiceGUIQueuedEvent(
+                kind="error",
+                payload=str(exc),
+                turn_number=handle.turn_number,
+                session_id=handle.session_id,
+            )
+        )
+    finally:
+        handle.event_queue.put(
+            NiceGUIQueuedEvent(
+                kind="complete",
+                payload=None,
+                turn_number=handle.turn_number,
+                session_id=handle.session_id,
+            )
+        )
+
+
+def _worker_resume_harness(
+    handle: NiceGUIActiveTurnHandle, approval_resolution: ApprovalResolution
+) -> None:
+    try:
+        if handle.harness_service is None or handle.harness_session_id is None:
+            raise RuntimeError("Deep task handle is missing a harness session.")
+        handle.harness_service.resume_session(
+            HarnessSessionResumeRequest(
+                session_id=handle.harness_session_id,
+                approval_resolution=approval_resolution,
+            )
+        )
+        inspection = handle.harness_service.inspect_session(
+            HarnessSessionInspectRequest(
+                session_id=handle.harness_session_id,
+                include_replay=True,
+            )
+        )
+        handle.event_queue.put(
+            NiceGUIQueuedEvent(
+                kind="harness_result",
+                payload=inspection.model_dump(mode="json"),
+                turn_number=handle.turn_number,
+                session_id=handle.session_id,
+            )
+        )
     except Exception as exc:
         handle.event_queue.put(
             NiceGUIQueuedEvent(

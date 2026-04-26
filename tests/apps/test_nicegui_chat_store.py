@@ -28,6 +28,10 @@ from llm_tools.apps.nicegui_chat.store import (
     remember_default_db_path,
     workbench_items,
 )
+from llm_tools.harness_api.models import BudgetPolicy
+from llm_tools.harness_api.replay import build_stored_artifacts
+from llm_tools.harness_api.store import CURRENT_HARNESS_STATE_SCHEMA_VERSION
+from llm_tools.harness_api.tasks import create_root_task
 from llm_tools.workflow_api import ChatFinalResponse
 
 
@@ -115,6 +119,67 @@ def test_store_initializes_and_round_trips_session(tmp_path: Path) -> None:
     assert loaded.workbench_items[0].version == 2
     assert loaded.workbench_items[0].active is True
     assert loaded.workbench_items[0].duration_seconds == 1.25
+
+
+def test_harness_store_round_trips_encrypted_state(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    record = store.create_session(
+        NiceGUIRuntimeConfig(model_name="test-model"),
+        title="Deep task chat",
+        owner_user_id="user-a",
+    )
+    harness_store = store.harness_store(
+        chat_session_id=record.summary.session_id,
+        owner_user_id=record.summary.owner_user_id,
+    )
+    state = create_root_task(
+        schema_version=CURRENT_HARNESS_STATE_SCHEMA_VERSION,
+        session_id="harness-1",
+        root_task_id="task-1",
+        title="Secret task",
+        intent="Investigate the secret repository",
+        budget_policy=BudgetPolicy(max_turns=2),
+        started_at="2026-01-01T00:00:00Z",
+    )
+
+    saved = harness_store.save_session(
+        state, artifacts=build_stored_artifacts(state=state)
+    )
+    loaded = harness_store.load_session("harness-1")
+
+    assert loaded is not None
+    assert saved.revision == "1"
+    assert loaded.state.tasks[0].title == "Secret task"
+    assert loaded.artifacts.summary is not None
+    other_user_store = store.harness_store(
+        chat_session_id=record.summary.session_id,
+        owner_user_id="user-b",
+    )
+    assert other_user_store.load_session("harness-1") is None
+    assert other_user_store.list_sessions() == []
+    with store.engine.begin() as connection:
+        row = (
+            connection.execute(
+                select(workbench_items).where(workbench_items.c.item_id == "missing")
+            )
+            .mappings()
+            .first()
+        )
+        harness_row = (
+            connection.exec_driver_sql(
+                "SELECT state_json, artifacts_json FROM harness_sessions"
+            )
+            .mappings()
+            .first()
+        )
+
+    assert row is None
+    assert harness_row is not None
+    assert "Secret task" not in str(harness_row["state_json"])
+    assert "Investigate the secret repository" not in str(harness_row["state_json"])
+
+    store.delete_session(record.summary.session_id)
+    assert harness_store.load_session("harness-1") is None
 
 
 def test_sqlcipher_database_rejects_plain_sqlite_and_wrong_key(

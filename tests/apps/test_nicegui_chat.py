@@ -739,6 +739,67 @@ def test_controller_direct_answer_persists_user_and_assistant(
     assert loaded.token_usage is not None
 
 
+def test_controller_interaction_mode_locks_after_first_message(
+    tmp_path: Path,
+) -> None:
+    provider = _FakeProvider(
+        [
+            ParsedModelResponse(
+                final_response={
+                    "answer": "Plain answer",
+                    "citations": [],
+                    "confidence": 0.7,
+                    "uncertainty": [],
+                    "missing_information": [],
+                    "follow_up_suggestions": [],
+                }
+            )
+        ]
+    )
+    controller = _controller(tmp_path, provider)
+
+    assert controller.set_interaction_mode("deep_task") is True
+    assert controller.active_record.runtime.interaction_mode == "deep_task"
+    assert controller.set_interaction_mode("chat") is True
+    assert controller.submit_prompt("hello") is None
+
+    assert controller.interaction_mode_locked() is True
+    assert controller.set_interaction_mode("deep_task") is False
+    assert controller.active_record.runtime.interaction_mode == "chat"
+    _drain_until_idle(controller)
+
+
+def test_controller_deep_task_runs_harness_and_persists_summary(
+    tmp_path: Path,
+) -> None:
+    provider = _FakeProvider(
+        [
+            ParsedModelResponse(
+                final_response={
+                    "answer": "Deep task answer",
+                    "citations": [],
+                    "confidence": 0.7,
+                    "uncertainty": [],
+                    "missing_information": [],
+                    "follow_up_suggestions": [],
+                }
+            )
+        ]
+    )
+    controller = _controller(tmp_path, provider)
+    assert controller.set_interaction_mode("deep_task") is True
+
+    assert controller.submit_prompt("investigate this") is None
+    _drain_until_idle(controller)
+
+    roles = [entry.role for entry in controller.active_record.transcript]
+    assert roles == ["user", "system", "assistant"]
+    assert "Started deep task" in controller.active_record.transcript[1].text
+    assert "Deep task session:" in controller.active_record.transcript[2].text
+    assert controller.active_record.workbench_items[-1].kind == "result"
+    assert controller.active_record.workbench_items[-1].title.endswith("Deep Task")
+
+
 def test_controller_session_management_filters_and_temporary_chats(
     tmp_path: Path,
 ) -> None:

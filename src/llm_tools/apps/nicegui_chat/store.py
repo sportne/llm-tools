@@ -52,6 +52,12 @@ from llm_tools.apps.nicegui_chat.models import (
     NiceGUIUserSession,
     NiceGUIWorkbenchItem,
 )
+from llm_tools.harness_api.replay import StoredHarnessArtifacts
+from llm_tools.harness_api.store import (
+    HarnessStateConflictError,
+    StoredHarnessState,
+    ensure_supported_schema_version,
+)
 from llm_tools.workflow_api import ChatFinalResponse, ChatSessionState, ChatTokenUsage
 
 NICEGUI_DB_ENV_VAR = "LLM_TOOLS_NICEGUI_DB"
@@ -123,6 +129,25 @@ workbench_items = Table(
     Column("started_at", String, nullable=True),
     Column("finished_at", String, nullable=True),
     Column("duration_seconds", Float, nullable=True),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+)
+
+harness_sessions = Table(
+    "harness_sessions",
+    metadata,
+    Column("session_id", String, primary_key=True),
+    Column(
+        "chat_session_id",
+        String,
+        ForeignKey("chat_sessions.session_id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("owner_user_id", String, nullable=True),
+    Column("revision", String, nullable=False),
+    Column("saved_at", String, nullable=False),
+    Column("state_json", Text, nullable=False),
+    Column("artifacts_json", Text, nullable=False),
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
 )
@@ -773,8 +798,23 @@ class SQLiteNiceGUIChatStore:
         """Delete a durable session and its dependent rows."""
         with self.engine.begin() as connection:
             connection.execute(
+                delete(harness_sessions).where(
+                    harness_sessions.c.chat_session_id == session_id
+                )
+            )
+            connection.execute(
                 delete(chat_sessions).where(chat_sessions.c.session_id == session_id)
             )
+
+    def harness_store(
+        self, *, chat_session_id: str, owner_user_id: str | None
+    ) -> SQLiteNiceGUIHarnessStateStore:
+        """Return a harness-state store scoped to one chat session and owner."""
+        return SQLiteNiceGUIHarnessStateStore(
+            parent=self,
+            chat_session_id=chat_session_id,
+            owner_user_id=owner_user_id,
+        )
 
     def load_preferences(
         self, *, owner_user_id: str | None = None
@@ -1328,17 +1368,191 @@ class SQLiteNiceGUIChatStore:
         }
 
 
+class SQLiteNiceGUIHarnessStateStore:
+    """HarnessStateStore implementation backed by encrypted NiceGUI SQLite."""
+
+    def __init__(
+        self,
+        *,
+        parent: SQLiteNiceGUIChatStore,
+        chat_session_id: str,
+        owner_user_id: str | None,
+    ) -> None:
+        self._parent = parent
+        self._chat_session_id = chat_session_id
+        self._owner_user_id = owner_user_id
+
+    def load_session(self, session_id: str) -> StoredHarnessState | None:
+        """Return one stored harness snapshot when it belongs to this chat."""
+        owner_clause = (
+            harness_sessions.c.owner_user_id.is_(None)
+            if self._owner_user_id is None
+            else harness_sessions.c.owner_user_id == self._owner_user_id
+        )
+        with self._parent.engine.begin() as connection:
+            row = (
+                connection.execute(
+                    select(harness_sessions).where(
+                        harness_sessions.c.session_id == session_id,
+                        harness_sessions.c.chat_session_id == self._chat_session_id,
+                        owner_clause,
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        return None if row is None else self._snapshot_from_row(row)
+
+    def save_session(
+        self,
+        state: Any,
+        *,
+        expected_revision: str | None = None,
+        artifacts: StoredHarnessArtifacts | None = None,
+    ) -> StoredHarnessState:
+        """Persist a canonical harness snapshot with optimistic locking."""
+        ensure_supported_schema_version(state.schema_version)
+        session_id = state.session.session_id
+        current = self.load_session(session_id)
+        if expected_revision is not None:
+            current_revision = None if current is None else current.revision
+            if current_revision != expected_revision:
+                raise HarnessStateConflictError(
+                    f"Session '{session_id}' revision mismatch."
+                )
+
+        next_revision = "1" if current is None else str(int(current.revision) + 1)
+        snapshot = StoredHarnessState(
+            session_id=session_id,
+            revision=next_revision,
+            saved_at=_now_iso(),
+            state=state.model_copy(deep=True),
+            artifacts=(
+                artifacts.model_copy(deep=True)
+                if artifacts is not None
+                else (
+                    current.artifacts.model_copy(deep=True)
+                    if current is not None
+                    else StoredHarnessArtifacts()
+                )
+            ),
+        )
+        timestamp = snapshot.saved_at
+        values = {
+            "session_id": session_id,
+            "chat_session_id": self._chat_session_id,
+            "owner_user_id": self._owner_user_id,
+            "revision": snapshot.revision,
+            "saved_at": snapshot.saved_at,
+            "state_json": self._parent._encrypt_field(
+                self._owner_user_id,
+                table="harness_sessions",
+                row_id=session_id,
+                column="state_json",
+                value=snapshot.state.model_dump_json(),
+            ),
+            "artifacts_json": self._parent._encrypt_field(
+                self._owner_user_id,
+                table="harness_sessions",
+                row_id=session_id,
+                column="artifacts_json",
+                value=snapshot.artifacts.model_dump_json(),
+            ),
+            "created_at": timestamp if current is None else current.saved_at,
+            "updated_at": timestamp,
+        }
+        with self._parent.engine.begin() as connection:
+            existing = connection.execute(
+                select(harness_sessions.c.session_id).where(
+                    harness_sessions.c.session_id == session_id
+                )
+            ).first()
+            if existing is None:
+                connection.execute(insert(harness_sessions).values(values))
+            else:
+                connection.execute(
+                    update(harness_sessions)
+                    .where(harness_sessions.c.session_id == session_id)
+                    .values(values)
+                )
+        return snapshot.model_copy(deep=True)
+
+    def delete_session(self, session_id: str) -> None:
+        """Delete one harness snapshot for this chat."""
+        owner_clause = (
+            harness_sessions.c.owner_user_id.is_(None)
+            if self._owner_user_id is None
+            else harness_sessions.c.owner_user_id == self._owner_user_id
+        )
+        with self._parent.engine.begin() as connection:
+            connection.execute(
+                delete(harness_sessions).where(
+                    harness_sessions.c.session_id == session_id,
+                    harness_sessions.c.chat_session_id == self._chat_session_id,
+                    owner_clause,
+                )
+            )
+
+    def list_sessions(self, *, limit: int | None = None) -> list[StoredHarnessState]:
+        """Return this chat's harness snapshots newest first."""
+        owner_clause = (
+            harness_sessions.c.owner_user_id.is_(None)
+            if self._owner_user_id is None
+            else harness_sessions.c.owner_user_id == self._owner_user_id
+        )
+        stmt = (
+            select(harness_sessions)
+            .where(
+                harness_sessions.c.chat_session_id == self._chat_session_id,
+                owner_clause,
+            )
+            .order_by(harness_sessions.c.saved_at.desc())
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        with self._parent.engine.begin() as connection:
+            rows = connection.execute(stmt).mappings().all()
+        return [self._snapshot_from_row(row) for row in rows]
+
+    def _snapshot_from_row(self, row: Any) -> StoredHarnessState:
+        state_json = self._parent._decrypt_field(
+            row["owner_user_id"],
+            table="harness_sessions",
+            row_id=str(row["session_id"]),
+            column="state_json",
+            value=str(row["state_json"]),
+        )
+        artifacts_json = self._parent._decrypt_field(
+            row["owner_user_id"],
+            table="harness_sessions",
+            row_id=str(row["session_id"]),
+            column="artifacts_json",
+            value=str(row["artifacts_json"]),
+        )
+        return StoredHarnessState.model_validate(
+            {
+                "session_id": row["session_id"],
+                "revision": row["revision"],
+                "saved_at": row["saved_at"],
+                "state": json.loads(state_json),
+                "artifacts": json.loads(artifacts_json),
+            }
+        )
+
+
 __all__ = [
     "NICEGUI_DB_ENV_VAR",
     "NiceGUIChatStoreCorruptionError",
     "NiceGUIChatStoreError",
     "SQLiteNiceGUIChatStore",
+    "SQLiteNiceGUIHarnessStateStore",
     "app_preferences",
     "auth_events",
     "chat_messages",
     "chat_sessions",
     "create_sqlcipher_engine",
     "default_db_path",
+    "harness_sessions",
     "metadata",
     "remember_default_db_path",
     "user_sessions",

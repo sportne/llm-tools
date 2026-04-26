@@ -20,6 +20,7 @@ from llm_tools.workflow_api import (
 )
 
 NiceGUIAuthMode = Literal["none", "local"]
+NiceGUIInteractionMode = Literal["chat", "deep_task"]
 NiceGUIUserRole = Literal["admin", "user"]
 
 
@@ -119,6 +120,7 @@ class NiceGUIWorkbenchItem(BaseModel):
 class NiceGUIRuntimeConfig(BaseModel):
     """Mutable runtime controls owned by one NiceGUI session."""
 
+    interaction_mode: NiceGUIInteractionMode = "chat"
     provider: ProviderPreset = ProviderPreset.OLLAMA
     provider_mode_strategy: ProviderModeStrategy = ProviderModeStrategy.AUTO
     model_name: str = "gemma4:26b"
@@ -258,6 +260,7 @@ class NiceGUIPreferences(BaseModel):
 
 __all__ = [
     "NiceGUIAuthMode",
+    "NiceGUIInteractionMode",
     "NiceGUIUserRole",
     "NiceGUIInspectorEntry",
     "NiceGUIInspectorState",
