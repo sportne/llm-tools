@@ -45,6 +45,19 @@ def _event_payload_text(event: object) -> str:
     return ""
 
 
+def _sidebar_container_classes(*, collapsed: bool) -> str:
+    """Return sidebar container classes for the current collapsed state."""
+    classes = "llmt-sidebar"
+    if collapsed:
+        classes += " collapsed"
+    return classes
+
+
+def _workbench_container_classes() -> str:
+    """Return workbench container classes."""
+    return "llmt-workbench"
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the NiceGUI chat CLI parser."""
     parser = argparse.ArgumentParser(
@@ -222,6 +235,7 @@ def build_nicegui_chat_ui(  # noqa: C901
     dialogs: dict[str, Any] = {}
 
     def refresh_all() -> None:
+        apply_layout_state()
         render_sessions()
         render_header()
         render_transcript()
@@ -230,6 +244,17 @@ def build_nicegui_chat_ui(  # noqa: C901
 
     def active_runtime() -> NiceGUIRuntimeConfig:
         return controller.active_record.runtime
+
+    def apply_layout_state() -> None:
+        if session_column is not None:
+            session_column.classes(
+                replace=_sidebar_container_classes(
+                    collapsed=controller.preferences.sidebar_collapsed
+                )
+            )
+        if workbench_column is not None:
+            workbench_column.classes(replace=_workbench_container_classes())
+            workbench_column.set_visibility(controller.preferences.workbench_open)
 
     def render_sessions() -> None:
         nonlocal session_column
@@ -503,10 +528,7 @@ def build_nicegui_chat_ui(  # noqa: C901
             refresh_all()
 
     with ui.row().classes("llmt-shell no-wrap"):
-        sidebar_classes = "llmt-sidebar"
-        if controller.preferences.sidebar_collapsed:
-            sidebar_classes += " collapsed"
-        with ui.column().classes(sidebar_classes) as session_column:
+        with ui.column() as session_column:
             pass
 
         with ui.column().classes("llmt-main fit"):
@@ -570,11 +592,8 @@ def build_nicegui_chat_ui(  # noqa: C901
                     "Provider mode: " + active_runtime().provider_mode_strategy.value
                 ).classes("text-xs llmt-muted")
 
-        if controller.preferences.workbench_open:
-            with ui.column().classes("llmt-workbench") as workbench_column:
-                pass
-        else:
-            workbench_column = ui.column().classes("hidden")
+        with ui.column() as workbench_column:
+            pass
 
     with ui.dialog() as settings_dialog, ui.card().classes("w-[520px]"):
         dialogs["settings"] = settings_dialog

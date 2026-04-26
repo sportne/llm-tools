@@ -11,6 +11,8 @@ from llm_tools.apps.assistant_config import StreamlitAssistantConfig
 from llm_tools.apps.nicegui_chat.app import (
     _event_payload_text,
     _first_nonempty_text,
+    _sidebar_container_classes,
+    _workbench_container_classes,
     build_nicegui_chat_ui,
     build_parser,
     main,
@@ -141,6 +143,12 @@ def test_composer_text_helpers_accept_server_and_js_payloads() -> None:
     assert _event_payload_text(_FakeEvent({"target": {}})) == ""
 
 
+def test_layout_container_class_helpers() -> None:
+    assert _sidebar_container_classes(collapsed=False) == "llmt-sidebar"
+    assert _sidebar_container_classes(collapsed=True) == "llmt-sidebar collapsed"
+    assert _workbench_container_classes() == "llmt-workbench"
+
+
 def test_cli_config_resolution_covers_runtime_overrides(tmp_path: Path) -> None:
     parser = build_parser()
     args = parser.parse_args(
@@ -267,6 +275,24 @@ def test_app_builder_renders_with_temporary_sqlite_db(tmp_path: Path) -> None:
     build_nicegui_chat_ui(controller)
 
     assert controller.active_record.summary.title == "New chat"
+
+
+def test_app_builder_applies_initial_layout_preferences(tmp_path: Path) -> None:
+    from nicegui import ui
+
+    controller = _controller(tmp_path, _FakeProvider([]))
+    controller.preferences.sidebar_collapsed = True
+    controller.preferences.workbench_open = False
+
+    build_nicegui_chat_ui(controller)
+
+    elements = list(ui.context.client.elements.values())
+    sidebar = [element for element in elements if "llmt-sidebar" in element.classes][-1]
+    workbench = [
+        element for element in elements if "llmt-workbench" in element.classes
+    ][-1]
+    assert "collapsed" in sidebar.classes
+    assert workbench.visible is False
 
 
 def test_controller_direct_answer_persists_user_and_assistant(
