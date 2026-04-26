@@ -1042,6 +1042,7 @@ def build_nicegui_chat_ui(  # noqa: C901
     admin_create_username_input: Any = None
     admin_create_password_input: Any = None
     admin_create_role_select: Any = None
+    admin_deep_task_switch: Any = None
     allow_network_switch: Any = None
     allow_filesystem_switch: Any = None
     allow_subprocess_switch: Any = None
@@ -1082,6 +1083,15 @@ def build_nicegui_chat_ui(  # noqa: C901
 
     def active_runtime() -> NiceGUIRuntimeConfig:
         return controller.active_record.runtime
+
+    def active_interaction_mode() -> NiceGUIInteractionMode:
+        runtime = active_runtime()
+        if (
+            runtime.interaction_mode == "deep_task"
+            and not controller.deep_task_mode_enabled()
+        ):
+            return "chat"
+        return runtime.interaction_mode
 
     def secret_entry_enabled() -> bool:
         return controller.hosted_config.secret_entry_enabled
@@ -1423,14 +1433,17 @@ def build_nicegui_chat_ui(  # noqa: C901
         groups = current_tool_capability_groups()
         summaries = build_tool_group_capability_summaries(groups)
         mode_locked = controller.interaction_mode_locked()
-        runtime = active_runtime()
         with tool_menu_column:
             ui.label(
                 "Choose mode before the first message. Tool changes apply to the next message."
             ).classes("llmt-tool-menu-note llmt-muted")
             with ui.expansion("Mode", icon="tune", value=True).classes("w-full"):
-                for mode, label in INTERACTION_MODE_LABELS.items():
-                    selected = runtime.interaction_mode == mode
+                modes: list[NiceGUIInteractionMode] = ["chat"]
+                if controller.deep_task_mode_enabled():
+                    modes.append("deep_task")
+                for mode in modes:
+                    label = INTERACTION_MODE_LABELS[mode]
+                    selected = active_interaction_mode() == mode
                     button = ui.button(
                         label,
                         icon="radio_button_checked"
@@ -1519,12 +1532,13 @@ def build_nicegui_chat_ui(  # noqa: C901
         ]
         with selected_tools_row:
             ui.label("Mode").classes("text-xs llmt-muted")
-            mode_label = INTERACTION_MODE_LABELS[runtime.interaction_mode]
+            interaction_mode = active_interaction_mode()
+            mode_label = INTERACTION_MODE_LABELS[interaction_mode]
             mode_button = ui.button(
                 mode_label,
                 icon=(
                     "manage_search"
-                    if runtime.interaction_mode == "deep_task"
+                    if interaction_mode == "deep_task"
                     else "chat_bubble_outline"
                 ),
                 on_click=lambda _event: render_tool_menu(),
@@ -1533,7 +1547,7 @@ def build_nicegui_chat_ui(  # noqa: C901
             if controller.interaction_mode_locked():
                 mode_button.disable()
             with mode_button:
-                tooltip = INTERACTION_MODE_TOOLTIPS[runtime.interaction_mode]
+                tooltip = INTERACTION_MODE_TOOLTIPS[interaction_mode]
                 if controller.interaction_mode_locked():
                     tooltip += " Mode is locked after the first message."
                 ui.tooltip(tooltip).props("delay=700")
@@ -1557,6 +1571,10 @@ def build_nicegui_chat_ui(  # noqa: C901
         if controller.set_interaction_mode(mode):
             render_selected_tools()
             render_tool_menu()
+        elif mode == "deep_task" and not controller.deep_task_mode_enabled():
+            ui.notify(
+                "Deep Task mode is disabled by the administrator.", type="warning"
+            )
         else:
             ui.notify("Mode is locked after the first message.", type="warning")
 
@@ -1901,8 +1919,19 @@ def build_nicegui_chat_ui(  # noqa: C901
         if not _is_admin_user(controller.current_user):
             ui.notify("Admin access is required.", type="negative")
             return
+        if admin_deep_task_switch is not None:
+            admin_deep_task_switch.value = controller.deep_task_mode_enabled()
         render_admin_user_list()
         dialogs["admin"].open()
+
+    def set_admin_deep_task_enabled(event: Any) -> None:
+        if not _is_admin_user(controller.current_user):
+            ui.notify("Admin access is required.", type="negative")
+            return
+        controller.set_deep_task_mode_enabled(bool(event.value))
+        render_selected_tools()
+        render_tool_menu()
+        ui.notify("Deep Task mode updated.")
 
     def render_admin_user_list() -> None:
         if admin_user_list_column is None:
@@ -2362,6 +2391,17 @@ def build_nicegui_chat_ui(  # noqa: C901
             ui.label("Admin").classes("text-lg")
             ui.button(icon="close", on_click=admin_dialog.close).props("flat round")
         ui.label("Manage local NiceGUI users.").classes("text-sm llmt-muted")
+        with ui.column().classes("llmt-settings-section w-full gap-2"):
+            ui.label("Features").classes("text-base")
+            admin_deep_task_switch = ui.switch(
+                "Deep Task mode",
+                value=controller.deep_task_mode_enabled(),
+                on_change=set_admin_deep_task_enabled,
+            ).classes("w-full")
+            with admin_deep_task_switch:
+                ui.tooltip(
+                    "Shows Deep Task as a selectable chat mode before the first message."
+                ).props("delay=700")
         with ui.column().classes("llmt-settings-section w-full gap-2"):
             ui.label("Create user").classes("text-base")
             with ui.row().classes("w-full items-end gap-2 no-wrap"):

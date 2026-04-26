@@ -13,6 +13,7 @@ from llm_tools.apps.nicegui_chat.auth import (
     verify_password,
 )
 from llm_tools.apps.nicegui_chat.models import (
+    NiceGUIAdminSettings,
     NiceGUIInspectorEntry,
     NiceGUIPreferences,
     NiceGUIRuntimeConfig,
@@ -467,6 +468,16 @@ def test_preferences_round_trip(tmp_path: Path) -> None:
     assert loaded.sidebar_collapsed is True
     assert loaded.workbench_open is False
     assert loaded.recent_models == {"ollama": ["model-a"]}
+
+
+def test_admin_settings_round_trip(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+
+    assert store.load_admin_settings().deep_task_mode_enabled is False
+
+    store.save_admin_settings(NiceGUIAdminSettings(deep_task_mode_enabled=True))
+
+    assert store.load_admin_settings().deep_task_mode_enabled is True
 
 
 def test_temporary_sessions_are_not_persisted(tmp_path: Path) -> None:

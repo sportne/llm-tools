@@ -522,6 +522,46 @@ def test_harness_executor_resume_rehydrates_current_environment(
     assert outcome.tool_result.output == {"value": "available-on-resume"}
 
 
+def test_harness_executor_resume_can_use_explicit_approval_environment(
+    tmp_path: Path,
+    _workflow_executor: WorkflowExecutor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HARNESS_RESUME_SECRET", "ambient-value")
+    store = InMemoryHarnessStateStore()
+    driver = _StaticDriver(
+        workspace=tmp_path,
+        payloads=[
+            ParsedModelResponse(
+                invocations=[
+                    {"tool_name": "list_directory", "arguments": {"path": "."}},
+                    {
+                        "tool_name": "env_echo",
+                        "arguments": {"key": "HARNESS_RESUME_SECRET"},
+                    },
+                ]
+            )
+        ],
+    )
+    executor = HarnessExecutor(
+        store=store,
+        workflow_executor=_workflow_executor,
+        driver=driver,
+        applier=_RootTaskApplier(),
+        approval_context_env={"HARNESS_RESUME_SECRET": "session-value"},
+    )
+
+    waiting = executor.run(_state())
+    approved = executor.resume(
+        waiting.snapshot.session_id,
+        approval_resolution=ApprovalResolution.APPROVE,
+    )
+
+    outcome = approved.snapshot.state.turns[-1].workflow_result.outcomes[1]
+    assert outcome.tool_result is not None
+    assert outcome.tool_result.output == {"value": "session-value"}
+
+
 @pytest.mark.parametrize(
     ("resolution", "stop_reason"),
     [

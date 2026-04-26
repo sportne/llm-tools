@@ -758,6 +758,9 @@ def test_controller_interaction_mode_locks_after_first_message(
     )
     controller = _controller(tmp_path, provider)
 
+    assert controller.deep_task_mode_enabled() is False
+    assert controller.set_interaction_mode("deep_task") is False
+    controller.set_deep_task_mode_enabled(True)
     assert controller.set_interaction_mode("deep_task") is True
     assert controller.active_record.runtime.interaction_mode == "deep_task"
     assert controller.set_interaction_mode("chat") is True
@@ -787,6 +790,7 @@ def test_controller_deep_task_runs_harness_and_persists_summary(
         ]
     )
     controller = _controller(tmp_path, provider)
+    controller.set_deep_task_mode_enabled(True)
     assert controller.set_interaction_mode("deep_task") is True
 
     assert controller.submit_prompt("investigate this") is None
@@ -798,6 +802,43 @@ def test_controller_deep_task_runs_harness_and_persists_summary(
     assert "Deep task session:" in controller.active_record.transcript[2].text
     assert controller.active_record.workbench_items[-1].kind == "result"
     assert controller.active_record.workbench_items[-1].title.endswith("Deep Task")
+
+
+def test_controller_restores_deep_task_pending_approval(
+    tmp_path: Path,
+) -> None:
+    provider = _FakeProvider(
+        [
+            ParsedModelResponse(
+                invocations=[
+                    {"tool_name": "list_directory", "arguments": {"path": "."}},
+                ]
+            )
+        ]
+    )
+    controller = _controller(tmp_path, provider)
+    controller.set_deep_task_mode_enabled(True)
+    controller.active_record.runtime.enabled_tools = ["list_directory"]
+    controller.active_record.runtime.require_approval_for = {SideEffectClass.LOCAL_READ}
+    assert controller.set_interaction_mode("deep_task") is True
+    session_id = controller.active_session_id
+
+    assert controller.submit_prompt("inspect the workspace") is None
+    _drain_until_idle(controller)
+
+    assert controller.turn_state_for(session_id).pending_approval is not None
+    assert controller.turn_state_for(session_id).pending_harness_session_id is not None
+
+    reloaded = NiceGUIChatController(
+        store=controller.store,
+        config=StreamlitAssistantConfig(),
+        root_path=tmp_path,
+        provider_factory=lambda _runtime: _FakeProvider([]),
+    )
+    reloaded.select_session(session_id)
+
+    assert reloaded.turn_state_for(session_id).pending_approval is not None
+    assert reloaded.turn_state_for(session_id).pending_harness_session_id is not None
 
 
 def test_controller_session_management_filters_and_temporary_chats(

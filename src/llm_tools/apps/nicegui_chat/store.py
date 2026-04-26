@@ -41,6 +41,7 @@ from llm_tools.apps.nicegui_chat.crypto import (
     ensure_text_key_file,
 )
 from llm_tools.apps.nicegui_chat.models import (
+    NiceGUIAdminSettings,
     NiceGUIInspectorState,
     NiceGUIPreferences,
     NiceGUIRuntimeConfig,
@@ -62,6 +63,7 @@ from llm_tools.workflow_api import ChatFinalResponse, ChatSessionState, ChatToke
 
 NICEGUI_DB_ENV_VAR = "LLM_TOOLS_NICEGUI_DB"
 PREFERENCES_KEY = "preferences"
+ADMIN_SETTINGS_KEY = "admin_settings"
 LOCAL_OWNER_KEY_ID = "__local__"
 _DEFAULT_DB_PATH = Path.home() / ".llm-tools" / "assistant" / "nicegui" / "chat.sqlite3"
 _DB_POINTER_PATH = Path.home() / ".llm-tools" / "assistant" / "nicegui" / "db_path.txt"
@@ -295,6 +297,10 @@ def _preferences_key(owner_user_id: str | None = None) -> str:
     if owner_user_id is None:
         return PREFERENCES_KEY
     return f"{PREFERENCES_KEY}:{owner_user_id}"
+
+
+def _admin_settings_key() -> str:
+    return ADMIN_SETTINGS_KEY
 
 
 def _owner_key_id(owner_user_id: str | None) -> str:
@@ -858,6 +864,59 @@ class SQLiteNiceGUIChatStore:
             row_id=_owner_key_id(owner_user_id),
             column="payload_json",
             value=_dump_model(preferences),
+        )
+        with self.engine.begin() as connection:
+            existing = connection.execute(
+                select(app_preferences.c.key).where(app_preferences.c.key == key)
+            ).first()
+            if existing is None:
+                connection.execute(
+                    insert(app_preferences).values(key=key, payload_json=payload)
+                )
+            else:
+                connection.execute(
+                    update(app_preferences)
+                    .where(app_preferences.c.key == key)
+                    .values(payload_json=payload)
+                )
+
+    def load_admin_settings(self) -> NiceGUIAdminSettings:
+        """Load global administrator feature settings."""
+        key = _admin_settings_key()
+        with self.engine.begin() as connection:
+            row = (
+                connection.execute(
+                    select(app_preferences.c.payload_json).where(
+                        app_preferences.c.key == key
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        if row is None:
+            return NiceGUIAdminSettings()
+        return _load_model_json(
+            raw=self._decrypt_field(
+                None,
+                table="app_preferences",
+                row_id=key,
+                column="payload_json",
+                value=str(row["payload_json"]),
+            ),
+            model_type=NiceGUIAdminSettings,
+            field_name="app_preferences.payload_json",
+        )  # type: ignore[return-value]
+
+    def save_admin_settings(self, settings: NiceGUIAdminSettings) -> None:
+        """Persist global administrator feature settings."""
+        key = _admin_settings_key()
+        self._ensure_user_key(None)
+        payload = self._encrypt_field(
+            None,
+            table="app_preferences",
+            row_id=key,
+            column="payload_json",
+            value=_dump_model(settings),
         )
         with self.engine.begin() as connection:
             existing = connection.execute(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
@@ -117,12 +117,16 @@ class HarnessExecutor:
         driver: HarnessTurnDriver,
         applier: HarnessTurnApplier,
         retry_policy: HarnessRetryPolicy | None = None,
+        approval_context_env: Mapping[str, str] | None = None,
     ) -> None:
         self._store = store
         self._workflow_executor = workflow_executor
         self._driver = driver
         self._applier = applier
         self._retry_policy = retry_policy or HarnessRetryPolicy()
+        self._approval_context_env = (
+            None if approval_context_env is None else dict(approval_context_env)
+        )
 
     def run(
         self,
@@ -1226,7 +1230,12 @@ class HarnessExecutor:
         )
 
     def _rehydrate_pending_approval_context(self, context: ToolContext) -> ToolContext:
-        return rehydrate_pending_approval_context(context, env=os.environ)
+        env = (
+            os.environ
+            if self._approval_context_env is None
+            else self._approval_context_env
+        )
+        return rehydrate_pending_approval_context(context, env=env)
 
     def _append_incomplete_turn(
         self,

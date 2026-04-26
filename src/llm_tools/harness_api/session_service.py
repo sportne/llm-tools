@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -134,6 +135,7 @@ class HarnessSessionService:
         context_builder: HarnessContextBuilder | None = None,
         workspace: str | None = None,
         retry_policy: HarnessRetryPolicy | None = None,
+        approval_context_env: Mapping[str, str] | None = None,
     ) -> None:
         if driver is None:
             if provider is None:
@@ -154,6 +156,7 @@ class HarnessSessionService:
             driver=self._driver,
             applier=self._applier,
             retry_policy=retry_policy,
+            approval_context_env=approval_context_env,
         )
 
     def create_session(

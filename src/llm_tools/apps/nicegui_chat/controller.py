@@ -30,6 +30,7 @@ from llm_tools.apps.assistant_runtime import (
 from llm_tools.apps.chat_runtime import create_provider
 from llm_tools.apps.nicegui_chat.auth import LocalAuthProvider
 from llm_tools.apps.nicegui_chat.models import (
+    NiceGUIAdminSettings,
     NiceGUIHostedConfig,
     NiceGUIInspectorEntry,
     NiceGUIPreferences,
@@ -54,6 +55,8 @@ from llm_tools.harness_api import (
     HarnessSessionRunRequest,
     HarnessSessionService,
     HarnessSessionStopRequest,
+    ResumeDisposition,
+    resume_session,
 )
 from llm_tools.harness_api.context import TurnContextBundle
 from llm_tools.tool_api import ToolSpec
@@ -371,6 +374,7 @@ class NiceGUIChatController:
         self.preferences: NiceGUIPreferences = store.load_preferences(
             owner_user_id=self.owner_user_id
         )
+        self.admin_settings: NiceGUIAdminSettings = store.load_admin_settings()
         self.sessions: dict[str, NiceGUISessionRecord] = {}
         self.session_order: list[str] = []
         self.turn_states: dict[str, NiceGUITurnState] = {}
@@ -569,12 +573,35 @@ class NiceGUIChatController:
 
     def set_interaction_mode(self, mode: Literal["chat", "deep_task"]) -> bool:
         """Set the active session mode when the session has no user messages."""
+        if mode == "deep_task" and not self.deep_task_mode_enabled():
+            return False
         if self.interaction_mode_locked():
             return False
         record = self.active_record
         record.runtime.interaction_mode = mode
         self._persist_record(record)
         return True
+
+    def deep_task_mode_enabled(self) -> bool:
+        """Return whether the administrator has enabled deep task mode."""
+        return self.admin_settings.deep_task_mode_enabled
+
+    def set_deep_task_mode_enabled(self, enabled: bool) -> None:
+        """Persist the administrator-controlled deep task feature flag."""
+        self.admin_settings = self.admin_settings.model_copy(
+            update={"deep_task_mode_enabled": bool(enabled)}
+        )
+        self.store.save_admin_settings(self.admin_settings)
+        if not enabled:
+            for record in self.sessions.values():
+                if (
+                    record.runtime.interaction_mode == "deep_task"
+                    and not self.interaction_mode_locked(
+                        session_id=record.summary.session_id
+                    )
+                ):
+                    record.runtime.interaction_mode = "chat"
+                    self._persist_record(record)
 
     def submit_prompt(
         self, prompt: str, *, show_in_transcript: bool = True
@@ -599,7 +626,10 @@ class NiceGUIChatController:
         if show_in_transcript and record.summary.title == "New chat":
             record.summary.title = _title_from_prompt(cleaned)
         self._persist_record(record)
-        if record.runtime.interaction_mode == "deep_task":
+        if (
+            record.runtime.interaction_mode == "deep_task"
+            and self.deep_task_mode_enabled()
+        ):
             return self._submit_deep_task_prompt(
                 session_id=session_id,
                 record=record,
@@ -949,6 +979,7 @@ class NiceGUIChatController:
                 self.sessions[summary.session_id] = loaded
                 self.turn_states[summary.session_id] = NiceGUITurnState()
                 self.session_secrets.setdefault(summary.session_id, {})
+                self._restore_pending_harness_approval(loaded)
         active_id = self.preferences.active_session_id
         if active_id not in self.sessions:
             active_id = self.session_order[0] if self.session_order else None
@@ -956,6 +987,32 @@ class NiceGUIChatController:
             active_id = self.create_session(temporary=False).summary.session_id
         self.preferences.active_session_id = active_id
         self.store.save_preferences(self.preferences, owner_user_id=self.owner_user_id)
+
+    def _restore_pending_harness_approval(self, record: NiceGUISessionRecord) -> None:
+        """Restore a durable deep-task approval prompt into transient UI state."""
+        turn_state = self.turn_state_for(record.summary.session_id)
+        harness_store = self.store.harness_store(
+            chat_session_id=record.summary.session_id,
+            owner_user_id=record.summary.owner_user_id,
+        )
+        for snapshot in harness_store.list_sessions():
+            resumed = resume_session(snapshot)
+            if resumed.disposition is not ResumeDisposition.WAITING_FOR_APPROVAL:
+                continue
+            if resumed.pending_approval is None:
+                continue
+            approval_request = resumed.pending_approval.approval_request
+            turn_state.pending_approval = ChatWorkflowApprovalState(
+                approval_request=approval_request,
+                tool_name=approval_request.tool_name,
+                redacted_arguments=dict(approval_request.request.arguments),
+                policy_reason=approval_request.policy_reason,
+                policy_metadata=dict(approval_request.policy_metadata),
+            )
+            turn_state.pending_harness_session_id = snapshot.session_id
+            turn_state.status_text = "approval required"
+            turn_state.status_history = ["approval required"]
+            return
 
     def _persist_record(self, record: NiceGUISessionRecord) -> None:
         record.summary.root_path = record.runtime.root_path
@@ -1150,6 +1207,7 @@ class NiceGUIChatController:
             workflow_executor=workflow_executor,
             provider=harness_provider,
             context_builder=NiceGUIHarnessContextBuilder(env_overrides=env_overrides),
+            approval_context_env=env_overrides,
             workspace=str(root) if root is not None else None,
         )
 

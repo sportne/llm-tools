@@ -74,6 +74,12 @@ class NiceGUIHostedConfig(BaseModel):
         return cleaned or None
 
 
+class NiceGUIAdminSettings(BaseModel):
+    """Global administrator-controlled NiceGUI feature switches."""
+
+    deep_task_mode_enabled: bool = False
+
+
 class NiceGUITranscriptEntry(BaseModel):
     """One persisted transcript entry rendered in the NiceGUI chat canvas."""
 
@@ -259,6 +265,7 @@ class NiceGUIPreferences(BaseModel):
 
 
 __all__ = [
+    "NiceGUIAdminSettings",
     "NiceGUIAuthMode",
     "NiceGUIInteractionMode",
     "NiceGUIUserRole",
