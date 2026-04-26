@@ -63,7 +63,7 @@ Included:
 - Provider/model/header controls.
 - Background turns, stop, status, approvals, and inspector workbench.
 - Settings sufficient to alter subsequent turns.
-- Optional hosted mode with local admin-created users and per-user sessions.
+- Local admin-created users and per-user sessions for normal local and hosted use.
 
 Deferred:
 
@@ -73,21 +73,22 @@ Deferred:
 - Attachment ingestion.
 - External smart-card/OIDC auth.
 
-## Hosted Mode
+## Local And Hosted Auth
 
-Hosted mode is explicit and is separate from the default loopback desktop-style
-app:
+The normal NiceGUI app uses local username/password auth on both loopback and
+hosted bindings. The first launch shows a local admin creation screen. Admins
+create later users from the admin screen; there is no public self-registration
+in v1.
 
 ```text
-llm-tools-nicegui-chat --host 0.0.0.0 --auth-mode local
+llm-tools-nicegui-chat
 ```
 
-The first hosted launch shows a local admin creation screen. Admins create later
-users from the settings UI; there is no public self-registration in v1. Each
-user sees only their own chats, preferences, workbench records, temporary
-sessions, and in-memory credentials. NiceGUI persistence is always SQLCipher
-encrypted, and user-owned chat fields are encrypted with per-user keys wrapped by
-a local server key.
+`--auth-mode none` remains available only as an explicit development/test
+escape hatch. In normal authenticated use, each user sees only their own chats,
+preferences, workbench records, temporary sessions, and in-memory credentials.
+NiceGUI persistence is always SQLCipher encrypted, and user-owned chat fields
+are encrypted with per-user keys wrapped by a local server key.
 
 For production-style hosting, put the app behind a TLS-terminating reverse proxy
 such as Caddy, nginx, or Traefik and set `--public-base-url` to the HTTPS URL.

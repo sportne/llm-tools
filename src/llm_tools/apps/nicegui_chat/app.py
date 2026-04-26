@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,11 @@ from llm_tools.apps.nicegui_chat.controller import (
     NiceGUIChatController,
     default_runtime_config,
 )
-from llm_tools.apps.nicegui_chat.models import NiceGUIHostedConfig, NiceGUIRuntimeConfig
+from llm_tools.apps.nicegui_chat.models import (
+    NiceGUIHostedConfig,
+    NiceGUIRuntimeConfig,
+    NiceGUIUser,
+)
 from llm_tools.apps.nicegui_chat.store import SQLiteNiceGUIChatStore, default_db_path
 from llm_tools.llm_providers import ProviderModeStrategy
 from llm_tools.tool_api import SideEffectClass
@@ -56,6 +61,10 @@ NICEGUI_APPROVAL_LABELS = {
     SideEffectClass.EXTERNAL_READ.value: "External read",
     SideEffectClass.EXTERNAL_WRITE.value: "External write",
 }
+AUTH_DISABLED_WARNING = (
+    "WARNING: NiceGUI auth is disabled. Use --auth-mode local for normal local "
+    "or hosted use."
+)
 
 
 def _first_nonempty_text(*values: object) -> str:
@@ -117,6 +126,21 @@ def _runtime_summary_text(runtime: NiceGUIRuntimeConfig) -> str:
 def _composer_action_icon(*, busy: bool) -> str:
     """Return the icon for the primary composer action."""
     return "stop" if busy else "send"
+
+
+def _is_admin_user(user: NiceGUIUser | None) -> bool:
+    """Return whether a user may open admin controls."""
+    return user is not None and user.role == "admin"
+
+
+def _can_admin_disable_user(
+    current_user: NiceGUIUser | None,
+    target_user: NiceGUIUser,
+) -> bool:
+    """Return whether the current admin may disable the target user."""
+    if current_user is None or current_user.role != "admin":
+        return False
+    return current_user.user_id != target_user.user_id
 
 
 def _format_workbench_duration(seconds: float | None) -> str:
@@ -266,7 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--user-key-file", type=Path, default=None)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--auth-mode", choices=["none", "local"], default="none")
+    parser.add_argument("--auth-mode", choices=["none", "local"], default="local")
     parser.add_argument("--public-base-url", type=str)
     parser.add_argument("--tls-certfile", type=Path)
     parser.add_argument("--tls-keyfile", type=Path)
@@ -356,7 +380,7 @@ def run_nicegui_chat_app(
     host: str = "127.0.0.1",
     port: int = 8080,
     show: bool = True,
-    auth_mode: str = "none",
+    auth_mode: str = "local",
     public_base_url: str | None = None,
     tls_certfile: Path | None = None,
     tls_keyfile: Path | None = None,
@@ -381,6 +405,8 @@ def run_nicegui_chat_app(
         allow_insecure_hosted_secrets=allow_insecure_hosted_secrets,
         secret_key_path=hosted_secret_key_path,
     )
+    if startup.config.auth_mode == "none":
+        print(AUTH_DISABLED_WARNING, file=sys.stderr)
     storage_secret: str | None = None
     auth_provider: LocalAuthProvider | None = None
     if startup.config.auth_mode == "local":
@@ -446,6 +472,14 @@ def _set_hosted_storage_values(session_id: str, token: str) -> None:
 def _clear_hosted_storage_values() -> None:
     nicegui_app.storage.user.pop("nicegui_chat_session_id", None)
     nicegui_app.storage.user.pop("nicegui_chat_session_token", None)
+
+
+def clear_hosted_session(auth_provider: LocalAuthProvider | None) -> None:
+    """Revoke and clear the current browser auth session."""
+    session_id, _token = _hosted_storage_values()
+    if session_id and auth_provider is not None:
+        auth_provider.revoke_session(session_id)
+    _clear_hosted_storage_values()
 
 
 def render_hosted_nicegui_page(
@@ -730,6 +764,9 @@ def build_nicegui_chat_ui(  # noqa: C901
             max-height: min(520px, 80vh); overflow-y: auto;
             padding: 8px;
         }
+        .llmt-account-menu {
+            min-width: 180px; padding: 6px;
+        }
         .llmt-tool-menu-note {
             font-size: 12px; line-height: 16px; padding: 2px 4px 8px;
         }
@@ -868,10 +905,10 @@ def build_nicegui_chat_ui(  # noqa: C901
     mode_quick_select: Any = None
     workspace_quick_input: Any = None
     dark_mode_switch: Any = None
-    user_list_column: Any = None
-    user_create_username_input: Any = None
-    user_create_password_input: Any = None
-    user_create_role_select: Any = None
+    admin_user_list_column: Any = None
+    admin_create_username_input: Any = None
+    admin_create_password_input: Any = None
+    admin_create_role_select: Any = None
     allow_network_switch: Any = None
     allow_filesystem_switch: Any = None
     allow_subprocess_switch: Any = None
@@ -994,7 +1031,44 @@ def build_nicegui_chat_ui(  # noqa: C901
         if model_quick_select is not None:
             model_quick_select.set_options(options, value=selected or None)
 
+    def sync_settings_inputs() -> None:
+        runtime = active_runtime()
+        if provider_select is not None:
+            provider_select.value = runtime.provider.value
+        if model_input is not None:
+            set_model_options(model_options_state["values"], selected=runtime.model_name)
+        if mode_select is not None:
+            mode_select.value = runtime.provider_mode_strategy.value
+        if base_url_input is not None:
+            base_url_input.set_options(
+                base_url_options(runtime), value=runtime.api_base_url or None
+            )
+            base_url_input.value = runtime.api_base_url or ""
+        if provider_api_key_input is not None:
+            provider_api_key_input.value = ""
+        if workspace_input is not None:
+            workspace_input.value = runtime.root_path or ""
+        if database_path_input is not None:
+            database_path_input.value = str(controller.store.db_path)
+        if dark_mode_switch is not None:
+            dark_mode_switch.value = controller.preferences.theme_mode == "dark"
+        if allow_network_switch is not None:
+            allow_network_switch.value = runtime.allow_network
+        if allow_filesystem_switch is not None:
+            allow_filesystem_switch.value = runtime.allow_filesystem
+        if allow_subprocess_switch is not None:
+            allow_subprocess_switch.value = runtime.allow_subprocess
+        if approval_select is not None:
+            approval_select.value = [
+                side_effect.value
+                for side_effect in NICEGUI_APPROVAL_OPTIONS
+                if side_effect in runtime.require_approval_for
+            ]
+        if tool_credentials_column is not None:
+            render_tool_credentials()
+
     def open_settings_dialog() -> None:
+        sync_settings_inputs()
         dialogs["settings"].open()
 
     def open_provider_dialog() -> None:
@@ -1363,27 +1437,8 @@ def build_nicegui_chat_ui(  # noqa: C901
             + " color="
             + ("negative" if turn_state.busy else "primary")
         )
-        provider_select.value = runtime.provider.value
-        set_model_options(model_options_state["values"], selected=runtime.model_name)
-        mode_select.value = runtime.provider_mode_strategy.value
-        base_url_input.set_options(
-            base_url_options(runtime), value=runtime.api_base_url or None
-        )
-        base_url_input.value = runtime.api_base_url or ""
-        provider_api_key_input.value = ""
-        workspace_input.value = runtime.root_path or ""
-        database_path_input.value = str(controller.store.db_path)
-        dark_mode_switch.value = controller.preferences.theme_mode == "dark"
-        allow_network_switch.value = runtime.allow_network
-        allow_filesystem_switch.value = runtime.allow_filesystem
-        allow_subprocess_switch.value = runtime.allow_subprocess
-        approval_select.value = [
-            side_effect.value
-            for side_effect in NICEGUI_APPROVAL_OPTIONS
-            if side_effect in runtime.require_approval_for
-        ]
-        render_tool_credentials()
-        render_user_list()
+        sync_settings_inputs()
+        render_admin_user_list()
 
     def render_transcript() -> None:
         transcript_column.clear()
@@ -1562,31 +1617,37 @@ def build_nicegui_chat_ui(  # noqa: C901
             send_prompt()
 
     def logout_hosted_user() -> None:
-        session_id, _token = _hosted_storage_values()
-        if session_id and controller.auth_provider is not None:
-            controller.auth_provider.revoke_session(session_id)
-        _clear_hosted_storage_values()
+        clear_hosted_session(controller.auth_provider)
         ui.navigate.reload()
 
-    def render_user_list() -> None:
-        if user_list_column is None:
+    def open_admin_dialog() -> None:
+        if not _is_admin_user(controller.current_user):
+            ui.notify("Admin access is required.", type="negative")
             return
-        user_list_column.clear()
-        if controller.auth_provider is None:
+        render_admin_user_list()
+        dialogs["admin"].open()
+
+    def render_admin_user_list() -> None:
+        if admin_user_list_column is None:
             return
-        with user_list_column:
+        admin_user_list_column.clear()
+        if controller.auth_provider is None or not _is_admin_user(
+            controller.current_user
+        ):
+            return
+        with admin_user_list_column:
             for user in controller.store.list_users():
                 with ui.column().classes("w-full gap-1 llmt-credential-row"):
                     with ui.row().classes(
                         "w-full items-center justify-between no-wrap"
                     ):
-                        ui.label(
-                            f"{user.username} ({user.role})"
-                            + (" disabled" if user.disabled else "")
-                        ).classes("text-sm")
-                        if user.user_id != getattr(
-                            controller.current_user, "user_id", None
-                        ):
+                        with ui.column().classes("gap-0"):
+                            ui.label(user.username).classes("text-sm")
+                            status = str(user.role)
+                            if user.disabled:
+                                status += " | disabled"
+                            ui.label(status).classes("text-xs llmt-muted")
+                        if _can_admin_disable_user(controller.current_user, user):
                             ui.button(
                                 icon="block" if not user.disabled else "check",
                                 on_click=lambda _event, target=user: (
@@ -1595,6 +1656,8 @@ def build_nicegui_chat_ui(  # noqa: C901
                                     )
                                 ),
                             ).props("flat round dense")
+                        else:
+                            ui.icon("shield").classes("llmt-muted")
                     with ui.row().classes("w-full items-end gap-2 no-wrap"):
                         password_input = (
                             ui.input("New password")
@@ -1609,11 +1672,20 @@ def build_nicegui_chat_ui(  # noqa: C901
                         ).props("flat round dense")
 
     def toggle_user_disabled(user_id: str, disabled: bool) -> None:
+        if not _is_admin_user(controller.current_user):
+            ui.notify("Admin access is required.", type="negative")
+            return
+        if user_id == getattr(controller.current_user, "user_id", None):
+            ui.notify("You cannot disable your own account.", type="negative")
+            return
         controller.store.set_user_disabled(user_id, disabled)
-        render_user_list()
+        render_admin_user_list()
 
     def reset_hosted_user_password(user_id: str, password_input: Any) -> None:
-        if controller.auth_provider is None:
+        if controller.auth_provider is None or not _is_admin_user(
+            controller.current_user
+        ):
+            ui.notify("Admin access is required.", type="negative")
             return
         try:
             controller.auth_provider.reset_password(
@@ -1626,17 +1698,20 @@ def build_nicegui_chat_ui(  # noqa: C901
             ui.notify(f"Could not reset password: {exc}", type="negative")
 
     def create_hosted_user() -> None:
-        if controller.auth_provider is None:
+        if controller.auth_provider is None or not _is_admin_user(
+            controller.current_user
+        ):
+            ui.notify("Admin access is required.", type="negative")
             return
         try:
             controller.auth_provider.create_user(
-                username=str(user_create_username_input.value or ""),
-                password=str(user_create_password_input.value or ""),
-                role=str(user_create_role_select.value or "user"),
+                username=str(admin_create_username_input.value or ""),
+                password=str(admin_create_password_input.value or ""),
+                role=str(admin_create_role_select.value or "user"),
             )
-            user_create_username_input.value = ""
-            user_create_password_input.value = ""
-            render_user_list()
+            admin_create_username_input.value = ""
+            admin_create_password_input.value = ""
+            render_admin_user_list()
             ui.notify("User created.")
         except Exception as exc:  # pragma: no cover - UI guard
             ui.notify(f"Could not create user: {exc}", type="negative")
@@ -1869,10 +1944,19 @@ def build_nicegui_chat_ui(  # noqa: C901
                 with ui.row().classes("llmt-header-actions items-center gap-2"):
                     status_chip = ui.badge("ready").props("outline")
                     if controller.current_user is not None:
-                        ui.button(
-                            icon="logout",
-                            on_click=logout_hosted_user,
-                        ).props("flat round")
+                        with (
+                            ui.button(icon="account_circle").props("flat round"),
+                            ui.menu().classes("llmt-account-menu"),
+                        ):
+                            ui.label(controller.current_user.username).classes(
+                                "text-sm q-px-sm q-pt-sm"
+                            )
+                            ui.label(controller.current_user.role).classes(
+                                "text-xs llmt-muted q-px-sm q-pb-sm"
+                            )
+                            if _is_admin_user(controller.current_user):
+                                ui.menu_item("Admin", on_click=open_admin_dialog)
+                            ui.menu_item("Log out", on_click=logout_hosted_user)
                     ui.button(
                         icon="view_sidebar",
                         on_click=toggle_workbench,
@@ -1934,6 +2018,33 @@ def build_nicegui_chat_ui(  # noqa: C901
         with ui.column() as workbench_column:
             pass
 
+    with ui.dialog() as admin_dialog, ui.card().classes("w-[560px] max-h-[88vh]"):
+        dialogs["admin"] = admin_dialog
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label("Admin").classes("text-lg")
+            ui.button(icon="close", on_click=admin_dialog.close).props("flat round")
+        ui.label("Manage local NiceGUI users.").classes("text-sm llmt-muted")
+        with ui.column().classes("llmt-settings-section w-full gap-2"):
+            ui.label("Create user").classes("text-base")
+            with ui.row().classes("w-full items-end gap-2 no-wrap"):
+                admin_create_username_input = ui.input("Username").classes("grow")
+                admin_create_role_select = ui.select(
+                    ["user", "admin"], value="user", label="Role"
+                ).classes("w-[120px]")
+            admin_create_password_input = (
+                ui.input("Password")
+                .props("type=password autocomplete=off")
+                .classes("w-full")
+            )
+            ui.button("Create user", on_click=create_hosted_user).props("flat")
+        with ui.column().classes("llmt-settings-section w-full gap-2"):
+            ui.label("Users").classes("text-base")
+            with (
+                ui.scroll_area().classes("w-full max-h-[360px]"),
+                ui.column().classes("w-full gap-1") as admin_user_list_column,
+            ):
+                pass
+
     with ui.dialog() as settings_dialog, ui.card().classes("w-[520px] max-h-[88vh]"):
         dialogs["settings"] = settings_dialog
         ui.label("Settings").classes("text-lg")
@@ -1945,30 +2056,6 @@ def build_nicegui_chat_ui(  # noqa: C901
                 "Dark mode",
                 value=controller.preferences.theme_mode == "dark",
             ).classes("w-full")
-            if (
-                controller.current_user is not None
-                and controller.current_user.role == "admin"
-            ):
-                with ui.column().classes("llmt-settings-section w-full gap-1"):
-                    ui.label("Users").classes("text-base")
-                    with ui.row().classes("w-full items-end gap-2 no-wrap"):
-                        user_create_username_input = ui.input("Username").classes(
-                            "grow"
-                        )
-                        user_create_role_select = ui.select(
-                            ["user", "admin"], value="user", label="Role"
-                        ).classes("w-[120px]")
-                    user_create_password_input = (
-                        ui.input("Password")
-                        .props("type=password autocomplete=off")
-                        .classes("w-full")
-                    )
-                    ui.button(
-                        "Create user",
-                        on_click=create_hosted_user,
-                    ).props("flat")
-                    with ui.column().classes("w-full gap-1") as user_list_column:
-                        pass
             provider_select = ui.select(
                 NICEGUI_PROVIDER_OPTIONS,
                 label="Provider",
@@ -2209,6 +2296,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 __all__ = [
     "build_nicegui_chat_ui",
     "build_parser",
+    "clear_hosted_session",
     "main",
     "resolve_assistant_config",
     "resolve_root_argument",

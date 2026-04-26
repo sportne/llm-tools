@@ -16,12 +16,14 @@ from llm_tools.apps.nicegui_chat.app import (
     NICEGUI_APPROVAL_LABELS,
     NICEGUI_APPROVAL_OPTIONS,
     NICEGUI_PROVIDER_OPTIONS,
+    _can_admin_disable_user,
     _composer_action_icon,
     _discover_model_names,
     _event_payload_text,
     _extract_model_names_from_models_payload,
     _first_nonempty_text,
     _format_workbench_duration,
+    _is_admin_user,
     _is_tool_url_setting,
     _models_endpoint_url,
     _provider_api_key_env_var,
@@ -31,6 +33,7 @@ from llm_tools.apps.nicegui_chat.app import (
     _workbench_container_classes,
     build_nicegui_chat_ui,
     build_parser,
+    clear_hosted_session,
     main,
     resolve_assistant_config,
     resolve_root_argument,
@@ -160,6 +163,10 @@ def test_package_import_and_cli_parser() -> None:
     assert config.llm.model_name == "qwen3:8b"
     assert config.llm.provider_mode_strategy.value == "json"
     assert args.db_path == Path("chat.sqlite3")
+    assert args.auth_mode == "local"
+
+    no_auth_args = parser.parse_args(["--auth-mode", "none"])
+    assert no_auth_args.auth_mode == "none"
 
 
 def test_hosted_startup_validation() -> None:
@@ -209,6 +216,47 @@ def test_hosted_storage_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
 
     nicegui_app_module._clear_hosted_storage_values()
     assert nicegui_app_module._hosted_storage_values() == (None, None)
+
+
+def test_clear_hosted_session_revokes_and_clears_storage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = SimpleNamespace(user={})
+    monkeypatch.setattr(
+        nicegui_app_module, "nicegui_app", SimpleNamespace(storage=storage)
+    )
+    store = _chat_store(tmp_path)
+    store.initialize()
+    auth = LocalAuthProvider(store)
+    password = "admin-" + "value"
+    user = auth.create_user(username="admin", password=password, role="admin")
+    session_id, token = auth.create_session(user.user_id)
+    nicegui_app_module._set_hosted_storage_values(session_id, token)
+
+    clear_hosted_session(auth)
+
+    assert nicegui_app_module._hosted_storage_values() == (None, None)
+    assert auth.user_for_session(session_id, token) is None
+
+
+def test_admin_user_helpers_prevent_self_disable(tmp_path: Path) -> None:
+    store = _chat_store(tmp_path)
+    store.initialize()
+    auth = LocalAuthProvider(store)
+    password = "admin-" + "value"
+    admin = auth.create_user(username="admin", password=password, role="admin")
+    other_admin = auth.create_user(
+        username="other-admin", password=password, role="admin"
+    )
+    user = auth.create_user(username="user", password=password, role="user")
+
+    assert _is_admin_user(admin) is True
+    assert _is_admin_user(user) is False
+    assert _is_admin_user(None) is False
+    assert _can_admin_disable_user(admin, admin) is False
+    assert _can_admin_disable_user(admin, other_admin) is True
+    assert _can_admin_disable_user(admin, user) is True
+    assert _can_admin_disable_user(user, admin) is False
 
 
 def test_hosted_page_routes_first_admin_login_and_chat(

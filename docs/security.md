@@ -72,10 +72,10 @@ examples. If you need local overrides, keep them in ignored files.
 
 The NiceGUI chat client intentionally does not use process environment variables
 as implicit provider or tool credentials. Provider API keys and tool credentials
-must be typed into the app for the active browser/app session. In both local
-loopback mode and hosted mode those values are held in server memory only. They
-are not written to SQLite and are not restored after a server restart, browser
-session reset, or hosted logout.
+must be typed into the app for the active browser/app session. In both normal
+local loopback use and hosted use those values are held in server memory only.
+They are not written to SQLite and are not restored after a server restart,
+browser session reset, or logout.
 
 Non-secret service URLs, such as Atlassian or GitLab base URLs, are runtime
 configuration and may be persisted as normal chat settings. Keep bearer tokens,
@@ -92,20 +92,23 @@ files as server secrets and back them up separately from normal database copies:
 ~/.llm-tools/assistant/nicegui/hosted/user-kek.key
 ```
 
-### NiceGUI Hosted Mode
+### NiceGUI Auth Mode
 
-The default NiceGUI app is a local loopback app. Binding the app to a
-non-loopback interface requires explicit local authentication:
+The default NiceGUI app uses local username/password authentication even on
+loopback. The first launch requires creating an admin user. `--auth-mode none`
+is an explicit development/test escape hatch and should not be used for normal
+local or hosted use. Binding the app to a non-loopback interface still requires
+local authentication:
 
 ```text
 llm-tools-nicegui-chat --host 0.0.0.0 --auth-mode local
 ```
 
-Hosted mode uses local admin-created users only; there is no public
-self-registration. The first hosted launch requires creating an admin user.
-Users see only their own chat sessions, preferences, workbench records, temporary
-sessions, and in-memory credential state. Admins can create, disable, and reset
-local users, but v1 does not add a cross-user chat browser.
+NiceGUI auth uses local admin-created users only; there is no public
+self-registration. Users see only their own chat sessions, preferences,
+workbench records, temporary sessions, and in-memory credential state. Admins
+can create, disable, and reset local users, but v1 does not add a cross-user
+chat browser.
 
 Passwords are stored as Argon2 hashes. Browser sessions use random server-side
 session tokens recorded as hashes in SQLite and transported through NiceGUI's

@@ -50,7 +50,7 @@ class NiceGUIUserSession(BaseModel):
 class NiceGUIHostedConfig(BaseModel):
     """Hosted-mode security controls resolved at startup."""
 
-    auth_mode: NiceGUIAuthMode = "none"
+    auth_mode: NiceGUIAuthMode = "local"
     public_base_url: str | None = None
     tls_certfile: str | None = None
     tls_keyfile: str | None = None

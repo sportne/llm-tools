@@ -62,11 +62,11 @@ Stores durable session metadata plus validated JSON fields:
 - `temporary`
 - `project_id`
 
-`owner_user_id` is nullable for local loopback sessions and populated for
-hosted-mode private user data. Local loopback sessions use an internal local key
-identifier for field encryption. `project_id` is nullable and reserved so future
-project workspaces can be added without rewriting the core session/message
-schema.
+`owner_user_id` is populated for normal authenticated local and hosted sessions.
+It is nullable only for the explicit `--auth-mode none` development/test escape
+hatch, which uses an internal local key identifier for field encryption.
+`project_id` is nullable and reserved so future project workspaces can be added
+without rewriting the core session/message schema.
 
 ### `chat_messages`
 
@@ -112,12 +112,12 @@ Stores a singleton JSON preferences payload:
 - recent models
 - recent base URLs
 
-Preferences are keyed by owner in hosted mode and by a default local key in
-loopback mode.
+Preferences are keyed by owner in authenticated local and hosted mode, and by a
+default local key only when `--auth-mode none` is explicitly used.
 
 ### `users`
 
-Stores hosted-mode local users:
+Stores local NiceGUI users:
 
 - `user_id`
 - `username`
@@ -132,7 +132,7 @@ Passwords are Argon2 hashes. Users are admin-created only in v1.
 
 ### `user_sessions`
 
-Stores hosted-mode browser sessions:
+Stores authenticated browser sessions:
 
 - `session_id`
 - `user_id`
