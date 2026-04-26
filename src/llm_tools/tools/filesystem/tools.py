@@ -66,6 +66,14 @@ def _require_repository_metadata(
     return workspace, source_filters, tool_limits
 
 
+def _source_filters_for_call(
+    source_filters: SourceFilters, *, include_hidden: bool
+) -> SourceFilters:
+    if not include_hidden:
+        return source_filters
+    return source_filters.model_copy(update={"include_hidden": True})
+
+
 class ReadFileInput(BaseModel):
     path: str
     start_char: int | None = Field(default=None, ge=0)
@@ -173,6 +181,7 @@ class ListDirectoryInput(BaseModel):
     path: str = "."
     recursive: bool = False
     max_depth: int | None = Field(default=None, gt=0)
+    include_hidden: bool = False
 
 
 class ListDirectoryOutput(DirectoryListingResult):
@@ -199,7 +208,10 @@ class ListDirectoryTool(Tool[ListDirectoryInput, ListDirectoryOutput]):
         result = list_directory_impl(
             root_path,
             args.path,
-            source_filters=source_filters,
+            source_filters=_source_filters_for_call(
+                source_filters,
+                include_hidden=args.include_hidden,
+            ),
             tool_limits=tool_limits,
             recursive=args.recursive,
             max_depth=args.max_depth,
@@ -211,6 +223,7 @@ class ListDirectoryTool(Tool[ListDirectoryInput, ListDirectoryOutput]):
 class FindFilesInput(BaseModel):
     path: str = "."
     pattern: str
+    include_hidden: bool = False
 
 
 class FindFilesOutput(FileSearchResult):
@@ -238,7 +251,10 @@ class FindFilesTool(Tool[FindFilesInput, FindFilesOutput]):
             root_path,
             args.pattern,
             args.path,
-            source_filters=source_filters,
+            source_filters=_source_filters_for_call(
+                source_filters,
+                include_hidden=args.include_hidden,
+            ),
             tool_limits=tool_limits,
         )
         context.log(f"Searched for file pattern '{args.pattern}'.")

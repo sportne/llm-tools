@@ -10,12 +10,18 @@ from pydantic import BaseModel
 from llm_tools.apps.assistant_config import StreamlitAssistantConfig
 from llm_tools.apps.chat_config import ProviderPreset
 from llm_tools.apps.nicegui_chat.app import (
+    NICEGUI_APPROVAL_LABELS,
+    NICEGUI_APPROVAL_OPTIONS,
+    NICEGUI_PROVIDER_OPTIONS,
     _composer_action_icon,
     _discover_model_names,
     _event_payload_text,
     _extract_model_names_from_models_payload,
     _first_nonempty_text,
+    _format_workbench_duration,
+    _is_tool_url_setting,
     _models_endpoint_url,
+    _provider_api_key_env_var,
     _runtime_summary_parts,
     _runtime_summary_text,
     _sidebar_container_classes,
@@ -27,9 +33,11 @@ from llm_tools.apps.nicegui_chat.app import (
     resolve_root_argument,
 )
 from llm_tools.apps.nicegui_chat.controller import (
+    PROVIDER_API_KEY_FIELD,
     NiceGUIChatController,
     NiceGUIQueuedEvent,
     _serialize_workflow_event,
+    _workbench_inspector_title,
 )
 from llm_tools.apps.nicegui_chat.models import (
     NiceGUIPreferences,
@@ -172,6 +180,51 @@ def test_composer_runtime_helpers() -> None:
     assert _runtime_summary_text(runtime) == "ollama | model-a | auto | /repo"
     assert _composer_action_icon(busy=False) == "send"
     assert _composer_action_icon(busy=True) == "stop"
+    assert _format_workbench_duration(None) == "duration unknown"
+    assert _format_workbench_duration(0.25) == "250 ms"
+    assert _format_workbench_duration(1.25) == "1.2 s"
+    assert _format_workbench_duration(61.0) == "1m 1s"
+    assert NICEGUI_PROVIDER_OPTIONS == ["ollama", "custom_openai_compatible"]
+    assert NICEGUI_APPROVAL_OPTIONS == [
+        SideEffectClass.LOCAL_READ,
+        SideEffectClass.LOCAL_WRITE,
+        SideEffectClass.EXTERNAL_READ,
+        SideEffectClass.EXTERNAL_WRITE,
+    ]
+
+
+def test_workbench_inspector_titles_are_directional() -> None:
+    assert (
+        _workbench_inspector_title(
+            turn_number=1, round_index=3, kind="provider_messages"
+        )
+        == "T1R3: User To LLM"
+    )
+    assert (
+        _workbench_inspector_title(
+            turn_number=2, round_index=1, kind="provider_response"
+        )
+        == "T2R1: From LLM"
+    )
+    assert (
+        _workbench_inspector_title(turn_number=2, round_index=1, kind="parsed_response")
+        == "T2R1: Parsed LLM Response"
+    )
+    assert (
+        _workbench_inspector_title(turn_number=2, round_index=1, kind="tool_execution")
+        == "T2R1: Tool To LLM"
+    )
+    assert NICEGUI_APPROVAL_LABELS["local_write"] == "Local write"
+    assert (
+        _provider_api_key_env_var(
+            ProviderPreset.CUSTOM_OPENAI_COMPATIBLE,
+            None,
+        )
+        == "OPENAI_API_KEY"
+    )
+    assert _provider_api_key_env_var(ProviderPreset.OLLAMA, None) == ""
+    assert _is_tool_url_setting("BITBUCKET_BASE_URL") is True
+    assert _is_tool_url_setting("GITLAB_API_TOKEN") is False
 
 
 def test_model_discovery_payload_helpers() -> None:
@@ -225,16 +278,18 @@ def test_model_discovery_fetches_openai_compatible_models(
         )
         return _Response()
 
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("CUSTOM_OPENAI_KEY", "test-key")
     monkeypatch.setattr(app_module, "urlopen", fake_urlopen)
 
     assert _discover_model_names(
-        provider=ProviderPreset.OPENAI,
+        provider=ProviderPreset.CUSTOM_OPENAI_COMPATIBLE,
         base_url="https://example.test/v1",
+        api_key="typed-key",
+        api_key_env_var="CUSTOM_OPENAI_KEY",
         timeout=1.5,
     ) == ["model-a", "model-b"]
     assert calls == [
-        ("https://example.test/v1/models", "Bearer test-key", 1.5),
+        ("https://example.test/v1/models", "Bearer typed-key", 1.5),
     ]
 
 
@@ -288,6 +343,8 @@ def test_cli_config_resolution_covers_runtime_overrides(tmp_path: Path) -> None:
             "0.2",
             "--api-base-url",
             "http://127.0.0.1:11434/v1",
+            "--api-key-env-var",
+            "OLLAMA_API_KEY",
             "--max-context-tokens",
             "1000",
             "--max-tool-round-trips",
@@ -315,6 +372,7 @@ def test_cli_config_resolution_covers_runtime_overrides(tmp_path: Path) -> None:
     root = resolve_root_argument(args, config)
 
     assert config.llm.model_name == "model-b"
+    assert config.llm.api_key_env_var == "OLLAMA_API_KEY"
     assert config.llm.temperature == 0.2
     assert config.session.max_context_tokens == 1000
     assert config.tool_limits.max_tool_result_chars == 900
@@ -501,6 +559,78 @@ def test_controller_session_management_filters_and_temporary_chats(
     assert temporary.summary.session_id not in controller.sessions
 
 
+def test_controller_session_secrets_are_in_memory_and_session_scoped(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(tmp_path, _FakeProvider([]))
+    first_session_id = controller.active_session_id
+    provider_value = "provider-value"
+    tool_value = "tool-value"
+    controller.set_session_secret(PROVIDER_API_KEY_FIELD, provider_value)
+    controller.set_session_secret("GITLAB_API_TOKEN", tool_value)
+    controller.active_record.runtime.tool_urls = {
+        "GITLAB_BASE_URL": "https://gitlab.example.test"
+    }
+
+    assert controller.provider_api_key() == provider_value
+    assert controller.session_tool_env() == {"GITLAB_API_TOKEN": tool_value}
+    assert controller.effective_tool_env()["GITLAB_API_TOKEN"] == tool_value
+    assert (
+        controller.effective_tool_env()["GITLAB_BASE_URL"]
+        == "https://gitlab.example.test"
+    )
+    assert controller.tool_env_overrides() == {
+        "GITLAB_API_TOKEN": tool_value,
+        "GITLAB_BASE_URL": "https://gitlab.example.test",
+    }
+
+    second = controller.create_session(temporary=False)
+    assert controller.provider_api_key() is None
+    assert controller.session_tool_env() == {}
+
+    controller.select_session(first_session_id)
+    controller.clear_session_secret("GITLAB_API_TOKEN")
+    assert controller.session_tool_env() == {}
+    assert controller.provider_api_key() == provider_value
+
+    reloaded = NiceGUIChatController(
+        store=controller.store,
+        config=StreamlitAssistantConfig(),
+        root_path=tmp_path,
+        provider_factory=lambda _runtime: _FakeProvider([]),
+    )
+    reloaded.select_session(first_session_id)
+    assert reloaded.provider_api_key() is None
+    assert reloaded.session_tool_env() == {}
+    assert second.summary.session_id in controller.sessions
+
+
+def test_controller_switch_database_copies_durable_sessions(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    from llm_tools.apps.nicegui_chat import controller as controller_module
+
+    remembered_paths: list[Path] = []
+    monkeypatch.setattr(
+        controller_module,
+        "remember_default_db_path",
+        lambda path: remembered_paths.append(Path(path)),
+    )
+    controller = _controller(tmp_path, _FakeProvider([]))
+    session_id = controller.active_session_id
+    controller.rename_session(session_id, "Migrated chat")
+    new_db_path = tmp_path / "nested" / "new-chat.sqlite3"
+
+    controller.switch_database(new_db_path)
+
+    assert controller.store.db_path == new_db_path
+    loaded = controller.store.load_session(session_id)
+    assert loaded is not None
+    assert loaded.summary.title == "Migrated chat"
+    assert controller.store.load_preferences().active_session_id == session_id
+    assert remembered_paths == [new_db_path]
+
+
 def test_controller_loads_existing_session_and_deletes_active_session(
     tmp_path: Path,
 ) -> None:
@@ -596,6 +726,8 @@ def test_controller_manual_events_cover_non_completed_paths(tmp_path: Path) -> N
     )
     session_id = controller.active_session_id
     turn_state = controller.active_turn_state
+    turn_state.active_turn_started_at = "2026-04-26T10:00:00+00:00"
+    turn_state.last_workbench_entry_at = turn_state.active_turn_started_at
 
     ignored = controller._apply_queued_event(
         NiceGUIQueuedEvent(
@@ -629,7 +761,11 @@ def test_controller_manual_events_cover_non_completed_paths(tmp_path: Path) -> N
     assert turn_state.status_text == "thinking"
     turn_state.cancelling = False
 
-    for kind in ("provider_messages", "parsed_response"):
+    inspector_event_times = {
+        "provider_messages": "2026-04-26T10:00:03+00:00",
+        "parsed_response": "2026-04-26T10:00:05+00:00",
+    }
+    for kind, created_at in inspector_event_times.items():
         controller._apply_queued_event(
             NiceGUIQueuedEvent(
                 kind="inspector",
@@ -640,10 +776,13 @@ def test_controller_manual_events_cover_non_completed_paths(tmp_path: Path) -> N
                 ).model_dump(mode="json"),
                 turn_number=1,
                 session_id=session_id,
+                created_at=created_at,
             )
         )
     assert controller.active_record.inspector_state.provider_messages
     assert controller.active_record.inspector_state.parsed_responses
+    assert controller.active_record.workbench_items[0].duration_seconds == 3.0
+    assert controller.active_record.workbench_items[1].duration_seconds == 2.0
 
     continuation = ChatWorkflowResultEvent(
         result=ChatWorkflowTurnResult(

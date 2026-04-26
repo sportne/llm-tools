@@ -16,15 +16,39 @@ from llm_tools.apps.assistant_config import (
     StreamlitAssistantConfig,
     load_streamlit_assistant_config,
 )
+from llm_tools.apps.assistant_tool_capabilities import (
+    AssistantToolCapability,
+    build_tool_capabilities,
+    build_tool_group_capability_summaries,
+)
 from llm_tools.apps.assistant_tool_registry import build_assistant_available_tool_specs
 from llm_tools.apps.chat_config import ProviderPreset
 from llm_tools.apps.nicegui_chat.controller import (
+    PROVIDER_API_KEY_FIELD,
     NiceGUIChatController,
     default_runtime_config,
 )
 from llm_tools.apps.nicegui_chat.models import NiceGUIRuntimeConfig
 from llm_tools.apps.nicegui_chat.store import SQLiteNiceGUIChatStore, default_db_path
 from llm_tools.llm_providers import ProviderModeStrategy
+from llm_tools.tool_api import SideEffectClass
+
+NICEGUI_PROVIDER_OPTIONS = [
+    ProviderPreset.OLLAMA.value,
+    ProviderPreset.CUSTOM_OPENAI_COMPATIBLE.value,
+]
+NICEGUI_APPROVAL_OPTIONS = [
+    SideEffectClass.LOCAL_READ,
+    SideEffectClass.LOCAL_WRITE,
+    SideEffectClass.EXTERNAL_READ,
+    SideEffectClass.EXTERNAL_WRITE,
+]
+NICEGUI_APPROVAL_LABELS = {
+    SideEffectClass.LOCAL_READ.value: "Local read",
+    SideEffectClass.LOCAL_WRITE.value: "Local write",
+    SideEffectClass.EXTERNAL_READ.value: "External read",
+    SideEffectClass.EXTERNAL_WRITE.value: "External write",
+}
 
 
 def _first_nonempty_text(*values: object) -> str:
@@ -88,6 +112,67 @@ def _composer_action_icon(*, busy: bool) -> str:
     return "stop" if busy else "send"
 
 
+def _format_workbench_duration(seconds: float | None) -> str:
+    """Return a compact workbench duration label."""
+    if seconds is None:
+        return "duration unknown"
+    if seconds < 1.0:
+        return f"{seconds * 1000:.0f} ms"
+    if seconds < 60.0:
+        return f"{seconds:.1f} s"
+    minutes, remainder = divmod(seconds, 60.0)
+    return f"{int(minutes)}m {remainder:.0f}s"
+
+
+def _provider_api_key_env_var(
+    provider: ProviderPreset,
+    configured_env_var: str | None,
+) -> str:
+    """Return the configured provider API-key env var without exposing a secret."""
+    if provider is ProviderPreset.OLLAMA:
+        return configured_env_var or ""
+    return configured_env_var or "OPENAI_API_KEY"
+
+
+def _tool_capability_tooltip(capability: AssistantToolCapability) -> str:
+    """Return compact hover text for a tool capability."""
+    lines = [capability.tool_name]
+    if capability.detail:
+        lines.append(capability.detail)
+    elif capability.exposed_to_model:
+        lines.append("Available to the model.")
+    elif capability.enabled:
+        lines.append("Selected but blocked from the model.")
+    else:
+        lines.append("Not selected.")
+    if capability.approval_required:
+        lines.append("Approval required before execution.")
+    if capability.required_secrets:
+        lines.append("Credentials: " + ", ".join(capability.required_secrets))
+    return "\n".join(lines)
+
+
+def _selected_tool_chip_classes(capability: AssistantToolCapability) -> str:
+    """Return selected tool chip classes."""
+    classes = "llmt-tool-chip"
+    if capability.exposed_to_model:
+        classes += " llmt-tool-chip-enabled"
+    else:
+        classes += " llmt-tool-chip-blocked"
+    return classes
+
+
+def _selected_tool_icon(capability: AssistantToolCapability) -> str:
+    """Return a compact icon for selected tool availability."""
+    return "check" if capability.exposed_to_model else "block"
+
+
+def _is_tool_url_setting(name: str) -> bool:
+    """Return whether a required tool value is a non-secret URL."""
+    normalized = name.strip().upper()
+    return normalized.endswith("_BASE_URL") or normalized.endswith("_URL")
+
+
 def _models_endpoint_url(base_url: str) -> str:
     """Return the OpenAI-compatible model listing URL for a base URL."""
     trimmed = base_url.strip().rstrip("/")
@@ -122,6 +207,8 @@ def _discover_model_names(
     *,
     provider: ProviderPreset,
     base_url: str | None,
+    api_key_env_var: str | None = None,
+    api_key: str | None = None,
     timeout: float = 5.0,
 ) -> list[str]:
     """Discover available models from an OpenAI-compatible provider endpoint."""
@@ -134,9 +221,12 @@ def _discover_model_names(
     if parsed_url.scheme not in {"http", "https"}:
         return []
     headers = {"Accept": "application/json"}
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if provider is not ProviderPreset.OLLAMA and api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    api_key_env_var = _provider_api_key_env_var(provider, api_key_env_var)
+    effective_api_key = api_key or (
+        os.environ.get(api_key_env_var) if api_key_env_var else None
+    )
+    if provider is not ProviderPreset.OLLAMA and effective_api_key:
+        headers["Authorization"] = f"Bearer {effective_api_key}"
     request = Request(url, headers=headers, method="GET")  # noqa: S310
     try:
         with urlopen(request, timeout=timeout) as response:  # noqa: S310
@@ -160,6 +250,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider-mode-strategy", type=str)
     parser.add_argument("--temperature", type=float)
     parser.add_argument("--api-base-url", type=str)
+    parser.add_argument("--api-key-env-var", type=str)
     parser.add_argument("--db-path", type=Path, default=None)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
@@ -198,6 +289,8 @@ def resolve_assistant_config(args: argparse.Namespace) -> StreamlitAssistantConf
         raw["llm"]["temperature"] = args.temperature
     if args.api_base_url is not None:
         raw["llm"]["api_base_url"] = args.api_base_url
+    if args.api_key_env_var is not None:
+        raw["llm"]["api_key_env_var"] = args.api_key_env_var
     for field_name in (
         "max_context_tokens",
         "max_tool_round_trips",
@@ -331,6 +424,43 @@ def build_nicegui_chat_ui(  # noqa: C901
             background: var(--llmt-accent) !important;
             color: var(--llmt-accent-contrast) !important;
         }
+        .llmt-shell .bg-primary .q-icon,
+        .q-dialog .bg-primary .q-icon,
+        .q-menu .bg-primary .q-icon,
+        .llmt-shell .bg-primary .q-btn__content,
+        .q-dialog .bg-primary .q-btn__content,
+        .q-menu .bg-primary .q-btn__content,
+        .llmt-shell .bg-negative .q-icon,
+        .q-dialog .bg-negative .q-icon,
+        .q-menu .bg-negative .q-icon,
+        .llmt-shell .bg-negative .q-btn__content,
+        .q-dialog .bg-negative .q-btn__content,
+        .q-menu .bg-negative .q-btn__content {
+            color: var(--llmt-accent-contrast) !important;
+        }
+        body.body--dark .llmt-shell .bg-primary,
+        body.body--dark .q-dialog .bg-primary,
+        body.body--dark .q-menu .bg-primary,
+        body.body--dark .llmt-shell .bg-negative,
+        body.body--dark .q-dialog .bg-negative,
+        body.body--dark .q-menu .bg-negative {
+            background: #d7d7d2 !important;
+            color: #11120f !important;
+        }
+        body.body--dark .llmt-shell .bg-primary .q-icon,
+        body.body--dark .q-dialog .bg-primary .q-icon,
+        body.body--dark .q-menu .bg-primary .q-icon,
+        body.body--dark .llmt-shell .bg-primary .q-btn__content,
+        body.body--dark .q-dialog .bg-primary .q-btn__content,
+        body.body--dark .q-menu .bg-primary .q-btn__content,
+        body.body--dark .llmt-shell .bg-negative .q-icon,
+        body.body--dark .q-dialog .bg-negative .q-icon,
+        body.body--dark .q-menu .bg-negative .q-icon,
+        body.body--dark .llmt-shell .bg-negative .q-btn__content,
+        body.body--dark .q-dialog .bg-negative .q-btn__content,
+        body.body--dark .q-menu .bg-negative .q-btn__content {
+            color: #11120f !important;
+        }
         .llmt-sidebar {
             flex: 0 0 284px; width: 284px; min-width: 284px; max-width: 284px;
             height: 100%; overflow: hidden; background: #ecebe6;
@@ -401,9 +531,48 @@ def build_nicegui_chat_ui(  # noqa: C901
         .llmt-selected-tools {
             min-height: 0; max-height: 64px; overflow: hidden; flex-wrap: wrap;
         }
-        .llmt-selected-tools .q-btn {
+        .llmt-selected-tools .q-btn,
+        .llmt-tool-menu .q-btn {
             min-height: 22px; padding: 0 6px; font-size: 12px;
         }
+        .llmt-tool-menu {
+            min-width: 280px; max-width: min(420px, 92vw);
+            max-height: min(520px, 80vh); overflow-y: auto;
+            padding: 8px;
+        }
+        .llmt-tool-menu-note {
+            font-size: 12px; line-height: 16px; padding: 2px 4px 8px;
+        }
+        .llmt-tool-group-header {
+            border-top: 1px solid #dedcd4; padding-top: 6px; margin-top: 4px;
+        }
+        body.body--dark .llmt-tool-group-header { border-top-color: #373a34; }
+        .llmt-tool-name {
+            justify-content: flex-start; width: 100%; min-width: 0;
+        }
+        .llmt-tool-name .q-btn__content,
+        .llmt-tool-chip .q-btn__content {
+            min-width: 0; overflow: hidden; text-overflow: ellipsis;
+            white-space: nowrap; display: flex; flex-wrap: nowrap;
+        }
+        .llmt-tool-chip-enabled {
+            color: var(--llmt-accent) !important;
+        }
+        .llmt-tool-chip-blocked {
+            text-decoration: line-through; opacity: 0.72;
+            color: var(--llmt-accent) !important;
+        }
+        .llmt-credential-row {
+            border-top: 1px solid #dedcd4; padding: 6px 0;
+        }
+        body.body--dark .llmt-credential-row { border-top-color: #373a34; }
+        .llmt-settings-body {
+            width: 100%; max-height: min(70vh, 560px);
+        }
+        .llmt-settings-section {
+            border-top: 1px solid #dedcd4; padding-top: 10px; margin-top: 4px;
+        }
+        body.body--dark .llmt-settings-section { border-top-color: #373a34; }
         .llmt-workbench {
             flex: 0 0 340px; width: 340px; min-width: 340px; max-width: 340px;
             height: 100%; min-height: 0; overflow: hidden; background: #f1f0eb;
@@ -492,20 +661,32 @@ def build_nicegui_chat_ui(  # noqa: C901
     header_title: Any = None
     status_chip: Any = None
     selected_tools_row: Any = None
+    tool_menu_column: Any = None
     composer_meta_row: Any = None
     composer_action_button: Any = None
     provider_select: Any = None
     model_input: Any = None
     base_url_input: Any = None
+    provider_api_key_input: Any = None
     mode_select: Any = None
     workspace_input: Any = None
+    database_path_input: Any = None
     provider_quick_select: Any = None
     base_url_quick_input: Any = None
+    provider_api_key_quick_input: Any = None
     model_quick_select: Any = None
     mode_quick_select: Any = None
     workspace_quick_input: Any = None
     dark_mode_switch: Any = None
+    allow_network_switch: Any = None
+    allow_filesystem_switch: Any = None
+    allow_subprocess_switch: Any = None
+    approval_select: Any = None
+    tool_credentials_column: Any = None
+    tool_credential_inputs: dict[str, Any] = {}
+    tool_url_inputs: dict[str, Any] = {}
     workspace_browser_label: Any = None
+    workspace_browser_title: Any = None
     workspace_browser_column: Any = None
     composer_input: Any = None
     composer_state: dict[str, str] = {"text": ""}
@@ -523,6 +704,49 @@ def build_nicegui_chat_ui(  # noqa: C901
 
     def active_runtime() -> NiceGUIRuntimeConfig:
         return controller.active_record.runtime
+
+    def clear_provider_api_key() -> None:
+        controller.clear_session_secret(PROVIDER_API_KEY_FIELD)
+        refresh_all()
+
+    def clear_tool_credential(name: str) -> None:
+        controller.clear_session_secret(name)
+        refresh_all()
+
+    def clear_tool_url(name: str) -> None:
+        active_runtime().tool_urls.pop(name, None)
+        controller.save_active_session()
+        refresh_all()
+
+    def remember_recent_runtime_values(runtime: NiceGUIRuntimeConfig) -> None:
+        """Persist non-secret runtime values for future sessions."""
+        provider_key = runtime.provider.value
+        if runtime.model_name:
+            models = controller.preferences.recent_models.setdefault(provider_key, [])
+            if runtime.model_name in models:
+                models.remove(runtime.model_name)
+            models.insert(0, runtime.model_name)
+            del models[10:]
+        if runtime.api_base_url:
+            urls = controller.preferences.recent_base_urls.setdefault(provider_key, [])
+            if runtime.api_base_url in urls:
+                urls.remove(runtime.api_base_url)
+            urls.insert(0, runtime.api_base_url)
+            del urls[10:]
+        if runtime.root_path:
+            roots = controller.preferences.recent_roots
+            if runtime.root_path in roots:
+                roots.remove(runtime.root_path)
+            roots.insert(0, runtime.root_path)
+            del roots[10:]
+
+    def base_url_options(runtime: NiceGUIRuntimeConfig) -> list[str]:
+        options = list(
+            controller.preferences.recent_base_urls.get(runtime.provider.value, [])
+        )
+        if runtime.api_base_url and runtime.api_base_url not in options:
+            options.insert(0, runtime.api_base_url)
+        return options
 
     def apply_layout_state() -> None:
         dark_mode_control.value = controller.preferences.theme_mode == "dark"
@@ -579,7 +803,11 @@ def build_nicegui_chat_ui(  # noqa: C901
     def open_provider_dialog() -> None:
         runtime = active_runtime()
         provider_quick_select.value = runtime.provider.value
+        base_url_quick_input.set_options(
+            base_url_options(runtime), value=runtime.api_base_url or None
+        )
         base_url_quick_input.value = runtime.api_base_url or ""
+        provider_api_key_quick_input.value = ""
         dialogs["provider_settings"].open()
 
     def open_model_dialog() -> None:
@@ -619,24 +847,189 @@ def build_nicegui_chat_ui(  # noqa: C901
                     on_click=lambda _event, part=label: open_runtime_part_dialog(part),
                 ).props("flat dense no-caps color=primary").classes("llmt-runtime-chip")
 
-    def available_tool_names() -> list[str]:
-        return sorted(build_assistant_available_tool_specs())
+    def current_tool_capability_groups() -> dict[str, list[AssistantToolCapability]]:
+        runtime = active_runtime()
+        return build_tool_capabilities(
+            tool_specs=build_assistant_available_tool_specs(),
+            enabled_tools=set(runtime.enabled_tools),
+            root_path=runtime.root_path,
+            env=controller.effective_tool_env(
+                runtime=runtime,
+                session_id=controller.active_session_id,
+            ),
+            allow_network=runtime.allow_network,
+            allow_filesystem=runtime.allow_filesystem,
+            allow_subprocess=runtime.allow_subprocess,
+            require_approval_for=set(runtime.require_approval_for),
+        )
+
+    def current_tool_capabilities_by_name() -> dict[str, AssistantToolCapability]:
+        return {
+            capability.tool_name: capability
+            for capabilities in current_tool_capability_groups().values()
+            for capability in capabilities
+        }
+
+    def tool_required_value_entries() -> list[tuple[str, list[str], bool, bool]]:
+        entries: dict[str, set[str]] = {}
+        for tool_name, spec in build_assistant_available_tool_specs().items():
+            for secret_name in spec.required_secrets:
+                entries.setdefault(secret_name, set()).add(tool_name)
+        return [
+            (
+                secret_name,
+                sorted(tool_names),
+                (
+                    bool(active_runtime().tool_urls.get(secret_name))
+                    if _is_tool_url_setting(secret_name)
+                    else controller.has_session_secret(secret_name)
+                )
+                or bool(os.environ.get(secret_name)),
+                _is_tool_url_setting(secret_name),
+            )
+            for secret_name, tool_names in sorted(entries.items())
+        ]
+
+    def render_tool_credentials() -> None:
+        if tool_credentials_column is None:
+            return
+        tool_credentials_column.clear()
+        tool_credential_inputs.clear()
+        tool_url_inputs.clear()
+        entries = tool_required_value_entries()
+        with tool_credentials_column:
+            if not entries:
+                ui.label("No tool access settings are required.").classes(
+                    "text-xs llmt-muted"
+                )
+                return
+            for secret_name, tool_names, is_set, is_url in entries:
+                with ui.row().classes("llmt-credential-row w-full items-end gap-2"):
+                    with ui.column().classes("gap-0 min-w-0"):
+                        ui.label(secret_name).classes("text-sm llmt-code")
+                        tooltip_text = "Required by: " + ", ".join(tool_names)
+                        ui.label(f"{len(tool_names)} tool(s)").classes(
+                            "text-xs llmt-muted"
+                        )
+                    if is_url:
+                        url_input = ui.input(
+                            "URL",
+                            value=active_runtime().tool_urls.get(secret_name, ""),
+                        ).classes("grow")
+                        tool_url_inputs[secret_name] = url_input
+                    else:
+                        credential_input = (
+                            ui.input(
+                                "Credential",
+                                placeholder=(
+                                    "Stored for this session"
+                                    if is_set
+                                    else "Paste value"
+                                ),
+                            )
+                            .props("type=password autocomplete=off")
+                            .classes("grow")
+                        )
+                        tool_credential_inputs[secret_name] = credential_input
+                    badge = ui.icon("check" if is_set else "block").classes("q-pb-sm")
+                    if not is_set:
+                        badge.classes("llmt-tool-chip-blocked")
+                    ui.tooltip(tooltip_text).props("delay=700")
+                    ui.button(
+                        icon="clear",
+                        on_click=lambda _event, name=secret_name, url=is_url: (
+                            clear_tool_url(name) if url else clear_tool_credential(name)
+                        ),
+                    ).props("flat round dense")
+
+    def render_tool_menu() -> None:
+        if tool_menu_column is None:
+            return
+        tool_menu_column.clear()
+        groups = current_tool_capability_groups()
+        summaries = build_tool_group_capability_summaries(groups)
+        with tool_menu_column:
+            ui.label("Tool changes apply to the next message.").classes(
+                "llmt-tool-menu-note llmt-muted"
+            )
+            for group_name, capabilities in groups.items():
+                summary = summaries[group_name]
+                all_enabled = bool(capabilities) and all(
+                    capability.enabled for capability in capabilities
+                )
+                some_enabled = any(capability.enabled for capability in capabilities)
+                icon = (
+                    "check_box"
+                    if all_enabled
+                    else "indeterminate_check_box"
+                    if some_enabled
+                    else "check_box_outline_blank"
+                )
+                with ui.column().classes("llmt-tool-group-header w-full gap-1"):
+                    with ui.row().classes(
+                        "w-full items-center justify-between no-wrap"
+                    ):
+                        ui.button(
+                            group_name,
+                            icon=icon,
+                            on_click=lambda _event, name=group_name: toggle_tool_group(
+                                name
+                            ),
+                        ).props("flat dense no-caps align=left").classes("grow")
+                        ui.label(
+                            f"{summary.exposed_tools}/{summary.total_tools}"
+                        ).classes("text-xs llmt-muted")
+                    for capability in capabilities:
+                        icon_name = (
+                            _selected_tool_icon(capability)
+                            if capability.enabled
+                            else None
+                        )
+                        button = ui.button(
+                            capability.tool_name,
+                            icon=icon_name,
+                            on_click=lambda _event, name=capability.tool_name: (
+                                toggle_runtime_tool(name)
+                            ),
+                        ).props("flat dense no-caps align=left")
+                        button.classes(
+                            "llmt-tool-name "
+                            + (
+                                _selected_tool_chip_classes(capability)
+                                if capability.enabled
+                                else ""
+                            )
+                        )
+                        with button:
+                            ui.tooltip(_tool_capability_tooltip(capability)).props(
+                                "delay=700"
+                            )
 
     def render_selected_tools() -> None:
         if selected_tools_row is None:
             return
         selected_tools_row.clear()
-        selected = sorted(set(active_runtime().enabled_tools))
+        capabilities_by_name = current_tool_capabilities_by_name()
+        selected = [
+            capabilities_by_name[tool_name]
+            for tool_name in sorted(set(active_runtime().enabled_tools))
+            if tool_name in capabilities_by_name
+        ]
         if not selected:
             return
         with selected_tools_row:
             ui.label("Tools").classes("text-xs llmt-muted")
-            for tool_name in selected:
-                ui.button(
-                    tool_name,
-                    icon="check",
-                    on_click=lambda _event, name=tool_name: toggle_runtime_tool(name),
-                ).props("flat dense no-caps color=primary")
+            for capability in selected:
+                button = ui.button(
+                    capability.tool_name,
+                    icon=_selected_tool_icon(capability),
+                    on_click=lambda _event, name=capability.tool_name: (
+                        toggle_runtime_tool(name)
+                    ),
+                ).props("flat dense no-caps")
+                button.classes(_selected_tool_chip_classes(capability))
+                with button:
+                    ui.tooltip(_tool_capability_tooltip(capability)).props("delay=700")
 
     def toggle_runtime_tool(tool_name: str) -> None:
         runtime = active_runtime()
@@ -648,9 +1041,32 @@ def build_nicegui_chat_ui(  # noqa: C901
         runtime.enabled_tools = sorted(enabled)
         controller.save_active_session()
         render_selected_tools()
+        render_tool_menu()
+
+    def toggle_tool_group(group_name: str) -> None:
+        runtime = active_runtime()
+        groups = current_tool_capability_groups()
+        group_tool_names = {
+            capability.tool_name for capability in groups.get(group_name, [])
+        }
+        if not group_tool_names:
+            return
+        enabled = set(runtime.enabled_tools)
+        if group_tool_names.issubset(enabled):
+            enabled.difference_update(group_tool_names)
+        else:
+            enabled.update(group_tool_names)
+        runtime.enabled_tools = sorted(enabled)
+        controller.save_active_session()
+        render_selected_tools()
+        render_tool_menu()
 
     def set_workspace_browser_target_value(path: str) -> None:
-        if workspace_browser_target["value"] == "quick":
+        if workspace_browser_target["value"] == "database":
+            current = Path(str(database_path_input.value or controller.store.db_path))
+            filename = current.name or "chat.sqlite3"
+            database_path_input.value = str(Path(path) / filename)
+        elif workspace_browser_target["value"] == "quick":
             workspace_quick_input.value = path
         else:
             workspace_input.value = path
@@ -731,6 +1147,7 @@ def build_nicegui_chat_ui(  # noqa: C901
         header_title.set_text(controller.active_record.summary.title)
         status_chip.set_text(turn_state.status_text or "ready")
         render_selected_tools()
+        render_tool_menu()
         render_runtime_summary(runtime)
         composer_action_button.props(
             "icon="
@@ -741,9 +1158,23 @@ def build_nicegui_chat_ui(  # noqa: C901
         provider_select.value = runtime.provider.value
         set_model_options(model_options_state["values"], selected=runtime.model_name)
         mode_select.value = runtime.provider_mode_strategy.value
+        base_url_input.set_options(
+            base_url_options(runtime), value=runtime.api_base_url or None
+        )
         base_url_input.value = runtime.api_base_url or ""
+        provider_api_key_input.value = ""
         workspace_input.value = runtime.root_path or ""
+        database_path_input.value = str(controller.store.db_path)
         dark_mode_switch.value = controller.preferences.theme_mode == "dark"
+        allow_network_switch.value = runtime.allow_network
+        allow_filesystem_switch.value = runtime.allow_filesystem
+        allow_subprocess_switch.value = runtime.allow_subprocess
+        approval_select.value = [
+            side_effect.value
+            for side_effect in NICEGUI_APPROVAL_OPTIONS
+            if side_effect in runtime.require_approval_for
+        ]
+        render_tool_credentials()
 
     def render_transcript() -> None:
         transcript_column.clear()
@@ -809,9 +1240,13 @@ def build_nicegui_chat_ui(  # noqa: C901
                     return
                 for item in reversed(record.workbench_items[-20:]):
                     with ui.expansion(item.title, icon="fact_check").classes("w-full"):
-                        ui.label(f"{item.kind} v{item.version}").classes(
-                            "text-xs llmt-muted"
-                        )
+                        with ui.row().classes("w-full items-center gap-2"):
+                            ui.label(f"{item.kind} v{item.version}").classes(
+                                "text-xs llmt-muted"
+                            )
+                            ui.label(
+                                _format_workbench_duration(item.duration_seconds)
+                            ).classes("text-xs llmt-muted")
                         (
                             ui.json_editor({"content": {"json": item.payload}})
                             .classes("llmt-json-editor")
@@ -923,11 +1358,39 @@ def build_nicegui_chat_ui(  # noqa: C901
         runtime.model_name = str(model_input.value or runtime.model_name)
         runtime.provider_mode_strategy = ProviderModeStrategy(str(mode_select.value))
         runtime.api_base_url = str(base_url_input.value or "").strip() or None
+        provider_api_key = str(provider_api_key_input.value or "").strip()
+        if provider_api_key:
+            controller.set_session_secret(PROVIDER_API_KEY_FIELD, provider_api_key)
+            provider_api_key_input.value = ""
+        for secret_name, credential_input in tool_credential_inputs.items():
+            secret_value = str(credential_input.value or "").strip()
+            if secret_value:
+                controller.set_session_secret(secret_name, secret_value)
+                credential_input.value = ""
+        runtime.tool_urls = {
+            name: str(url_input.value or "").strip()
+            for name, url_input in tool_url_inputs.items()
+            if str(url_input.value or "").strip()
+        }
         runtime.root_path = str(workspace_input.value or "").strip() or None
+        requested_db_path = str(database_path_input.value or "").strip()
+        runtime.allow_network = bool(allow_network_switch.value)
+        runtime.allow_filesystem = bool(allow_filesystem_switch.value)
+        runtime.allow_subprocess = bool(allow_subprocess_switch.value)
+        runtime.require_approval_for = {
+            SideEffectClass(value) for value in (approval_select.value or [])
+        }
         controller.preferences.theme_mode = (
             "dark" if bool(dark_mode_switch.value) else "light"
         )
-        controller.save_active_session()
+        remember_recent_runtime_values(runtime)
+        if (
+            requested_db_path
+            and Path(requested_db_path).expanduser() != controller.store.db_path
+        ):
+            controller.switch_database(Path(requested_db_path).expanduser())
+        else:
+            controller.save_active_session()
         controller.store.save_preferences(controller.preferences)
         refresh_all()
 
@@ -950,8 +1413,15 @@ def build_nicegui_chat_ui(  # noqa: C901
             str(provider_select.value or active_runtime().provider)
         )
         base_url = str(base_url_input.value or active_runtime().api_base_url or "")
+        provider_api_key = str(provider_api_key_input.value or "").strip()
         current_model = str(model_input.value or active_runtime().model_name)
-        models = _discover_model_names(provider=provider, base_url=base_url)
+        models = _discover_model_names(
+            provider=provider,
+            base_url=base_url,
+            api_key_env_var=active_runtime().api_key_env_var,
+            api_key=provider_api_key
+            or controller.provider_api_key(session_id=controller.active_session_id),
+        )
         if not models:
             set_model_options(model_options_state["values"], selected=current_model)
             if notify:
@@ -967,6 +1437,10 @@ def build_nicegui_chat_ui(  # noqa: C901
         models = _discover_model_names(
             provider=runtime.provider,
             base_url=runtime.api_base_url,
+            api_key_env_var=runtime.api_key_env_var,
+            api_key=controller.provider_api_key(
+                session_id=controller.active_session_id
+            ),
         )
         if not models:
             set_model_options(model_options_state["values"], selected=current_model)
@@ -981,6 +1455,11 @@ def build_nicegui_chat_ui(  # noqa: C901
         runtime = active_runtime()
         runtime.provider = ProviderPreset(str(provider_quick_select.value))
         runtime.api_base_url = str(base_url_quick_input.value or "").strip() or None
+        provider_api_key = str(provider_api_key_quick_input.value or "").strip()
+        if provider_api_key:
+            controller.set_session_secret(PROVIDER_API_KEY_FIELD, provider_api_key)
+            provider_api_key_quick_input.value = ""
+        remember_recent_runtime_values(runtime)
         controller.save_active_session()
         dialogs["provider_settings"].close()
         refresh_all()
@@ -988,6 +1467,7 @@ def build_nicegui_chat_ui(  # noqa: C901
     def apply_model_settings_and_close() -> None:
         runtime = active_runtime()
         runtime.model_name = str(model_quick_select.value or runtime.model_name)
+        remember_recent_runtime_values(runtime)
         controller.save_active_session()
         dialogs["model_settings"].close()
         refresh_all()
@@ -1004,17 +1484,24 @@ def build_nicegui_chat_ui(  # noqa: C901
     def apply_workspace_settings_and_close() -> None:
         runtime = active_runtime()
         runtime.root_path = str(workspace_quick_input.value or "").strip() or None
+        remember_recent_runtime_values(runtime)
         controller.save_active_session()
         dialogs["workspace_settings"].close()
         refresh_all()
 
     def workspace_start_path() -> Path:
-        source_input = (
-            workspace_quick_input
-            if workspace_browser_target["value"] == "quick"
-            else workspace_input
+        if workspace_browser_target["value"] == "database":
+            source_input = database_path_input
+        elif workspace_browser_target["value"] == "quick":
+            source_input = workspace_quick_input
+        else:
+            source_input = workspace_input
+        fallback = (
+            str(controller.store.db_path)
+            if workspace_browser_target["value"] == "database"
+            else active_runtime().root_path
         )
-        raw = str(source_input.value or active_runtime().root_path or Path.cwd())
+        raw = str(source_input.value or fallback or Path.cwd())
         try:
             candidate = Path(raw).expanduser().resolve()
         except OSError:
@@ -1059,6 +1546,12 @@ def build_nicegui_chat_ui(  # noqa: C901
 
     def open_workspace_browser(*, target: str = "settings") -> None:
         workspace_browser_target["value"] = target
+        if workspace_browser_title is not None:
+            workspace_browser_title.set_text(
+                "Select Database Folder"
+                if target == "database"
+                else "Select Workspace Root"
+            )
         render_workspace_browser(workspace_start_path())
         dialogs["workspace_browser"].open()
 
@@ -1098,15 +1591,10 @@ def build_nicegui_chat_ui(  # noqa: C901
                 with ui.row().classes("llmt-composer-row w-full items-end gap-2"):
                     with (
                         ui.button(icon="add").props("flat round color=primary"),
-                        ui.menu(),
+                        ui.menu().classes("llmt-tool-menu"),
+                        ui.column().classes("w-full gap-1") as tool_menu_column,
                     ):
-                        for tool_name in available_tool_names():
-                            ui.menu_item(
-                                tool_name,
-                                on_click=lambda _event, name=tool_name: (
-                                    toggle_runtime_tool(name)
-                                ),
-                            )
+                        pass
                     composer_input = (
                         ui.textarea(
                             placeholder="Message llm-tools",
@@ -1149,44 +1637,110 @@ def build_nicegui_chat_ui(  # noqa: C901
         with ui.column() as workbench_column:
             pass
 
-    with ui.dialog() as settings_dialog, ui.card().classes("w-[520px]"):
+    with ui.dialog() as settings_dialog, ui.card().classes("w-[520px] max-h-[88vh]"):
         dialogs["settings"] = settings_dialog
         ui.label("Settings").classes("text-lg")
-        dark_mode_switch = ui.switch(
-            "Dark mode",
-            value=controller.preferences.theme_mode == "dark",
-        ).classes("w-full")
-        provider_select = ui.select(
-            ["ollama", "openai", "custom_openai_compatible"],
-            label="Provider",
-        ).classes("w-full")
-        with ui.row().classes("w-full items-end gap-2 no-wrap"):
-            model_input = (
+        with (
+            ui.scroll_area().classes("llmt-settings-body"),
+            ui.column().classes("w-full gap-2 q-pr-sm"),
+        ):
+            dark_mode_switch = ui.switch(
+                "Dark mode",
+                value=controller.preferences.theme_mode == "dark",
+            ).classes("w-full")
+            provider_select = ui.select(
+                NICEGUI_PROVIDER_OPTIONS,
+                label="Provider",
+            ).classes("w-full")
+            with ui.row().classes("w-full items-end gap-2 no-wrap"):
+                model_input = (
+                    ui.select(
+                        [controller.active_record.runtime.model_name],
+                        label="Model",
+                        value=controller.active_record.runtime.model_name,
+                        with_input=True,
+                        new_value_mode="add-unique",
+                    )
+                    .classes("grow")
+                    .props("clearable")
+                )
+                ui.button(
+                    icon="refresh",
+                    on_click=lambda: refresh_model_options(notify=True),
+                ).props("flat round color=primary")
+            mode_select = ui.select(
+                [strategy.value for strategy in ProviderModeStrategy],
+                label="Provider mode",
+            ).classes("w-full")
+            base_url_input = (
                 ui.select(
-                    [controller.active_record.runtime.model_name],
-                    label="Model",
-                    value=controller.active_record.runtime.model_name,
+                    base_url_options(controller.active_record.runtime),
+                    label="Base URL",
                     with_input=True,
                     new_value_mode="add-unique",
                 )
-                .classes("grow")
                 .props("clearable")
+                .classes("w-full")
             )
-            ui.button(
-                icon="refresh",
-                on_click=lambda: refresh_model_options(notify=True),
-            ).props("flat round color=primary")
-        mode_select = ui.select(
-            [strategy.value for strategy in ProviderModeStrategy],
-            label="Provider mode",
-        ).classes("w-full")
-        base_url_input = ui.input("Base URL").classes("w-full")
-        with ui.row().classes("w-full items-end gap-2 no-wrap"):
-            workspace_input = ui.input("Workspace root").classes("grow")
-            ui.button(
-                icon="folder_open",
-                on_click=lambda: open_workspace_browser(target="settings"),
-            ).props("flat round color=primary")
+            with ui.row().classes("w-full items-end gap-2 no-wrap"):
+                provider_api_key_input = (
+                    ui.input(
+                        "Provider API key",
+                        placeholder="Paste for this session; leave blank to keep",
+                    )
+                    .props("type=password autocomplete=off")
+                    .classes("grow")
+                )
+                ui.button(
+                    icon="clear",
+                    on_click=clear_provider_api_key,
+                ).props("flat round")
+            with ui.row().classes("w-full items-end gap-2 no-wrap"):
+                workspace_input = ui.input("Workspace root").classes("grow")
+                ui.button(
+                    icon="folder_open",
+                    on_click=lambda: open_workspace_browser(target="settings"),
+                ).props("flat round color=primary")
+            with ui.column().classes("llmt-settings-section w-full gap-1"):
+                ui.label("Persistence").classes("text-base")
+                with ui.row().classes("w-full items-end gap-2 no-wrap"):
+                    database_path_input = ui.input("SQLite database").classes("grow")
+                    ui.button(
+                        icon="folder_open",
+                        on_click=lambda: open_workspace_browser(target="database"),
+                    ).props("flat round color=primary")
+            with ui.column().classes("llmt-settings-section w-full gap-1"):
+                ui.label("Session permissions").classes("text-base")
+                allow_network_switch = ui.switch(
+                    "Allow network tools",
+                    value=controller.active_record.runtime.allow_network,
+                ).classes("w-full")
+                allow_filesystem_switch = ui.switch(
+                    "Allow workspace file tools",
+                    value=controller.active_record.runtime.allow_filesystem,
+                ).classes("w-full")
+                allow_subprocess_switch = ui.switch(
+                    "Allow subprocess tools",
+                    value=controller.active_record.runtime.allow_subprocess,
+                ).classes("w-full")
+                approval_select = (
+                    ui.select(
+                        NICEGUI_APPROVAL_LABELS,
+                        label="Require approval for",
+                        multiple=True,
+                        value=[
+                            side_effect.value
+                            for side_effect in controller.active_record.runtime.require_approval_for
+                            if side_effect in NICEGUI_APPROVAL_OPTIONS
+                        ],
+                    )
+                    .props("use-chips")
+                    .classes("w-full")
+                )
+            with ui.column().classes("llmt-settings-section w-full gap-1"):
+                ui.label("Tool access").classes("text-base")
+                with ui.column().classes("w-full gap-0") as tool_credentials_column:
+                    pass
         with ui.row().classes("justify-end w-full"):
             ui.button("Cancel", on_click=settings_dialog.close).props("flat")
             ui.button("Apply", on_click=apply_settings_and_close)
@@ -1195,10 +1749,32 @@ def build_nicegui_chat_ui(  # noqa: C901
         dialogs["provider_settings"] = provider_settings_dialog
         ui.label("Provider").classes("text-lg")
         provider_quick_select = ui.select(
-            ["ollama", "openai", "custom_openai_compatible"],
+            NICEGUI_PROVIDER_OPTIONS,
             label="Provider",
         ).classes("w-full")
-        base_url_quick_input = ui.input("Base URL").classes("w-full")
+        base_url_quick_input = (
+            ui.select(
+                base_url_options(controller.active_record.runtime),
+                label="Base URL",
+                with_input=True,
+                new_value_mode="add-unique",
+            )
+            .props("clearable")
+            .classes("w-full")
+        )
+        with ui.row().classes("w-full items-end gap-2 no-wrap"):
+            provider_api_key_quick_input = (
+                ui.input(
+                    "Provider API key",
+                    placeholder="Paste for this session; leave blank to keep",
+                )
+                .props("type=password autocomplete=off")
+                .classes("grow")
+            )
+            ui.button(
+                icon="clear",
+                on_click=clear_provider_api_key,
+            ).props("flat round")
         with ui.row().classes("justify-end w-full"):
             ui.button("Cancel", on_click=provider_settings_dialog.close).props("flat")
             ui.button("Apply", on_click=apply_provider_settings_and_close)
@@ -1252,7 +1828,7 @@ def build_nicegui_chat_ui(  # noqa: C901
 
     with ui.dialog() as workspace_dialog, ui.card().classes("w-[560px]"):
         dialogs["workspace_browser"] = workspace_dialog
-        ui.label("Select Workspace Root").classes("text-lg")
+        workspace_browser_title = ui.label("Select Workspace Root").classes("text-lg")
         workspace_browser_label = ui.label("").classes("text-sm llmt-muted")
         with (
             ui.scroll_area().classes("w-full h-[360px]"),

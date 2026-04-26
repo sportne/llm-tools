@@ -27,9 +27,18 @@ def _require_repository_metadata(
     return source_filters, tool_limits
 
 
+def _source_filters_for_call(
+    source_filters: SourceFilters, *, include_hidden: bool
+) -> SourceFilters:
+    if not include_hidden:
+        return source_filters
+    return source_filters.model_copy(update={"include_hidden": True})
+
+
 class SearchTextInput(BaseModel):
     path: str = "."
     query: str
+    include_hidden: bool = False
 
 
 class SearchTextOutput(TextSearchResult):
@@ -59,7 +68,10 @@ class SearchTextTool(Tool[SearchTextInput, SearchTextOutput]):
             root_path,
             args.query,
             args.path,
-            source_filters=source_filters,
+            source_filters=_source_filters_for_call(
+                source_filters,
+                include_hidden=args.include_hidden,
+            ),
             tool_limits=tool_limits,
             cache_root=_get_read_file_cache_root(root_path),
         )

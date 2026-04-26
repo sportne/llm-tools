@@ -13,8 +13,11 @@ from llm_tools.apps.nicegui_chat.models import (
     NiceGUIWorkbenchItem,
 )
 from llm_tools.apps.nicegui_chat.store import (
+    NICEGUI_DB_ENV_VAR,
     SQLiteNiceGUIChatStore,
     chat_sessions,
+    default_db_path,
+    remember_default_db_path,
 )
 from llm_tools.workflow_api import ChatFinalResponse
 
@@ -23,6 +26,31 @@ def _store(tmp_path: Path) -> SQLiteNiceGUIChatStore:
     store = SQLiteNiceGUIChatStore(tmp_path / "chat.sqlite3")
     store.initialize()
     return store
+
+
+def test_default_db_path_prefers_env_then_pointer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_tools.apps.nicegui_chat import store as store_module
+
+    fallback_path = tmp_path / "fallback.sqlite3"
+    pointer_path = tmp_path / "pointer.txt"
+    selected_path = tmp_path / "selected" / "chat.sqlite3"
+    env_path = tmp_path / "env.sqlite3"
+    monkeypatch.setattr(store_module, "_DEFAULT_DB_PATH", fallback_path)
+    monkeypatch.setattr(store_module, "_DB_POINTER_PATH", pointer_path)
+    monkeypatch.delenv(NICEGUI_DB_ENV_VAR, raising=False)
+
+    assert default_db_path() == fallback_path
+
+    remember_default_db_path(selected_path)
+
+    assert pointer_path.read_text(encoding="utf-8") == str(selected_path)
+    assert default_db_path() == selected_path
+
+    monkeypatch.setenv(NICEGUI_DB_ENV_VAR, str(env_path))
+
+    assert default_db_path() == env_path
 
 
 def test_store_initializes_and_round_trips_session(tmp_path: Path) -> None:
@@ -52,6 +80,9 @@ def test_store_initializes_and_round_trips_session(tmp_path: Path) -> None:
             payload={"count": 2},
             version=2,
             active=True,
+            started_at="1",
+            finished_at="2",
+            duration_seconds=1.25,
             created_at="2",
             updated_at="2",
         )
@@ -70,6 +101,7 @@ def test_store_initializes_and_round_trips_session(tmp_path: Path) -> None:
     assert loaded.inspector_state.provider_messages[0].payload == {"count": 2}
     assert loaded.workbench_items[0].version == 2
     assert loaded.workbench_items[0].active is True
+    assert loaded.workbench_items[0].duration_seconds == 1.25
 
 
 def test_store_lists_searches_appends_and_deletes_sessions(tmp_path: Path) -> None:

@@ -55,6 +55,18 @@ def test_chat_tools_list_find_and_search(tmp_path: Path) -> None:
     listing_entries = listing.output["entries"]
     assert any(entry["path"] == "src/app.py" for entry in listing_entries)
     assert all(not entry["path"].startswith(".hidden") for entry in listing_entries)
+    hidden_listing = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="list_directory",
+            arguments={"path": ".", "recursive": True, "include_hidden": True},
+        ),
+        context.model_copy(),
+    )
+    assert hidden_listing.ok is True
+    assert any(
+        entry["path"] == ".hidden/secret.py"
+        for entry in hidden_listing.output["entries"]
+    )
 
     find_result = runtime.execute(
         ToolInvocationRequest(
@@ -72,6 +84,22 @@ def test_chat_tools_list_find_and_search(tmp_path: Path) -> None:
             "is_hidden": False,
         }
     ]
+    hidden_find_result = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="find_files",
+            arguments={
+                "path": ".",
+                "pattern": "**/*.py",
+                "include_hidden": True,
+            },
+        ),
+        context.model_copy(),
+    )
+    assert hidden_find_result.ok is True
+    assert [match["path"] for match in hidden_find_result.output["matches"]] == [
+        ".hidden/secret.py",
+        "src/app.py",
+    ]
 
     search_result = runtime.execute(
         ToolInvocationRequest(
@@ -83,6 +111,43 @@ def test_chat_tools_list_find_and_search(tmp_path: Path) -> None:
     assert search_result.ok is True
     assert len(search_result.output["matches"]) == 2
     assert search_result.output["matches"][0]["path"] == "src/app.py"
+    hidden_search_result = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="search_text",
+            arguments={"path": ".", "query": "needle", "include_hidden": True},
+        ),
+        context.model_copy(),
+    )
+    assert hidden_search_result.ok is True
+    assert [match["path"] for match in hidden_search_result.output["matches"]] == [
+        ".hidden/secret.py",
+        "src/app.py",
+        "src/app.py",
+    ]
+    hidden_file_search_result = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="search_text",
+            arguments={"path": ".hidden/secret.py", "query": "needle"},
+        ),
+        context.model_copy(),
+    )
+    assert hidden_file_search_result.ok is True
+    assert hidden_file_search_result.output["matches"] == []
+    hidden_file_search_included_result = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="search_text",
+            arguments={
+                "path": ".hidden/secret.py",
+                "query": "needle",
+                "include_hidden": True,
+            },
+        ),
+        context.model_copy(),
+    )
+    assert hidden_file_search_included_result.ok is True
+    assert [
+        match["path"] for match in hidden_file_search_included_result.output["matches"]
+    ] == [".hidden/secret.py"]
 
 
 def test_chat_tools_get_file_info_and_read_file_apply_limits(tmp_path: Path) -> None:

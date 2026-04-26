@@ -56,6 +56,9 @@ class NiceGUIWorkbenchItem(BaseModel):
     payload: object = Field(default_factory=dict)
     version: int = Field(default=1, ge=1)
     active: bool = False
+    started_at: str | None = None
+    finished_at: str | None = None
+    duration_seconds: float | None = Field(default=None, ge=0.0)
     created_at: str
     updated_at: str
 
@@ -67,11 +70,13 @@ class NiceGUIRuntimeConfig(BaseModel):
     provider_mode_strategy: ProviderModeStrategy = ProviderModeStrategy.AUTO
     model_name: str = "gemma4:26b"
     api_base_url: str | None = "http://127.0.0.1:11434/v1"
+    api_key_env_var: str | None = None
     temperature: float = 0.1
     timeout_seconds: float = 60.0
     root_path: str | None = None
     default_workspace_root: str | None = None
     enabled_tools: list[str] = Field(default_factory=list)
+    tool_urls: dict[str, str] = Field(default_factory=dict)
     require_approval_for: set[SideEffectClass] = Field(default_factory=set)
     allow_network: bool = True
     allow_filesystem: bool = True
@@ -100,6 +105,14 @@ class NiceGUIRuntimeConfig(BaseModel):
         cleaned = value.strip()
         return cleaned or None
 
+    @field_validator("api_key_env_var")
+    @classmethod
+    def validate_api_key_env_var(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
     @field_validator("root_path", "default_workspace_root")
     @classmethod
     def validate_optional_paths(cls, value: str | None) -> str | None:
@@ -115,6 +128,15 @@ class NiceGUIRuntimeConfig(BaseModel):
         if any(not entry for entry in cleaned):
             raise ValueError("enabled_tools must not contain empty values")
         return cleaned
+
+    @field_validator("tool_urls")
+    @classmethod
+    def validate_tool_urls(cls, value: dict[str, str]) -> dict[str, str]:
+        return {
+            key.strip(): url.strip()
+            for key, url in value.items()
+            if key.strip() and url.strip()
+        }
 
 
 class NiceGUISessionSummary(BaseModel):

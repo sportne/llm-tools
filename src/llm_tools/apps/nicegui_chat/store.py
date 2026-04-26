@@ -47,6 +47,8 @@ from llm_tools.workflow_api import ChatFinalResponse, ChatSessionState, ChatToke
 
 NICEGUI_DB_ENV_VAR = "LLM_TOOLS_NICEGUI_DB"
 PREFERENCES_KEY = "preferences"
+_DEFAULT_DB_PATH = Path.home() / ".llm-tools" / "assistant" / "nicegui" / "chat.sqlite3"
+_DB_POINTER_PATH = Path.home() / ".llm-tools" / "assistant" / "nicegui" / "db_path.txt"
 
 metadata = MetaData()
 
@@ -104,6 +106,9 @@ workbench_items = Table(
     Column("payload_json", Text, nullable=False),
     Column("version", Integer, nullable=False),
     Column("active", Boolean, nullable=False, default=False),
+    Column("started_at", String, nullable=True),
+    Column("finished_at", String, nullable=True),
+    Column("duration_seconds", Float, nullable=True),
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
 )
@@ -129,7 +134,18 @@ def default_db_path() -> Path:
     configured = os.getenv(NICEGUI_DB_ENV_VAR)
     if configured and configured.strip():
         return Path(configured).expanduser()
-    return Path.home() / ".llm-tools" / "assistant" / "nicegui" / "chat.sqlite3"
+    with suppress(OSError):
+        configured_path = _DB_POINTER_PATH.read_text(encoding="utf-8").strip()
+        if configured_path:
+            return Path(configured_path).expanduser()
+    return _DEFAULT_DB_PATH
+
+
+def remember_default_db_path(path: Path | str) -> None:
+    """Persist the preferred NiceGUI SQLite database path for future launches."""
+    db_path = Path(path).expanduser()
+    _DB_POINTER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _DB_POINTER_PATH.write_text(str(db_path), encoding="utf-8")
 
 
 def create_sqlite_engine(path: Path | str) -> Engine:
@@ -240,10 +256,31 @@ class SQLiteNiceGUIChatStore:
         """Create missing tables."""
         try:
             metadata.create_all(self.engine)
+            self._ensure_schema_columns()
         except SQLAlchemyError as exc:  # pragma: no cover - defensive wrapper
             raise NiceGUIChatStoreError(
                 f"Failed to initialize SQLite store: {exc}"
             ) from exc
+
+    def _ensure_schema_columns(self) -> None:
+        """Add additive columns for existing SQLite databases."""
+        required_columns = {
+            "started_at": "TEXT",
+            "finished_at": "TEXT",
+            "duration_seconds": "FLOAT",
+        }
+        with self.engine.begin() as connection:
+            existing_columns = {
+                str(row[1])
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(workbench_items)"
+                )
+            }
+            for column_name, column_type in required_columns.items():
+                if column_name not in existing_columns:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE workbench_items ADD COLUMN {column_name} {column_type}"
+                    )
 
     def list_sessions(
         self, *, limit: int | None = None, query: str | None = None
@@ -383,6 +420,13 @@ class SQLiteNiceGUIChatStore:
                     ),
                     version=int(row["version"]),
                     active=bool(row["active"]),
+                    started_at=row["started_at"],
+                    finished_at=row["finished_at"],
+                    duration_seconds=(
+                        None
+                        if row["duration_seconds"] is None
+                        else float(row["duration_seconds"])
+                    ),
                     created_at=str(row["created_at"]),
                     updated_at=str(row["updated_at"]),
                 )
@@ -598,6 +642,9 @@ class SQLiteNiceGUIChatStore:
             "payload_json": _dump_json(item.payload),
             "version": item.version,
             "active": item.active,
+            "started_at": item.started_at,
+            "finished_at": item.finished_at,
+            "duration_seconds": item.duration_seconds,
             "created_at": item.created_at,
             "updated_at": item.updated_at,
         }
@@ -614,5 +661,6 @@ __all__ = [
     "create_sqlite_engine",
     "default_db_path",
     "metadata",
+    "remember_default_db_path",
     "workbench_items",
 ]

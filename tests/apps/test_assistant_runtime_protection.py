@@ -1117,7 +1117,11 @@ def test_direct_research_provider_prompt_tools_category_flow(
     )
 
     assert parsed.invocations[0].tool_name == "search_text"
-    assert parsed.invocations[0].arguments == {"path": ".", "query": "needle"}
+    assert parsed.invocations[0].arguments == {
+        "path": ".",
+        "query": "needle",
+        "include_hidden": False,
+    }
     assert "Available categories:" in provider.sync_messages[0][-1]["content"]
     assert "Current tool category: text" in provider.sync_messages[1][-1]["content"]
 

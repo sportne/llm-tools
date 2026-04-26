@@ -60,6 +60,7 @@ def search_text_impl(
             candidate_target=candidate_target,
             resolved_relative=resolved_relative,
             query=normalized_query,
+            source_filters=source_filters,
             tool_limits=tool_limits,
             cache_root=cache_root,
         )
@@ -80,6 +81,7 @@ def _search_single_file(
     candidate_target: Path,
     resolved_relative: Path,
     query: str,
+    source_filters: SourceFilters,
     tool_limits: ToolLimits,
     cache_root: Path | None,
 ) -> TextSearchResult:
@@ -93,6 +95,14 @@ def _search_single_file(
         requested_path=normalized_path,
         resolved_path=resolved_path,
     )
+    if not should_include_entry(resolved_relative, source_filters=source_filters):
+        return TextSearchResult(
+            requested_path=resolved_request.requested_path,
+            resolved_path=resolved_request.resolved_path,
+            query=query,
+            matches=[],
+            truncated=False,
+        )
     loaded_content = load_readable_content(
         resolved_request.resolved,
         tool_limits=tool_limits,

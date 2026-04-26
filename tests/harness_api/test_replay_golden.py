@@ -132,6 +132,7 @@ def test_approval_trace_matches_golden_fixture() -> None:
         "path": ".",
         "recursive": False,
         "max_depth": None,
+        "include_hidden": False,
     }
 
 
