@@ -625,6 +625,11 @@ class NiceGUIChatController:
         record.transcript.append(user_entry)
         if show_in_transcript and record.summary.title == "New chat":
             record.summary.title = _title_from_prompt(cleaned)
+        if (
+            record.runtime.interaction_mode == "deep_task"
+            and not self.deep_task_mode_enabled()
+        ):
+            record.runtime.interaction_mode = "chat"
         self._persist_record(record)
         if (
             record.runtime.interaction_mode == "deep_task"

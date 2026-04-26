@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import queue
 import runpy
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -46,11 +48,18 @@ from llm_tools.apps.nicegui_chat.app import (
 from llm_tools.apps.nicegui_chat.auth import LocalAuthProvider, validate_hosted_startup
 from llm_tools.apps.nicegui_chat.controller import (
     PROVIDER_API_KEY_FIELD,
+    NiceGUIActiveTurnHandle,
     NiceGUIChatController,
     NiceGUIQueuedEvent,
+    _interaction_protocol,
     _nicegui_protection_is_ready,
+    _remember_status,
+    _seconds_between_iso,
     _serialize_workflow_event,
     _workbench_inspector_title,
+    _worker_resume_harness,
+    _worker_run_harness,
+    _worker_run_turn,
 )
 from llm_tools.apps.nicegui_chat.models import (
     NiceGUIHostedConfig,
@@ -58,6 +67,7 @@ from llm_tools.apps.nicegui_chat.models import (
     NiceGUIRuntimeConfig,
 )
 from llm_tools.apps.nicegui_chat.store import SQLiteNiceGUIChatStore
+from llm_tools.harness_api import ApprovalResolution
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import SideEffectClass, ToolInvocationRequest
 from llm_tools.workflow_api import (
@@ -112,6 +122,24 @@ class _FakeProvider:
 class _FakeEvent:
     def __init__(self, args: object) -> None:
         self.args = args
+
+
+class _ProtocolProvider(_FakeProvider):
+    def __init__(
+        self,
+        *,
+        prompt_tools: bool = False,
+        staged_schema: bool = False,
+    ) -> None:
+        super().__init__([])
+        self._prompt_tools = prompt_tools
+        self._staged_schema = staged_schema
+
+    def uses_prompt_tool_protocol(self) -> bool:
+        return self._prompt_tools
+
+    def uses_staged_schema_protocol(self) -> bool:
+        return self._staged_schema
 
 
 def _controller(
@@ -447,6 +475,30 @@ def test_workbench_inspector_titles_are_directional() -> None:
     assert _is_tool_url_setting("GITLAB_API_TOKEN") is False
 
 
+def test_controller_helper_edges(tmp_path: Path) -> None:
+    assert _seconds_between_iso(None, "2026-04-26T10:00:00+00:00") is None
+    assert _seconds_between_iso("bad date", "2026-04-26T10:00:00+00:00") is None
+    assert (
+        _seconds_between_iso(
+            "2026-04-26T10:00:02+00:00",
+            "2026-04-26T10:00:01+00:00",
+        )
+        == 0.0
+    )
+
+    controller = _controller(tmp_path, _FakeProvider([]))
+    turn_state = controller.active_turn_state
+    _remember_status(turn_state, "")
+    assert turn_state.status_history == []
+    _remember_status(turn_state, "thinking")
+    _remember_status(turn_state, "thinking")
+    assert turn_state.status_history == ["thinking"]
+
+    assert _interaction_protocol(_ProtocolProvider(prompt_tools=True)) == "prompt_tools"
+    assert _interaction_protocol(_ProtocolProvider(staged_schema=True)) == "staged_json"
+    assert _interaction_protocol(_ProtocolProvider()) == "native_tools"
+
+
 def test_model_discovery_payload_helpers() -> None:
     assert _models_endpoint_url("http://127.0.0.1:11434/v1/") == (
         "http://127.0.0.1:11434/v1/models"
@@ -772,6 +824,35 @@ def test_controller_interaction_mode_locks_after_first_message(
     _drain_until_idle(controller)
 
 
+def test_controller_disabled_deep_task_mode_is_coerced_to_chat(
+    tmp_path: Path,
+) -> None:
+    provider = _FakeProvider(
+        [
+            ParsedModelResponse(
+                final_response={
+                    "answer": "Plain answer",
+                    "citations": [],
+                    "confidence": 0.7,
+                    "uncertainty": [],
+                    "missing_information": [],
+                    "follow_up_suggestions": [],
+                }
+            )
+        ]
+    )
+    controller = _controller(tmp_path, provider)
+    controller.set_deep_task_mode_enabled(True)
+    assert controller.set_interaction_mode("deep_task") is True
+    controller.set_deep_task_mode_enabled(False)
+    assert controller.active_record.runtime.interaction_mode == "chat"
+
+    controller.active_record.runtime.interaction_mode = "deep_task"
+    assert controller.submit_prompt("hello") is None
+    assert controller.active_record.runtime.interaction_mode == "chat"
+    _drain_until_idle(controller)
+
+
 def test_controller_deep_task_runs_harness_and_persists_summary(
     tmp_path: Path,
 ) -> None:
@@ -839,6 +920,24 @@ def test_controller_restores_deep_task_pending_approval(
 
     assert reloaded.turn_state_for(session_id).pending_approval is not None
     assert reloaded.turn_state_for(session_id).pending_harness_session_id is not None
+
+
+def test_controller_deep_task_approval_resume_build_failure_records_error(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(
+        tmp_path,
+        _FakeProvider([]),
+    )
+    controller.provider_factory = lambda _runtime: (_ for _ in ()).throw(
+        RuntimeError("provider unavailable")
+    )
+    session_id = controller.active_session_id
+    controller.turn_state_for(session_id).pending_harness_session_id = "harness-1"
+
+    assert controller.resolve_approval(approved=True) is False
+    assert controller.active_record.transcript[-1].role == "error"
+    assert "provider unavailable" in controller.active_record.transcript[-1].text
 
 
 def test_controller_session_management_filters_and_temporary_chats(
@@ -1064,6 +1163,99 @@ def test_controller_empty_submit_and_idle_controls(tmp_path: Path) -> None:
     assert controller.submit_prompt("   ") == "Enter a message first."
     assert controller.resolve_approval(approved=True) is False
     assert controller.cancel_active_turn() is False
+    assert (
+        controller.submit_protection_accept() == "No protection challenge is pending."
+    )
+    assert (
+        controller.submit_protection_overrule(
+            expected_sensitivity_label="MINOR",
+            rationale="safe enough",
+        )
+        == "No protection challenge is pending."
+    )
+
+
+def test_controller_cancel_active_turn_branches(tmp_path: Path) -> None:
+    controller = _controller(tmp_path, _FakeProvider([]))
+    session_id = controller.active_session_id
+
+    class _Runner:
+        cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    runner = _Runner()
+    controller.active_turns[session_id] = NiceGUIActiveTurnHandle(
+        session_id=session_id,
+        mode="chat",
+        event_queue=queue.Queue(),
+        thread=threading.Thread(target=lambda: None),
+        turn_number=1,
+        runner=runner,  # type: ignore[arg-type]
+    )
+
+    assert controller.cancel_active_turn() is True
+    assert runner.cancelled is True
+
+    class _FailingHarnessService:
+        def stop_session(self, request: object) -> None:
+            del request
+            raise RuntimeError("stop failed")
+
+    controller.active_turns[session_id] = NiceGUIActiveTurnHandle(
+        session_id=session_id,
+        mode="deep_task",
+        event_queue=queue.Queue(),
+        thread=threading.Thread(target=lambda: None),
+        turn_number=2,
+        harness_service=_FailingHarnessService(),  # type: ignore[arg-type]
+        harness_session_id="harness-1",
+    )
+
+    assert controller.cancel_active_turn() is False
+
+
+def test_controller_worker_error_paths_enqueue_error_and_complete() -> None:
+    chat_queue: queue.Queue[NiceGUIQueuedEvent] = queue.Queue()
+    _worker_run_turn(
+        NiceGUIActiveTurnHandle(
+            session_id="session-1",
+            mode="chat",
+            event_queue=chat_queue,
+            thread=threading.Thread(target=lambda: None),
+            turn_number=1,
+        )
+    )
+    assert chat_queue.get_nowait().kind == "error"
+    assert chat_queue.get_nowait().kind == "complete"
+
+    harness_queue: queue.Queue[NiceGUIQueuedEvent] = queue.Queue()
+    _worker_run_harness(
+        NiceGUIActiveTurnHandle(
+            session_id="session-1",
+            mode="deep_task",
+            event_queue=harness_queue,
+            thread=threading.Thread(target=lambda: None),
+            turn_number=2,
+        )
+    )
+    assert harness_queue.get_nowait().kind == "error"
+    assert harness_queue.get_nowait().kind == "complete"
+
+    resume_queue: queue.Queue[NiceGUIQueuedEvent] = queue.Queue()
+    _worker_resume_harness(
+        NiceGUIActiveTurnHandle(
+            session_id="session-1",
+            mode="deep_task",
+            event_queue=resume_queue,
+            thread=threading.Thread(target=lambda: None),
+            turn_number=3,
+        ),
+        ApprovalResolution.APPROVE,
+    )
+    assert resume_queue.get_nowait().kind == "error"
+    assert resume_queue.get_nowait().kind == "complete"
 
 
 def test_controller_protection_accept_and_overrule_feedback(
@@ -1326,6 +1518,16 @@ def test_controller_manual_events_cover_non_completed_paths(tmp_path: Path) -> N
         )
     )
     assert controller.active_record.transcript[-1].role == "error"
+
+    with pytest.raises(ValueError, match="Unsupported queued event kind"):
+        controller._apply_queued_event(
+            NiceGUIQueuedEvent(
+                kind="unknown",
+                payload=None,
+                turn_number=1,
+                session_id=session_id,
+            )
+        )
 
     try:
         _serialize_workflow_event(object(), turn_number=1, session_id=session_id)
