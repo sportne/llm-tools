@@ -23,7 +23,7 @@ NiceGUIAuthMode = Literal["none", "local"]
 NiceGUIInteractionMode = Literal["chat", "deep_task"]
 NiceGUIUserRole = Literal["admin", "user"]
 
-DEFAULT_ASSISTANT_FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#20211f"/><path d="M18 18h28v20H30L20 48v-10h-2z" fill="#e8e6de"/><circle cx="28" cy="28" r="3" fill="#20211f"/><circle cx="38" cy="28" r="3" fill="#20211f"/></svg>"""
+DEFAULT_ASSISTANT_FAVICON_SVG = """<svg viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#20211f"/><text x="32" y="43" text-anchor="middle" font-size="38">💬</text></svg>"""
 
 
 class AssistantBranding(BaseModel):
@@ -31,7 +31,7 @@ class AssistantBranding(BaseModel):
 
     app_name: str = "LLM Tools Assistant"
     short_name: str = "Assistant"
-    icon_name: str = "forum"
+    icon_name: str = "💬"
     favicon_svg: str = DEFAULT_ASSISTANT_FAVICON_SVG
 
     @field_validator("app_name", "short_name", "icon_name", "favicon_svg")

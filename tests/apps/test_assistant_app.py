@@ -17,7 +17,8 @@ from llm_tools.apps.assistant_app.app import (
     NICEGUI_APPROVAL_OPTIONS,
     NICEGUI_PROVIDER_OPTIONS,
     _branding_favicon_href,
-    _branding_head_html,
+    _branding_favicon_javascript,
+    _branding_icon_uses_material,
     _can_admin_disable_user,
     _composer_action_icon,
     _default_protection_corrections_path,
@@ -208,18 +209,23 @@ def test_package_import_and_cli_parser() -> None:
     assert no_auth_args.auth_mode == "none"
 
 
-def test_branding_defaults_and_head_metadata() -> None:
+def test_branding_defaults_and_favicon_javascript() -> None:
     branding = AssistantBranding()
 
     href = _branding_favicon_href(branding)
-    head_html = _branding_head_html(branding)
+    favicon_javascript = _branding_favicon_javascript(branding)
 
     assert branding.app_name == "LLM Tools Assistant"
     assert branding.short_name == "Assistant"
+    assert branding.icon_name == "💬"
     assert href.startswith("data:image/svg+xml,")
-    assert "<title>LLM Tools Assistant</title>" in head_html
-    assert 'rel="icon"' in head_html
+    assert "w3.org" not in href
+    assert "document.createElement('link')" in favicon_javascript
+    assert "document.title" not in favicon_javascript
+    assert "<title" not in favicon_javascript
     assert "viewBox" in href
+    assert not _branding_icon_uses_material(branding.icon_name)
+    assert _branding_icon_uses_material("auto_awesome")
 
 
 def test_branding_rejects_empty_values() -> None:
@@ -331,7 +337,7 @@ def test_hosted_page_routes_first_admin_login_and_chat(
     branded_titles: list[str] = []
     monkeypatch.setattr(
         nicegui_app_module,
-        "_apply_branding_head",
+        "_apply_branding_page_metadata",
         lambda branding: branded_titles.append(branding.app_name),
     )
     monkeypatch.setattr(

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import html
 import json
 import os
 import sys
@@ -92,18 +91,48 @@ def _branding_favicon_href(branding: AssistantBranding) -> str:
     return "data:image/svg+xml," + quote(branding.favicon_svg, safe="")
 
 
-def _branding_head_html(branding: AssistantBranding) -> str:
-    """Return page metadata for the configured brand."""
-    title = html.escape(branding.app_name, quote=True)
-    href = html.escape(_branding_favicon_href(branding), quote=True)
-    return f'<title>{title}</title><link rel="icon" type="image/svg+xml" href="{href}">'
+def _branding_favicon_javascript(branding: AssistantBranding) -> str:
+    """Return JavaScript that updates the current browser tab favicon."""
+    href_json = json.dumps(_branding_favicon_href(branding))
+    return (
+        "(() => {"
+        ' document.querySelectorAll(\'link[rel~="icon"], link[rel="shortcut icon"]\').forEach((link) => link.remove());'
+        " const link = document.createElement('link');"
+        " link.rel = 'icon';"
+        " link.type = 'image/svg+xml';"
+        f" link.href = {href_json};"
+        " document.head.appendChild(link);"
+        "})()"
+    )
 
 
-def _apply_branding_head(branding: AssistantBranding) -> None:
+def _branding_icon_uses_material(icon_name: str) -> bool:
+    """Return whether a branding icon value looks like a Material icon name."""
+    return bool(icon_name) and all(
+        character.isascii() and (character.isalnum() or character in {"_", "-", ":"})
+        for character in icon_name
+    )
+
+
+def _render_brand_icon(icon_name: str, classes: str) -> None:  # pragma: no cover
+    """Render the brand icon as either a Material icon or a literal symbol."""
+    from nicegui import ui
+
+    if _branding_icon_uses_material(icon_name):
+        ui.icon(icon_name).classes(classes)
+    else:
+        ui.label(icon_name).classes(f"{classes} llmt-brand-symbol")
+
+
+def _apply_branding_page_metadata(
+    branding: AssistantBranding, *, update_favicon: bool = False
+) -> None:
     """Apply browser tab metadata for one rendered page."""
     from nicegui import ui
 
-    ui.add_head_html(_branding_head_html(branding))
+    ui.page_title(branding.app_name)
+    if update_favicon:
+        ui.run_javascript(_branding_favicon_javascript(branding))
 
 
 def _first_nonempty_text(*values: object) -> str:
@@ -598,7 +627,7 @@ def render_hosted_nicegui_page(
 ) -> None:
     """Render first-run admin, login, or authenticated chat UI."""
     branding = store.load_admin_settings().branding
-    _apply_branding_head(branding)
+    _apply_branding_page_metadata(branding)
     if not auth_provider.has_users():
         render_first_admin_page(auth_provider)
         return
@@ -631,7 +660,7 @@ def render_first_admin_page(
     from nicegui import ui
 
     branding = branding or auth_provider.store.load_admin_settings().branding
-    _apply_branding_head(branding)
+    _apply_branding_page_metadata(branding)
     ui.dark_mode(value=True)
     _add_auth_page_styles()
     username_input: Any = None
@@ -658,7 +687,7 @@ def render_first_admin_page(
         ui.card().classes("w-[420px]"),
     ):
         with ui.column().classes("w-full items-center gap-1 q-mb-md"):
-            ui.icon(branding.icon_name).classes("text-4xl text-primary")
+            _render_brand_icon(branding.icon_name, "text-4xl text-primary")
             ui.label(branding.app_name).classes("text-xl")
         ui.label("Create Admin").classes("text-lg")
         ui.label("The assistant needs one local admin user.").classes(
@@ -678,7 +707,7 @@ def render_login_page(
     from nicegui import ui
 
     branding = branding or auth_provider.store.load_admin_settings().branding
-    _apply_branding_head(branding)
+    _apply_branding_page_metadata(branding)
     ui.dark_mode(value=True)
     _add_auth_page_styles()
     username_input: Any = None
@@ -700,7 +729,7 @@ def render_login_page(
         ui.card().classes("w-[420px]"),
     ):
         with ui.column().classes("w-full items-center gap-1 q-mb-md"):
-            ui.icon(branding.icon_name).classes("text-4xl text-primary")
+            _render_brand_icon(branding.icon_name, "text-4xl text-primary")
             ui.label(branding.app_name).classes("text-xl")
         ui.label("Sign In").classes("text-lg")
         username_input = ui.input("Username").classes("w-full")
@@ -747,7 +776,7 @@ def build_assistant_ui(  # noqa: C901
     """Build the assistant app component tree."""
     from nicegui import ui
 
-    _apply_branding_head(controller.admin_settings.branding)
+    _apply_branding_page_metadata(controller.admin_settings.branding)
     ui.add_head_html(
         """
         <style>
@@ -877,6 +906,10 @@ def build_assistant_ui(  # noqa: C901
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
         .llmt-brand-icon { font-size: 18px; }
+        .llmt-brand-symbol {
+            display: inline-flex; align-items: center; justify-content: center;
+            line-height: 1;
+        }
         .llmt-header-title .nicegui-label {
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
             max-width: 100%;
@@ -2004,7 +2037,7 @@ def build_assistant_ui(  # noqa: C901
             ui.notify(f"Could not save branding: {exc}", type="negative")
             return
         controller.set_branding(branding)
-        _apply_branding_head(branding)
+        _apply_branding_page_metadata(branding, update_favicon=True)
         refresh_all()
         ui.notify("Branding updated.")
 
@@ -2014,7 +2047,9 @@ def build_assistant_ui(  # noqa: C901
             return
         controller.set_branding(AssistantBranding())
         populate_admin_branding_inputs()
-        _apply_branding_head(controller.admin_settings.branding)
+        _apply_branding_page_metadata(
+            controller.admin_settings.branding, update_favicon=True
+        )
         refresh_all()
         ui.notify("Branding reset.")
 
@@ -2391,8 +2426,9 @@ def build_assistant_ui(  # noqa: C901
             ):
                 with ui.column().classes("llmt-header-title gap-0"):
                     with ui.row().classes("llmt-brand items-center gap-1 no-wrap"):
-                        ui.icon(controller.admin_settings.branding.icon_name).classes(
-                            "llmt-brand-icon"
+                        _render_brand_icon(
+                            controller.admin_settings.branding.icon_name,
+                            "llmt-brand-icon",
                         )
                         ui.label(controller.admin_settings.branding.short_name).classes(
                             "text-xs llmt-muted"
@@ -2507,11 +2543,13 @@ def build_assistant_ui(  # noqa: C901
             ui.label("Branding").classes("text-base")
             admin_branding_app_name_input = ui.input("App name").classes("w-full")
             admin_branding_short_name_input = ui.input("Short name").classes("w-full")
-            admin_branding_icon_name_input = ui.input("Icon name").classes("w-full")
+            admin_branding_icon_name_input = ui.input("Icon or symbol").classes(
+                "w-full"
+            )
             with admin_branding_icon_name_input:
-                ui.tooltip("Material icon name used in the app chrome.").props(
-                    "delay=700"
-                )
+                ui.tooltip(
+                    "Material icon name or literal symbol used in the app chrome."
+                ).props("delay=700")
             admin_branding_favicon_input = (
                 ui.textarea("Favicon SVG").props("autogrow outlined").classes("w-full")
             )
