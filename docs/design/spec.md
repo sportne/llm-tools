@@ -43,7 +43,7 @@ The current supported library surfaces are:
 
 The current supported product entrypoints are:
 
-- `llm_tools.apps.nicegui_chat`
+- `llm_tools.apps.assistant_app`
 - `llm_tools.apps.harness_cli`
 
 `apps/*` are supported product surfaces, but they are not the default extension
@@ -77,7 +77,7 @@ Today it contains two kinds of functionality:
 - one-turn workflow primitives centered on `WorkflowExecutor`,
   `PreparedModelInteraction`, and `WorkflowTurnResult`
 - assistant-oriented interactive chat and protection helpers used by the
-  NiceGUI assistant
+  LLM Tools Assistant
 
 Some public workflow modules are now intentionally thin facades:
 
@@ -116,7 +116,7 @@ capabilities.
 
 ### Assistant product layer
 
-The NiceGUI assistant is the main interactive client currently supported by
+The LLM Tools Assistant is the main interactive client currently supported by
 the repository. It supports:
 
 - direct assistant chat
@@ -165,7 +165,7 @@ largest internal modules without removing supported behavior prematurely.
 The repository should continue to satisfy these baseline expectations:
 
 - the public package surfaces listed above remain importable
-- the NiceGUI assistant and harness CLI entrypoints remain supported
+- the LLM Tools Assistant and harness CLI entrypoints remain supported
 - the assistant continues to support both normal chat and durable research
   sessions
 - workflow one-turn execution remains reusable independently of durable harness

@@ -1,8 +1,8 @@
-# NiceGUI Chat Client
+# LLM Tools Assistant App
 
 ## Goal
 
-The NiceGUI chat client is a new app surface for `llm-tools` that follows the
+The assistant app is a new app surface for `llm-tools` that follows the
 conventional web-chat layout used by ChatGPT, Gemini, and Claude. It reuses the
 existing assistant runtime and
 adds a purpose-built browser UI plus SQLite persistence.
@@ -75,19 +75,19 @@ Deferred:
 
 ## Local And Hosted Auth
 
-The normal NiceGUI app uses local username/password auth on both loopback and
+The normal assistant app uses local username/password auth on both loopback and
 hosted bindings. The first launch shows a local admin creation screen. Admins
 create later users from the admin screen; there is no public self-registration
 in v1.
 
 ```text
-llm-tools-nicegui-chat
+llm-tools-assistant
 ```
 
 `--auth-mode none` remains available only as an explicit development/test
 escape hatch. In normal authenticated use, each user sees only their own chats,
 preferences, workbench records, temporary sessions, and in-memory credentials.
-NiceGUI persistence is always SQLCipher encrypted, and user-owned chat fields
+assistant persistence is always SQLCipher encrypted, and user-owned chat fields
 are encrypted with per-user keys wrapped by a local server key.
 
 For production-style hosting, put the app behind a TLS-terminating reverse proxy

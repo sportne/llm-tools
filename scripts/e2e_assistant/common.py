@@ -24,7 +24,7 @@ from llm_tools.apps.assistant_config import (  # noqa: E402
 )
 from llm_tools.apps.chat_config import ChatLLMConfig, ProviderPreset  # noqa: E402
 from llm_tools.apps.chat_runtime import create_provider  # noqa: E402
-from llm_tools.apps.nicegui_chat.models import NiceGUIRuntimeConfig  # noqa: E402
+from llm_tools.apps.assistant_app.models import NiceGUIRuntimeConfig  # noqa: E402
 from llm_tools.llm_providers import ProviderModeStrategy  # noqa: E402
 from llm_tools.tool_api import SideEffectClass  # noqa: E402
 

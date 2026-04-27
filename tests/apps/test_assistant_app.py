@@ -11,13 +11,13 @@ from typing import Any, Literal
 import pytest
 from pydantic import BaseModel
 
-from llm_tools.apps.assistant_config import AssistantConfig
-from llm_tools.apps.chat_config import ProviderPreset
-from llm_tools.apps.nicegui_chat import app as nicegui_app_module
-from llm_tools.apps.nicegui_chat.app import (
+from llm_tools.apps.assistant_app import app as nicegui_app_module
+from llm_tools.apps.assistant_app.app import (
     NICEGUI_APPROVAL_LABELS,
     NICEGUI_APPROVAL_OPTIONS,
     NICEGUI_PROVIDER_OPTIONS,
+    _branding_favicon_href,
+    _branding_head_html,
     _can_admin_disable_user,
     _composer_action_icon,
     _default_protection_corrections_path,
@@ -38,15 +38,15 @@ from llm_tools.apps.nicegui_chat.app import (
     _runtime_summary_text,
     _sidebar_container_classes,
     _workbench_container_classes,
-    build_nicegui_chat_ui,
+    build_assistant_ui,
     build_parser,
     clear_hosted_session,
     main,
     resolve_assistant_config,
     resolve_root_argument,
 )
-from llm_tools.apps.nicegui_chat.auth import LocalAuthProvider, validate_hosted_startup
-from llm_tools.apps.nicegui_chat.controller import (
+from llm_tools.apps.assistant_app.auth import LocalAuthProvider, validate_hosted_startup
+from llm_tools.apps.assistant_app.controller import (
     PROVIDER_API_KEY_FIELD,
     NiceGUIActiveTurnHandle,
     NiceGUIChatController,
@@ -61,12 +61,15 @@ from llm_tools.apps.nicegui_chat.controller import (
     _worker_run_harness,
     _worker_run_turn,
 )
-from llm_tools.apps.nicegui_chat.models import (
+from llm_tools.apps.assistant_app.models import (
+    AssistantBranding,
     NiceGUIHostedConfig,
     NiceGUIPreferences,
     NiceGUIRuntimeConfig,
 )
-from llm_tools.apps.nicegui_chat.store import SQLiteNiceGUIChatStore
+from llm_tools.apps.assistant_app.store import SQLiteNiceGUIChatStore
+from llm_tools.apps.assistant_config import AssistantConfig
+from llm_tools.apps.chat_config import ProviderPreset
 from llm_tools.harness_api import ApprovalResolution
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import SideEffectClass, ToolInvocationRequest
@@ -176,7 +179,7 @@ def _drain_until_idle(controller: NiceGUIChatController) -> None:
 
 
 def test_package_import_and_cli_parser() -> None:
-    import llm_tools.apps.nicegui_chat as nicegui_chat
+    import llm_tools.apps.assistant_app as assistant_app
 
     parser = build_parser()
     args = parser.parse_args(
@@ -195,7 +198,7 @@ def test_package_import_and_cli_parser() -> None:
     )
     config = resolve_assistant_config(args)
 
-    assert nicegui_chat.main is not None
+    assert assistant_app.main is not None
     assert config.llm.model_name == "qwen3:8b"
     assert config.llm.provider_mode_strategy.value == "json"
     assert args.db_path == Path("chat.sqlite3")
@@ -203,6 +206,25 @@ def test_package_import_and_cli_parser() -> None:
 
     no_auth_args = parser.parse_args(["--auth-mode", "none"])
     assert no_auth_args.auth_mode == "none"
+
+
+def test_branding_defaults_and_head_metadata() -> None:
+    branding = AssistantBranding()
+
+    href = _branding_favicon_href(branding)
+    head_html = _branding_head_html(branding)
+
+    assert branding.app_name == "LLM Tools Assistant"
+    assert branding.short_name == "Assistant"
+    assert href.startswith("data:image/svg+xml,")
+    assert "<title>LLM Tools Assistant</title>" in head_html
+    assert 'rel="icon"' in head_html
+    assert "viewBox" in href
+
+
+def test_branding_rejects_empty_values() -> None:
+    with pytest.raises(ValueError):
+        AssistantBranding(app_name=" ")
 
 
 def test_hosted_startup_validation() -> None:
@@ -306,6 +328,12 @@ def test_hosted_page_routes_first_admin_login_and_chat(
     store.initialize()
     auth = LocalAuthProvider(store)
     calls: list[str] = []
+    branded_titles: list[str] = []
+    monkeypatch.setattr(
+        nicegui_app_module,
+        "_apply_branding_head",
+        lambda branding: branded_titles.append(branding.app_name),
+    )
     monkeypatch.setattr(
         nicegui_app_module,
         "render_first_admin_page",
@@ -318,7 +346,7 @@ def test_hosted_page_routes_first_admin_login_and_chat(
     )
     monkeypatch.setattr(
         nicegui_app_module,
-        "build_nicegui_chat_ui",
+        "build_assistant_ui",
         lambda controller: calls.append(f"chat:{controller.current_user.username}"),
     )
 
@@ -351,6 +379,11 @@ def test_hosted_page_routes_first_admin_login_and_chat(
     )
 
     assert calls == ["first-admin", "login", "chat:admin"]
+    assert branded_titles == [
+        "LLM Tools Assistant",
+        "LLM Tools Assistant",
+        "LLM Tools Assistant",
+    ]
 
 
 def test_composer_text_helpers_accept_server_and_js_payloads() -> None:
@@ -526,7 +559,7 @@ def test_model_discovery_payload_helpers() -> None:
 def test_model_discovery_fetches_openai_compatible_models(
     monkeypatch: Any,
 ) -> None:
-    import llm_tools.apps.nicegui_chat.app as app_module
+    import llm_tools.apps.assistant_app.app as app_module
 
     class _Response:
         def __enter__(self) -> _Response:
@@ -568,7 +601,7 @@ def test_model_discovery_fetches_openai_compatible_models(
 def test_model_discovery_rejects_invalid_or_failed_endpoints(
     monkeypatch: Any,
 ) -> None:
-    import llm_tools.apps.nicegui_chat.app as app_module
+    import llm_tools.apps.assistant_app.app as app_module
 
     def failing_urlopen(request: Any, *, timeout: float) -> object:
         del request, timeout
@@ -670,9 +703,7 @@ def test_main_resolves_arguments_and_delegates_run(
     def fake_run(**kwargs: object) -> None:
         calls.append(kwargs)
 
-    monkeypatch.setattr(
-        "llm_tools.apps.nicegui_chat.app.run_nicegui_chat_app", fake_run
-    )
+    monkeypatch.setattr("llm_tools.apps.assistant_app.app.run_assistant_app", fake_run)
 
     assert (
         main(
@@ -702,21 +733,19 @@ def test_main_allows_no_workspace_root(monkeypatch: Any) -> None:
     def fake_run(**kwargs: object) -> None:
         calls.append(kwargs)
 
-    monkeypatch.setattr(
-        "llm_tools.apps.nicegui_chat.app.run_nicegui_chat_app", fake_run
-    )
+    monkeypatch.setattr("llm_tools.apps.assistant_app.app.run_assistant_app", fake_run)
 
     assert main(["--no-browser"]) == 0
     assert calls[0]["root_path"] is None
 
 
 def test_module_entrypoint_uses_package_main(monkeypatch: Any) -> None:
-    import llm_tools.apps.nicegui_chat as nicegui_chat
+    import llm_tools.apps.assistant_app as assistant_app
 
     calls = []
-    monkeypatch.setattr(nicegui_chat, "main", lambda: calls.append("called"))
+    monkeypatch.setattr(assistant_app, "main", lambda: calls.append("called"))
 
-    runpy.run_module("llm_tools.apps.nicegui_chat.__main__", run_name="__main__")
+    runpy.run_module("llm_tools.apps.assistant_app.__main__", run_name="__main__")
 
     assert calls == ["called"]
 
@@ -738,7 +767,7 @@ def test_app_builder_renders_with_temporary_sqlite_db(tmp_path: Path) -> None:
     )
     controller = _controller(tmp_path, provider)
 
-    build_nicegui_chat_ui(controller)
+    build_assistant_ui(controller)
 
     assert controller.active_record.summary.title == "New chat"
 
@@ -750,7 +779,7 @@ def test_app_builder_applies_initial_layout_preferences(tmp_path: Path) -> None:
     controller.preferences.sidebar_collapsed = True
     controller.preferences.workbench_open = False
 
-    build_nicegui_chat_ui(controller)
+    build_assistant_ui(controller)
 
     elements = list(ui.context.client.elements.values())
     sidebar = [element for element in elements if "llmt-sidebar" in element.classes][-1]
@@ -822,6 +851,24 @@ def test_controller_interaction_mode_locks_after_first_message(
     assert controller.set_interaction_mode("deep_task") is False
     assert controller.active_record.runtime.interaction_mode == "chat"
     _drain_until_idle(controller)
+
+
+def test_controller_persists_admin_branding(tmp_path: Path) -> None:
+    controller = _controller(tmp_path, _FakeProvider([]))
+
+    controller.set_branding(
+        AssistantBranding(
+            app_name="Team Assistant",
+            short_name="Team",
+            icon_name="hub",
+            favicon_svg='<svg viewBox="0 0 1 1"></svg>',
+        )
+    )
+
+    assert controller.admin_settings.branding.app_name == "Team Assistant"
+    store = _chat_store(tmp_path)
+    store.initialize()
+    assert store.load_admin_settings().branding.short_name == "Team"
 
 
 def test_controller_disabled_deep_task_mode_is_coerced_to_chat(
@@ -1072,7 +1119,7 @@ def test_controller_hosted_secrets_are_memory_only_and_env_isolated(
 def test_controller_switch_database_copies_durable_sessions(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
-    from llm_tools.apps.nicegui_chat import controller as controller_module
+    from llm_tools.apps.assistant_app import controller as controller_module
 
     remembered_paths: list[Path] = []
     monkeypatch.setattr(

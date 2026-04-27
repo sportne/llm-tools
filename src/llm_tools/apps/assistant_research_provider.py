@@ -848,7 +848,7 @@ def build_live_harness_provider(
         config=config.protection,
         provider=provider,
         environment=build_protection_environment(
-            app_name="nicegui_chat_research",
+            app_name="assistant_app_research",
             model_name=model_name,
             workspace=workspace,
             enabled_tools=enabled_tool_names,

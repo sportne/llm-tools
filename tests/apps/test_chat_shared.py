@@ -7,6 +7,7 @@ import importlib
 import pytest
 from pydantic import ValidationError
 
+from llm_tools.apps.assistant_app.models import NiceGUIPreferences, NiceGUIRuntimeConfig
 from llm_tools.apps.chat_config import ChatLLMConfig, ChatPolicyConfig, ProviderPreset
 from llm_tools.apps.chat_presentation import (
     format_citation,
@@ -15,7 +16,6 @@ from llm_tools.apps.chat_presentation import (
     format_transcript_text,
     pretty_json,
 )
-from llm_tools.apps.nicegui_chat.models import NiceGUIPreferences, NiceGUIRuntimeConfig
 from llm_tools.llm_providers import ProviderModeStrategy
 from llm_tools.tool_api.redaction import RedactionConfig
 from llm_tools.workflow_api import ChatCitation, ChatFinalResponse

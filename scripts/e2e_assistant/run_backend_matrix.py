@@ -1,4 +1,4 @@
-"""Run temporary backend E2E probes for the NiceGUI assistant."""
+"""Run temporary backend E2E probes for the LLM Tools Assistant."""
 
 from __future__ import annotations
 
@@ -16,10 +16,10 @@ from uuid import uuid4
 
 import common
 
-import llm_tools.apps.nicegui_chat.controller as nicegui_controller_module
-from llm_tools.apps.nicegui_chat.controller import NiceGUIChatController
-from llm_tools.apps.nicegui_chat.models import NiceGUITranscriptEntry
-from llm_tools.apps.nicegui_chat.store import SQLiteNiceGUIChatStore
+import llm_tools.apps.assistant_app.controller as nicegui_controller_module
+from llm_tools.apps.assistant_app.controller import NiceGUIChatController
+from llm_tools.apps.assistant_app.models import NiceGUITranscriptEntry
+from llm_tools.apps.assistant_app.store import SQLiteNiceGUIChatStore
 from llm_tools.apps.protection_runtime import build_protection_environment
 from llm_tools.harness_api import (
     ApprovalResolution,
@@ -155,7 +155,7 @@ def _run_with_timeout(*, timeout_seconds: float, fn: Any) -> Any:
 def build_parser() -> argparse.ArgumentParser:
     """Build the backend probe CLI."""
     parser = argparse.ArgumentParser(
-        description="Temporary backend E2E probes for the NiceGUI assistant."
+        description="Temporary backend E2E probes for the LLM Tools Assistant."
     )
     parser.add_argument("--workspace", type=Path, default=common.REPO_ROOT)
     parser.add_argument(
@@ -254,13 +254,13 @@ def _select_provider_mode_variants(
 def _chat_prompt_for(name: str) -> str:
     prompts = {
         "chat_repo_lookup": (
-            "Explain how the NiceGUI assistant supports durable research sessions. "
+            "Explain how the LLM Tools Assistant supports durable research sessions. "
             "You must use one or more local workspace tools before answering, cite the "
             "most relevant local files, and keep the answer focused on app/runtime flow."
         ),
         "chat_multi_turn_back_and_forth": (
             "Use local workspace tools to find the two most relevant files for tracing "
-            "normal chat and durable research in the NiceGUI assistant. Keep the "
+            "normal chat and durable research in the LLM Tools Assistant. Keep the "
             "answer short."
         ),
         "chat_git_inspection": (
@@ -269,7 +269,7 @@ def _chat_prompt_for(name: str) -> str:
         ),
         "chat_remote_request_blocked": (
             "Find the latest Jira tickets, Confluence notes, and GitLab merge requests "
-            "related to the NiceGUI assistant. If you cannot access those systems, "
+            "related to the LLM Tools Assistant. If you cannot access those systems, "
             "say that clearly instead of guessing."
         ),
     }
@@ -607,7 +607,7 @@ def _run_chat_multi_turn_scenario(
     prompts = [
         (
             "Use local workspace tools to find the two most relevant files for tracing "
-            "normal chat and durable research in the NiceGUI assistant. Keep the "
+            "normal chat and durable research in the LLM Tools Assistant. Keep the "
             "answer short."
         ),
         (
@@ -891,7 +891,7 @@ def _run_chat_protection_demo(
     ]
     result["sanitize_provenance_paths"] = sanitize_provenance_paths
     result["protection_environment"] = build_protection_environment(
-        app_name="nicegui_chat",
+        app_name="assistant_app",
         model_name=runtime.model_name,
         workspace=runtime.root_path,
         enabled_tools=runtime.enabled_tools,
@@ -983,7 +983,7 @@ def _run_chat_scenario(
 
 def _research_prompt() -> str:
     return (
-        "Investigate how the NiceGUI assistant distinguishes normal chat from "
+        "Investigate how the LLM Tools Assistant distinguishes normal chat from "
         "durable research sessions in this repository. Focus on the assistant app, "
         "runtime wiring, and the harness-backed research controller."
     )
@@ -1326,7 +1326,7 @@ def _run_research_followup(
                     "status": common.SCENARIO_STATUS_FAILED,
                     "summary": (
                         "Known durable research session id was not available in the "
-                        "NiceGUI-backed probe store."
+                        "assistant-backed probe store."
                     ),
                 }
             )
@@ -1348,7 +1348,7 @@ def _run_research_followup(
                     "status": common.SCENARIO_STATUS_FAILED,
                     "summary": (
                         "Known durable research session could not be loaded from "
-                        "NiceGUI persistence."
+                        "assistant persistence."
                     ),
                 }
             )

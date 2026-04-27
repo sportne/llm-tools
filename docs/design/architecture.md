@@ -110,7 +110,7 @@ and Atlassian are intentionally bundled remote integrations.
 
 - one-turn execution primitives centered on `WorkflowExecutor`
 - assistant-oriented interactive chat and protection helpers used by the
-  NiceGUI assistant
+  LLM Tools Assistant
 
 The cleanest one-turn boundary is:
 
@@ -162,7 +162,7 @@ Public harness modules are also intentionally split:
 
 Current app surfaces are:
 
-- `nicegui_chat`
+- `assistant_app`
 - `harness_cli`
 - supporting config, runtime, prompt, presentation, and persistence helpers
 
@@ -203,7 +203,7 @@ concerns without pretending the assistant surface is outside repo scope.
 
 Current hotspots are implementation modules, not the thin public facades:
 
-- `src/llm_tools/apps/nicegui_chat/app.py`
+- `src/llm_tools/apps/assistant_app/app.py`
 - `src/llm_tools/apps/assistant_runtime.py`
 - `src/llm_tools/harness_api/executor_loop.py`
 - `src/llm_tools/workflow_api/chat_runner.py`

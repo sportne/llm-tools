@@ -67,7 +67,7 @@ def build_assistant_context(
         env=env,
         metadata={
             "tool_limits": effective_tool_limits.model_dump(mode="json"),
-            "assistant_mode": "nicegui_chat",
+            "assistant_mode": "assistant_app",
         },
     )
 

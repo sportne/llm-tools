@@ -6,13 +6,14 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select, update
 
-from llm_tools.apps.nicegui_chat.auth import (
+from llm_tools.apps.assistant_app.auth import (
     LocalAuthProvider,
     ensure_secret_file,
     validate_hosted_startup,
     verify_password,
 )
-from llm_tools.apps.nicegui_chat.models import (
+from llm_tools.apps.assistant_app.models import (
+    AssistantBranding,
     NiceGUIAdminSettings,
     NiceGUIInspectorEntry,
     NiceGUIPreferences,
@@ -20,7 +21,7 @@ from llm_tools.apps.nicegui_chat.models import (
     NiceGUITranscriptEntry,
     NiceGUIWorkbenchItem,
 )
-from llm_tools.apps.nicegui_chat.store import (
+from llm_tools.apps.assistant_app.store import (
     NICEGUI_DB_ENV_VAR,
     SQLiteNiceGUIChatStore,
     chat_messages,
@@ -49,7 +50,7 @@ def _store(tmp_path: Path) -> SQLiteNiceGUIChatStore:
 def test_default_db_path_prefers_env_then_pointer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from llm_tools.apps.nicegui_chat import store as store_module
+    from llm_tools.apps.assistant_app import store as store_module
 
     fallback_path = tmp_path / "fallback.sqlite3"
     pointer_path = tmp_path / "pointer.txt"
@@ -474,10 +475,25 @@ def test_admin_settings_round_trip(tmp_path: Path) -> None:
     store = _store(tmp_path)
 
     assert store.load_admin_settings().deep_task_mode_enabled is False
+    assert store.load_admin_settings().branding.app_name == "LLM Tools Assistant"
 
-    store.save_admin_settings(NiceGUIAdminSettings(deep_task_mode_enabled=True))
+    store.save_admin_settings(
+        NiceGUIAdminSettings(
+            deep_task_mode_enabled=True,
+            branding=AssistantBranding(
+                app_name="Custom Assistant",
+                short_name="Custom",
+                icon_name="auto_awesome",
+                favicon_svg='<svg viewBox="0 0 1 1"></svg>',
+            ),
+        )
+    )
 
-    assert store.load_admin_settings().deep_task_mode_enabled is True
+    loaded = store.load_admin_settings()
+    assert loaded.deep_task_mode_enabled is True
+    assert loaded.branding.app_name == "Custom Assistant"
+    assert loaded.branding.short_name == "Custom"
+    assert loaded.branding.icon_name == "auto_awesome"
 
 
 def test_temporary_sessions_are_not_persisted(tmp_path: Path) -> None:

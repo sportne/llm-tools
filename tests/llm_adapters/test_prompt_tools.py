@@ -321,7 +321,7 @@ def test_parse_single_action_accepts_prose_with_non_protocol_json_fence() -> Non
 
     parsed = adapter.parse_single_action(
         (
-            "The NiceGUI assistant persists durable sessions with "
+            "The LLM Tools Assistant persists durable sessions with "
             "FileHarnessStateStore.\n\n"
             "```json\n"
             '{"answer": "duplicate structured answer"}\n'
@@ -333,7 +333,7 @@ def test_parse_single_action_accepts_prose_with_non_protocol_json_fence() -> Non
     )
 
     assert parsed.final_response["answer"] == (
-        "The NiceGUI assistant persists durable sessions with FileHarnessStateStore."
+        "The LLM Tools Assistant persists durable sessions with FileHarnessStateStore."
     )
 
 

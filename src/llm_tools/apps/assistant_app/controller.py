@@ -1,4 +1,4 @@
-"""Controller layer for the NiceGUI chat app."""
+"""Controller layer for the assistant app."""
 
 from __future__ import annotations
 
@@ -11,6 +11,23 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
+from llm_tools.apps.assistant_app.auth import LocalAuthProvider
+from llm_tools.apps.assistant_app.models import (
+    AssistantBranding,
+    NiceGUIAdminSettings,
+    NiceGUIHostedConfig,
+    NiceGUIInspectorEntry,
+    NiceGUIPreferences,
+    NiceGUIRuntimeConfig,
+    NiceGUISessionRecord,
+    NiceGUITranscriptEntry,
+    NiceGUIUser,
+    NiceGUIWorkbenchItem,
+)
+from llm_tools.apps.assistant_app.store import (
+    SQLiteNiceGUIChatStore,
+    remember_default_db_path,
+)
 from llm_tools.apps.assistant_config import AssistantConfig
 from llm_tools.apps.assistant_prompts import (
     build_assistant_system_prompt,
@@ -28,22 +45,6 @@ from llm_tools.apps.assistant_runtime import (
     resolve_assistant_default_enabled_tools,
 )
 from llm_tools.apps.chat_runtime import create_provider
-from llm_tools.apps.nicegui_chat.auth import LocalAuthProvider
-from llm_tools.apps.nicegui_chat.models import (
-    NiceGUIAdminSettings,
-    NiceGUIHostedConfig,
-    NiceGUIInspectorEntry,
-    NiceGUIPreferences,
-    NiceGUIRuntimeConfig,
-    NiceGUISessionRecord,
-    NiceGUITranscriptEntry,
-    NiceGUIUser,
-    NiceGUIWorkbenchItem,
-)
-from llm_tools.apps.nicegui_chat.store import (
-    SQLiteNiceGUIChatStore,
-    remember_default_db_path,
-)
 from llm_tools.harness_api import (
     ApprovalResolution,
     BudgetPolicy,
@@ -251,7 +252,7 @@ class NiceGUIHarnessContextBuilder:
             workspace=workspace,
         )
         metadata = dict(bundle.tool_context.metadata)
-        metadata["assistant_mode"] = "nicegui_deep_task"
+        metadata["assistant_mode"] = "assistant_app_deep_task"
         return bundle.model_copy(
             update={
                 "tool_context": bundle.tool_context.model_copy(
@@ -603,6 +604,13 @@ class NiceGUIChatController:
                     record.runtime.interaction_mode = "chat"
                     self._persist_record(record)
 
+    def set_branding(self, branding: AssistantBranding) -> None:
+        """Persist administrator-controlled app branding."""
+        self.admin_settings = self.admin_settings.model_copy(
+            update={"branding": branding}
+        )
+        self.store.save_admin_settings(self.admin_settings)
+
     def submit_prompt(
         self, prompt: str, *, show_in_transcript: bool = True
     ) -> str | None:
@@ -679,7 +687,7 @@ class NiceGUIChatController:
         handle.thread = threading.Thread(
             target=_worker_run_turn,
             args=(handle,),
-            name=f"llm-tools-nicegui-turn-{session_id}",
+            name=f"llm-tools-assistant-turn-{session_id}",
             daemon=True,
         )
         self.active_turns[session_id] = handle
@@ -748,7 +756,7 @@ class NiceGUIChatController:
         handle.thread = threading.Thread(
             target=_worker_run_harness,
             args=(handle,),
-            name=f"llm-tools-nicegui-deep-task-{session_id}",
+            name=f"llm-tools-assistant-deep-task-{session_id}",
             daemon=True,
         )
         self.active_turns[session_id] = handle
@@ -801,7 +809,7 @@ class NiceGUIChatController:
                 handle,
                 ApprovalResolution.APPROVE if approved else ApprovalResolution.DENY,
             ),
-            name=f"llm-tools-nicegui-deep-task-resume-{session_id}",
+            name=f"llm-tools-assistant-deep-task-resume-{session_id}",
             daemon=True,
         )
         self.active_turns[session_id] = handle
@@ -1094,7 +1102,7 @@ class NiceGUIChatController:
                 else runtime.protection.model_copy(update={"enabled": True})
             )
             protection_environment = build_protection_environment(
-                app_name="nicegui_chat",
+                app_name="assistant_app",
                 model_name=runtime.model_name,
                 workspace=runtime.root_path,
                 enabled_tools=sorted(exposed_tool_names),
@@ -1126,7 +1134,7 @@ class NiceGUIChatController:
             base_context=build_assistant_context(
                 root_path=root,
                 config=effective_config,
-                app_name=f"nicegui-chat-{session_id}",
+                app_name=f"assistant-app-{session_id}",
                 env_overrides=self.tool_env_overrides(
                     runtime=runtime,
                     session_id=session_id,
@@ -1176,7 +1184,7 @@ class NiceGUIChatController:
         protection_controller = None
         if _nicegui_protection_is_ready(runtime.protection):
             protection_environment = build_protection_environment(
-                app_name="nicegui_deep_task",
+                app_name="assistant_app_deep_task",
                 model_name=runtime.model_name,
                 workspace=runtime.root_path,
                 enabled_tools=sorted(exposed_tool_names),

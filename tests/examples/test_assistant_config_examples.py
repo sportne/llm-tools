@@ -1,4 +1,4 @@
-"""Smoke tests for curated NiceGUI assistant config examples."""
+"""Smoke tests for curated LLM Tools Assistant config examples."""
 
 from __future__ import annotations
 
@@ -7,6 +7,12 @@ from pathlib import Path
 
 import yaml
 
+from llm_tools.apps.assistant_app.controller import (
+    NiceGUIChatController,
+    _exposed_tool_names_for_runtime,
+)
+from llm_tools.apps.assistant_app.models import NiceGUIRuntimeConfig
+from llm_tools.apps.assistant_app.store import SQLiteNiceGUIChatStore
 from llm_tools.apps.assistant_config import (
     AssistantConfig,
     AssistantResearchConfig,
@@ -17,12 +23,6 @@ from llm_tools.apps.assistant_tool_registry import (
     build_assistant_available_tool_specs,
 )
 from llm_tools.apps.chat_config import ChatLLMConfig, ChatPolicyConfig, ChatUIConfig
-from llm_tools.apps.nicegui_chat.controller import (
-    NiceGUIChatController,
-    _exposed_tool_names_for_runtime,
-)
-from llm_tools.apps.nicegui_chat.models import NiceGUIRuntimeConfig
-from llm_tools.apps.nicegui_chat.store import SQLiteNiceGUIChatStore
 from llm_tools.llm_adapters import ParsedModelResponse
 from llm_tools.llm_providers import ProviderModeStrategy
 from llm_tools.tool_api import ToolInvocationRequest

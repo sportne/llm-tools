@@ -2,7 +2,7 @@
 
 `llm-tools` includes multiple sensitive execution surfaces: local filesystem
 tools, subprocess-backed Git helpers, remote enterprise read integrations,
-structured provider calls, a NiceGUI assistant client, and durable
+structured provider calls, a LLM Tools Assistant client, and durable
 harness-backed research sessions. Treat configs, examples, caches, and
 persisted session state as part of the security surface.
 
@@ -23,8 +23,8 @@ Security-sensitive shipped surfaces include:
 - filesystem, subprocess, and network-capable tools
 - OpenAI-compatible provider transport
 - persisted harness sessions and replay data
-- the NiceGUI assistant and harness CLI entrypoints
-- the NiceGUI chat client, including optional hosted multi-user mode
+- the LLM Tools Assistant and harness CLI entrypoints
+- the assistant app, including optional hosted multi-user mode
 
 ## Operational guidance
 
@@ -45,7 +45,7 @@ Only enable the integrations you actually need in the current environment.
 
 ### Assistant permissions and approvals
 
-In `llm_tools.apps.nicegui_chat`:
+In `llm_tools.apps.assistant_app`:
 
 - selecting a workspace root only picks the directory available to local file
   and subprocess tools
@@ -64,13 +64,13 @@ settings into the new session.
 Prefer one of these patterns for credentials:
 
 - environment variables consumed by providers or integrations
-- the NiceGUI assistant's session-only API-key entry
-- the NiceGUI chat client's session-scoped credential entry
+- the LLM Tools Assistant's session-only API-key entry
+- the assistant app's session-scoped credential entry
 
 Do not commit secrets into assistant YAML configs, scripted harness payloads, or
 examples. If you need local overrides, keep them in ignored files.
 
-The NiceGUI chat client intentionally does not use process environment variables
+The assistant app intentionally does not use process environment variables
 as implicit provider or tool credentials. Provider API keys and tool credentials
 must be typed into the app for the active browser/app session. In both normal
 local loopback use and hosted use those values are held in server memory only.
@@ -81,7 +81,7 @@ Non-secret service URLs, such as Atlassian or GitLab base URLs, are runtime
 configuration and may be persisted as normal chat settings. Keep bearer tokens,
 passwords, API keys, and PATs in the credential fields instead.
 
-NiceGUI persistence uses encrypted SQLite only. The database is opened through
+assistant persistence uses encrypted SQLite only. The database is opened through
 SQLCipher with a local database key file, and user-owned chat fields are also
 encrypted with per-user data keys wrapped by a local server key file. Deleting
 either key file makes the affected database data unrecoverable. Treat these
@@ -94,14 +94,14 @@ files as server secrets and back them up separately from normal database copies:
 
 ### NiceGUI Auth Mode
 
-The default NiceGUI app uses local username/password authentication even on
+The default assistant app uses local username/password authentication even on
 loopback. The first launch requires creating an admin user. `--auth-mode none`
 is an explicit development/test escape hatch and should not be used for normal
 local or hosted use. Binding the app to a non-loopback interface still requires
 local authentication:
 
 ```text
-llm-tools-nicegui-chat --host 0.0.0.0 --auth-mode local
+llm-tools-assistant --host 0.0.0.0 --auth-mode local
 ```
 
 NiceGUI auth uses local admin-created users only; there is no public
@@ -138,8 +138,8 @@ credentials.
 
 Default storage locations:
 
-- NiceGUI assistant state: `~/.llm-tools/assistant/nicegui/chat.sqlite3`
-- NiceGUI assistant key files: `~/.llm-tools/assistant/nicegui/hosted`
+- LLM Tools Assistant state: `~/.llm-tools/assistant/nicegui/chat.sqlite3`
+- LLM Tools Assistant key files: `~/.llm-tools/assistant/nicegui/hosted`
 - Harness CLI state: `~/.llm-tools/harness`
 
 Cache locations are split by feature:
@@ -221,7 +221,7 @@ Open work:
 - `workflow_api` and model mediation: identify remaining attack paths where
   model-controlled content could trigger unexpected tool execution, unbounded
   work, or sensitive data disclosure
-- `apps`: finish review of shared app config, prompt helpers, `nicegui_chat`,
+- `apps`: finish review of shared app config, prompt helpers, `assistant_app`,
   app compatibility surfaces, and `harness_cli`
 - project-wide: re-run relevant tests for confirmed security issues and produce
   a final confidence summary

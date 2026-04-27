@@ -77,7 +77,7 @@ def test_build_assistant_context_uses_session_only_environment(tmp_path: Path) -
 
     assert context.workspace == str(tmp_path)
     assert context.env == {"TOKEN": "secret"}
-    assert context.metadata["assistant_mode"] == "nicegui_chat"
+    assert context.metadata["assistant_mode"] == "assistant_app"
     assert context.metadata["tool_limits"]["max_read_file_chars"] == (
         config.session.max_context_tokens * 4
     )

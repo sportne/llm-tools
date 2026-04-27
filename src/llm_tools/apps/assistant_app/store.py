@@ -1,4 +1,4 @@
-"""SQLite persistence for the NiceGUI chat app."""
+"""SQLite persistence for the assistant app."""
 
 from __future__ import annotations
 
@@ -35,12 +35,12 @@ from sqlalchemy import (
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from llm_tools.apps.nicegui_chat.crypto import (
+from llm_tools.apps.assistant_app.crypto import (
     CryptoManager,
     NiceGUICryptoError,
     ensure_text_key_file,
 )
-from llm_tools.apps.nicegui_chat.models import (
+from llm_tools.apps.assistant_app.models import (
     NiceGUIAdminSettings,
     NiceGUIInspectorState,
     NiceGUIPreferences,

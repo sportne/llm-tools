@@ -117,7 +117,7 @@ default local key only when `--auth-mode none` is explicitly used.
 
 ### `users`
 
-Stores local NiceGUI users:
+Stores local assistant users:
 
 - `user_id`
 - `username`
@@ -206,5 +206,5 @@ Temporary sessions are returned as normal typed records but are not inserted int
 the database.
 
 Provider API keys and tool credentials are not part of the SQLite schema. The
-NiceGUI app keeps typed credential values in server memory for the current
+assistant app keeps typed credential values in server memory for the current
 browser/app session only.

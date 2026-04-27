@@ -1,4 +1,4 @@
-"""Typed state models for the NiceGUI chat app."""
+"""Typed state models for the assistant app."""
 
 from __future__ import annotations
 
@@ -22,6 +22,26 @@ from llm_tools.workflow_api import (
 NiceGUIAuthMode = Literal["none", "local"]
 NiceGUIInteractionMode = Literal["chat", "deep_task"]
 NiceGUIUserRole = Literal["admin", "user"]
+
+DEFAULT_ASSISTANT_FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#20211f"/><path d="M18 18h28v20H30L20 48v-10h-2z" fill="#e8e6de"/><circle cx="28" cy="28" r="3" fill="#20211f"/><circle cx="38" cy="28" r="3" fill="#20211f"/></svg>"""
+
+
+class AssistantBranding(BaseModel):
+    """Visible assistant app identity."""
+
+    app_name: str = "LLM Tools Assistant"
+    short_name: str = "Assistant"
+    icon_name: str = "forum"
+    favicon_svg: str = DEFAULT_ASSISTANT_FAVICON_SVG
+
+    @field_validator("app_name", "short_name", "icon_name", "favicon_svg")
+    @classmethod
+    def validate_non_empty_text(cls, value: str) -> str:
+        """Normalize branding strings without accepting empty values."""
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("branding values must not be empty")
+        return cleaned
 
 
 class NiceGUIUser(BaseModel):
@@ -75,9 +95,10 @@ class NiceGUIHostedConfig(BaseModel):
 
 
 class NiceGUIAdminSettings(BaseModel):
-    """Global administrator-controlled NiceGUI feature switches."""
+    """Global administrator-controlled assistant app settings."""
 
     deep_task_mode_enabled: bool = False
+    branding: AssistantBranding = Field(default_factory=AssistantBranding)
 
 
 class NiceGUITranscriptEntry(BaseModel):
@@ -265,6 +286,8 @@ class NiceGUIPreferences(BaseModel):
 
 
 __all__ = [
+    "AssistantBranding",
+    "DEFAULT_ASSISTANT_FAVICON_SVG",
     "NiceGUIAdminSettings",
     "NiceGUIAuthMode",
     "NiceGUIInteractionMode",

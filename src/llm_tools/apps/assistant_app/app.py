@@ -1,8 +1,9 @@
-"""NiceGUI chat client for llm-tools."""
+"""Assistant app for llm-tools."""
 
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import sys
@@ -10,11 +11,29 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 from nicegui import app as nicegui_app
 
+from llm_tools.apps.assistant_app.auth import (
+    LocalAuthProvider,
+    ensure_secret_file,
+    validate_hosted_startup,
+)
+from llm_tools.apps.assistant_app.controller import (
+    PROVIDER_API_KEY_FIELD,
+    NiceGUIChatController,
+    default_runtime_config,
+)
+from llm_tools.apps.assistant_app.models import (
+    AssistantBranding,
+    NiceGUIHostedConfig,
+    NiceGUIInteractionMode,
+    NiceGUIRuntimeConfig,
+    NiceGUIUser,
+)
+from llm_tools.apps.assistant_app.store import SQLiteNiceGUIChatStore, default_db_path
 from llm_tools.apps.assistant_config import (
     AssistantConfig,
     load_assistant_config,
@@ -26,23 +45,6 @@ from llm_tools.apps.assistant_tool_capabilities import (
 )
 from llm_tools.apps.assistant_tool_registry import build_assistant_available_tool_specs
 from llm_tools.apps.chat_config import ProviderPreset
-from llm_tools.apps.nicegui_chat.auth import (
-    LocalAuthProvider,
-    ensure_secret_file,
-    validate_hosted_startup,
-)
-from llm_tools.apps.nicegui_chat.controller import (
-    PROVIDER_API_KEY_FIELD,
-    NiceGUIChatController,
-    default_runtime_config,
-)
-from llm_tools.apps.nicegui_chat.models import (
-    NiceGUIHostedConfig,
-    NiceGUIInteractionMode,
-    NiceGUIRuntimeConfig,
-    NiceGUIUser,
-)
-from llm_tools.apps.nicegui_chat.store import SQLiteNiceGUIChatStore, default_db_path
 from llm_tools.llm_providers import ProviderModeStrategy
 from llm_tools.tool_api import SideEffectClass
 from llm_tools.workflow_api import (
@@ -68,7 +70,7 @@ NICEGUI_APPROVAL_LABELS = {
     SideEffectClass.EXTERNAL_WRITE.value: "External write",
 }
 AUTH_DISABLED_WARNING = (
-    "WARNING: NiceGUI auth is disabled. Use --auth-mode local for normal local "
+    "WARNING: Assistant app auth is disabled. Use --auth-mode local for normal local "
     "or hosted use."
 )
 PROTECTION_UNDEFINED_LABEL = "Undefined"
@@ -83,6 +85,25 @@ INTERACTION_MODE_TOOLTIPS: dict[NiceGUIInteractionMode, str] = {
         "Durable multi-step work with task state, approvals, trace, and summary."
     ),
 }
+
+
+def _branding_favicon_href(branding: AssistantBranding) -> str:
+    """Return a browser-safe data URI for the configured favicon SVG."""
+    return "data:image/svg+xml," + quote(branding.favicon_svg, safe="")
+
+
+def _branding_head_html(branding: AssistantBranding) -> str:
+    """Return page metadata for the configured brand."""
+    title = html.escape(branding.app_name, quote=True)
+    href = html.escape(_branding_favicon_href(branding), quote=True)
+    return f'<title>{title}</title><link rel="icon" type="image/svg+xml" href="{href}">'
+
+
+def _apply_branding_head(branding: AssistantBranding) -> None:
+    """Apply browser tab metadata for one rendered page."""
+    from nicegui import ui
+
+    ui.add_head_html(_branding_head_html(branding))
 
 
 def _first_nonempty_text(*values: object) -> str:
@@ -354,10 +375,10 @@ def _discover_model_names(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the NiceGUI chat CLI parser."""
+    """Build the assistant app CLI parser."""
     parser = argparse.ArgumentParser(
-        prog="llm-tools-nicegui-chat",
-        description="NiceGUI chat client backed by SQLite persistence.",
+        prog="llm-tools-assistant",
+        description="LLM Tools Assistant backed by encrypted SQLite persistence.",
     )
     parser.add_argument("directory", nargs="?", type=Path)
     parser.add_argument("--directory", dest="directory_override", type=Path)
@@ -453,7 +474,7 @@ def resolve_root_argument(
     return Path(candidate).expanduser().resolve()
 
 
-def run_nicegui_chat_app(
+def run_assistant_app(
     *,
     root_path: Path | None,
     config: AssistantConfig,
@@ -470,7 +491,7 @@ def run_nicegui_chat_app(
     allow_insecure_hosted_secrets: bool = False,
     hosted_secret_key_path: Path | None = None,
 ) -> None:  # pragma: no cover
-    """Render and run the NiceGUI chat app."""
+    """Render and run the assistant app."""
     from nicegui import ui
 
     store = SQLiteNiceGUIChatStore(
@@ -479,6 +500,7 @@ def run_nicegui_chat_app(
         user_key_file=user_key_file,
     )
     store.initialize()
+    branding = store.load_admin_settings().branding
     startup = validate_hosted_startup(
         auth_mode=auth_mode,
         host=host,
@@ -515,13 +537,14 @@ def run_nicegui_chat_app(
             root_path=root_path,
             hosted_config=startup.config,
         )
-        build_nicegui_chat_ui(controller)
+        build_assistant_ui(controller)
     base_run_kwargs: dict[str, Any] = {
         "host": host,
         "port": port,
         "reload": False,
         "show": show,
-        "title": "llm-tools chat",
+        "title": branding.app_name,
+        "favicon": branding.favicon_svg,
         "storage_secret": storage_secret,
         "session_middleware_kwargs": {
             "https_only": bool(startup.tls_enabled),
@@ -539,8 +562,8 @@ def run_nicegui_chat_app(
 
 
 def _hosted_storage_values() -> tuple[str | None, str | None]:
-    session_id = nicegui_app.storage.user.get("nicegui_chat_session_id")
-    token = nicegui_app.storage.user.get("nicegui_chat_session_token")
+    session_id = nicegui_app.storage.user.get("assistant_app_session_id")
+    token = nicegui_app.storage.user.get("assistant_app_session_token")
     return (
         str(session_id) if session_id else None,
         str(token) if token else None,
@@ -548,13 +571,13 @@ def _hosted_storage_values() -> tuple[str | None, str | None]:
 
 
 def _set_hosted_storage_values(session_id: str, token: str) -> None:
-    nicegui_app.storage.user["nicegui_chat_session_id"] = session_id
-    nicegui_app.storage.user["nicegui_chat_session_token"] = token
+    nicegui_app.storage.user["assistant_app_session_id"] = session_id
+    nicegui_app.storage.user["assistant_app_session_token"] = token
 
 
 def _clear_hosted_storage_values() -> None:
-    nicegui_app.storage.user.pop("nicegui_chat_session_id", None)
-    nicegui_app.storage.user.pop("nicegui_chat_session_token", None)
+    nicegui_app.storage.user.pop("assistant_app_session_id", None)
+    nicegui_app.storage.user.pop("assistant_app_session_token", None)
 
 
 def clear_hosted_session(auth_provider: LocalAuthProvider | None) -> None:
@@ -574,6 +597,8 @@ def render_hosted_nicegui_page(
     auth_provider: LocalAuthProvider,
 ) -> None:
     """Render first-run admin, login, or authenticated chat UI."""
+    branding = store.load_admin_settings().branding
+    _apply_branding_head(branding)
     if not auth_provider.has_users():
         render_first_admin_page(auth_provider)
         return
@@ -594,15 +619,19 @@ def render_hosted_nicegui_page(
         current_user=current_user,
         auth_provider=auth_provider,
     )
-    build_nicegui_chat_ui(controller)
+    build_assistant_ui(controller)
 
 
 def render_first_admin_page(
     auth_provider: LocalAuthProvider,
+    *,
+    branding: AssistantBranding | None = None,
 ) -> None:  # pragma: no cover
-    """Render first-run hosted admin creation."""
+    """Render first-run admin creation."""
     from nicegui import ui
 
+    branding = branding or auth_provider.store.load_admin_settings().branding
+    _apply_branding_head(branding)
     ui.dark_mode(value=True)
     _add_auth_page_styles()
     username_input: Any = None
@@ -628,8 +657,11 @@ def render_first_admin_page(
         ui.column().classes("w-screen h-screen items-center justify-center q-pa-md"),
         ui.card().classes("w-[420px]"),
     ):
+        with ui.column().classes("w-full items-center gap-1 q-mb-md"):
+            ui.icon(branding.icon_name).classes("text-4xl text-primary")
+            ui.label(branding.app_name).classes("text-xl")
         ui.label("Create Admin").classes("text-lg")
-        ui.label("Hosted mode needs one local admin user.").classes(
+        ui.label("The assistant needs one local admin user.").classes(
             "text-sm llmt-muted"
         )
         username_input = ui.input("Username").classes("w-full")
@@ -637,10 +669,16 @@ def render_first_admin_page(
         ui.button("Create admin", on_click=create_admin).classes("w-full")
 
 
-def render_login_page(auth_provider: LocalAuthProvider) -> None:  # pragma: no cover
-    """Render hosted-mode login."""
+def render_login_page(
+    auth_provider: LocalAuthProvider,
+    *,
+    branding: AssistantBranding | None = None,
+) -> None:  # pragma: no cover
+    """Render login."""
     from nicegui import ui
 
+    branding = branding or auth_provider.store.load_admin_settings().branding
+    _apply_branding_head(branding)
     ui.dark_mode(value=True)
     _add_auth_page_styles()
     username_input: Any = None
@@ -661,6 +699,9 @@ def render_login_page(auth_provider: LocalAuthProvider) -> None:  # pragma: no c
         ui.column().classes("w-screen h-screen items-center justify-center q-pa-md"),
         ui.card().classes("w-[420px]"),
     ):
+        with ui.column().classes("w-full items-center gap-1 q-mb-md"):
+            ui.icon(branding.icon_name).classes("text-4xl text-primary")
+            ui.label(branding.app_name).classes("text-xl")
         ui.label("Sign In").classes("text-lg")
         username_input = ui.input("Username").classes("w-full")
         password_input = ui.input("Password").props("type=password").classes("w-full")
@@ -700,12 +741,13 @@ def _add_auth_page_styles() -> None:
     )
 
 
-def build_nicegui_chat_ui(  # noqa: C901
+def build_assistant_ui(  # noqa: C901
     controller: NiceGUIChatController,
 ) -> None:  # pragma: no cover
-    """Build the NiceGUI component tree for the chat app."""
+    """Build the assistant app component tree."""
     from nicegui import ui
 
+    _apply_branding_head(controller.admin_settings.branding)
     ui.add_head_html(
         """
         <style>
@@ -828,6 +870,13 @@ def build_nicegui_chat_ui(  # noqa: C901
         }
         body.body--dark .llmt-header { border-bottom-color: #373a34; }
         .llmt-header-title { min-width: 0; overflow: hidden; }
+        .llmt-brand {
+            min-width: 0; color: var(--llmt-accent); line-height: 1;
+        }
+        .llmt-brand .nicegui-label {
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .llmt-brand-icon { font-size: 18px; }
         .llmt-header-title .nicegui-label {
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
             max-width: 100%;
@@ -1043,6 +1092,10 @@ def build_nicegui_chat_ui(  # noqa: C901
     admin_create_password_input: Any = None
     admin_create_role_select: Any = None
     admin_deep_task_switch: Any = None
+    admin_branding_app_name_input: Any = None
+    admin_branding_short_name_input: Any = None
+    admin_branding_icon_name_input: Any = None
+    admin_branding_favicon_input: Any = None
     allow_network_switch: Any = None
     allow_filesystem_switch: Any = None
     allow_subprocess_switch: Any = None
@@ -1919,10 +1972,51 @@ def build_nicegui_chat_ui(  # noqa: C901
         if not _is_admin_user(controller.current_user):
             ui.notify("Admin access is required.", type="negative")
             return
+        populate_admin_branding_inputs()
         if admin_deep_task_switch is not None:
             admin_deep_task_switch.value = controller.deep_task_mode_enabled()
         render_admin_user_list()
         dialogs["admin"].open()
+
+    def populate_admin_branding_inputs() -> None:
+        branding = controller.admin_settings.branding
+        if admin_branding_app_name_input is not None:
+            admin_branding_app_name_input.value = branding.app_name
+        if admin_branding_short_name_input is not None:
+            admin_branding_short_name_input.value = branding.short_name
+        if admin_branding_icon_name_input is not None:
+            admin_branding_icon_name_input.value = branding.icon_name
+        if admin_branding_favicon_input is not None:
+            admin_branding_favicon_input.value = branding.favicon_svg
+
+    def save_admin_branding() -> None:
+        if not _is_admin_user(controller.current_user):
+            ui.notify("Admin access is required.", type="negative")
+            return
+        try:
+            branding = AssistantBranding(
+                app_name=str(admin_branding_app_name_input.value or ""),
+                short_name=str(admin_branding_short_name_input.value or ""),
+                icon_name=str(admin_branding_icon_name_input.value or ""),
+                favicon_svg=str(admin_branding_favicon_input.value or ""),
+            )
+        except ValueError as exc:
+            ui.notify(f"Could not save branding: {exc}", type="negative")
+            return
+        controller.set_branding(branding)
+        _apply_branding_head(branding)
+        refresh_all()
+        ui.notify("Branding updated.")
+
+    def reset_admin_branding() -> None:
+        if not _is_admin_user(controller.current_user):
+            ui.notify("Admin access is required.", type="negative")
+            return
+        controller.set_branding(AssistantBranding())
+        populate_admin_branding_inputs()
+        _apply_branding_head(controller.admin_settings.branding)
+        refresh_all()
+        ui.notify("Branding reset.")
 
     def set_admin_deep_task_enabled(event: Any) -> None:
         if not _is_admin_user(controller.current_user):
@@ -2296,6 +2390,13 @@ def build_nicegui_chat_ui(  # noqa: C901
                 "llmt-header w-full items-center justify-between q-px-md"
             ):
                 with ui.column().classes("llmt-header-title gap-0"):
+                    with ui.row().classes("llmt-brand items-center gap-1 no-wrap"):
+                        ui.icon(controller.admin_settings.branding.icon_name).classes(
+                            "llmt-brand-icon"
+                        )
+                        ui.label(controller.admin_settings.branding.short_name).classes(
+                            "text-xs llmt-muted"
+                        )
                     header_title = ui.label("").classes("text-base")
                 with ui.row().classes("llmt-header-security items-center"):
                     information_security_button = (
@@ -2390,7 +2491,7 @@ def build_nicegui_chat_ui(  # noqa: C901
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("Admin").classes("text-lg")
             ui.button(icon="close", on_click=admin_dialog.close).props("flat round")
-        ui.label("Manage local NiceGUI users.").classes("text-sm llmt-muted")
+        ui.label("Manage local assistant users.").classes("text-sm llmt-muted")
         with ui.column().classes("llmt-settings-section w-full gap-2"):
             ui.label("Features").classes("text-base")
             admin_deep_task_switch = ui.switch(
@@ -2402,6 +2503,21 @@ def build_nicegui_chat_ui(  # noqa: C901
                 ui.tooltip(
                     "Shows Deep Task as a selectable chat mode before the first message."
                 ).props("delay=700")
+        with ui.column().classes("llmt-settings-section w-full gap-2"):
+            ui.label("Branding").classes("text-base")
+            admin_branding_app_name_input = ui.input("App name").classes("w-full")
+            admin_branding_short_name_input = ui.input("Short name").classes("w-full")
+            admin_branding_icon_name_input = ui.input("Icon name").classes("w-full")
+            with admin_branding_icon_name_input:
+                ui.tooltip("Material icon name used in the app chrome.").props(
+                    "delay=700"
+                )
+            admin_branding_favicon_input = (
+                ui.textarea("Favicon SVG").props("autogrow outlined").classes("w-full")
+            )
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("Reset", on_click=reset_admin_branding).props("flat")
+                ui.button("Save branding", on_click=save_admin_branding).props("flat")
         with ui.column().classes("llmt-settings-section w-full gap-2"):
             ui.label("Create user").classes("text-base")
             with ui.row().classes("w-full items-end gap-2 no-wrap"):
@@ -2729,14 +2845,14 @@ def build_nicegui_chat_ui(  # noqa: C901
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Console entrypoint for the NiceGUI chat app."""
+    """Console entrypoint for the assistant app."""
     parser = build_parser()
     args = parser.parse_args(argv)
     config = resolve_assistant_config(args)
     root_path = resolve_root_argument(args, config)
     if root_path is not None:
         default_runtime_config(config, root_path=root_path)
-    run_nicegui_chat_app(
+    run_assistant_app(
         root_path=root_path,
         config=config,
         db_path=args.db_path,
@@ -2756,11 +2872,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 __all__ = [
-    "build_nicegui_chat_ui",
+    "build_assistant_ui",
     "build_parser",
     "clear_hosted_session",
     "main",
     "resolve_assistant_config",
     "resolve_root_argument",
-    "run_nicegui_chat_app",
+    "run_assistant_app",
 ]

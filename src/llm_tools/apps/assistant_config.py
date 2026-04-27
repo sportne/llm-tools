@@ -1,4 +1,4 @@
-"""Config models and loading helpers for the NiceGUI assistant app."""
+"""Config models and loading helpers for the LLM Tools Assistant app."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ class AssistantResearchConfig(BaseModel):
 
 
 class AssistantConfig(BaseModel):
-    """Shared configuration for the NiceGUI assistant app."""
+    """Shared configuration for the LLM Tools Assistant app."""
 
     llm: ChatLLMConfig = Field(default_factory=ChatLLMConfig)
     session: ChatSessionConfig = Field(default_factory=ChatSessionConfig)
@@ -85,7 +85,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def load_assistant_config(path: Path) -> AssistantConfig:
-    """Load and validate the NiceGUI assistant configuration file."""
+    """Load and validate the LLM Tools Assistant configuration file."""
     raw = _load_yaml(path)
     for section_name in (
         "llm",

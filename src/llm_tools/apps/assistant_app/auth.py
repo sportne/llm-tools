@@ -1,4 +1,4 @@
-"""Hosted-mode authentication helpers for the NiceGUI chat app."""
+"""Hosted-mode authentication helpers for the assistant app."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from pathlib import Path
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
-from llm_tools.apps.nicegui_chat.models import NiceGUIHostedConfig, NiceGUIUser
-from llm_tools.apps.nicegui_chat.store import SQLiteNiceGUIChatStore
+from llm_tools.apps.assistant_app.models import NiceGUIHostedConfig, NiceGUIUser
+from llm_tools.apps.assistant_app.store import SQLiteNiceGUIChatStore
 
 _DEFAULT_HOSTED_DIR = Path.home() / ".llm-tools" / "assistant" / "nicegui" / "hosted"
 _DEFAULT_SESSION_DAYS = 7

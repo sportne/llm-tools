@@ -11,37 +11,37 @@ from pathlib import Path
 import pytest
 
 
-def test_nicegui_chat_package_exports_main_and_runner() -> None:
-    module = importlib.import_module("llm_tools.apps.nicegui_chat")
-    main_module = importlib.import_module("llm_tools.apps.nicegui_chat.__main__")
+def test_assistant_app_package_exports_main_and_runner() -> None:
+    module = importlib.import_module("llm_tools.apps.assistant_app")
+    main_module = importlib.import_module("llm_tools.apps.assistant_app.__main__")
 
     assert hasattr(module, "main")
-    assert hasattr(module, "run_nicegui_chat_app")
+    assert hasattr(module, "run_assistant_app")
     assert hasattr(main_module, "main")
 
 
-def test_nicegui_module_main_helper_reexports_package_main(
+def test_assistant_module_main_helper_reexports_package_main(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    package = importlib.import_module("llm_tools.apps.nicegui_chat")
-    main_module = importlib.import_module("llm_tools.apps.nicegui_chat.__main__")
+    package = importlib.import_module("llm_tools.apps.assistant_app")
+    main_module = importlib.import_module("llm_tools.apps.assistant_app.__main__")
 
     monkeypatch.setattr(package, "main", lambda: 7)
 
     assert main_module.main is not None
 
 
-def test_nicegui_module_entrypoint_calls_main(
+def test_assistant_module_entrypoint_calls_main(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     called: list[str] = []
     monkeypatch.setattr(
-        "llm_tools.apps.nicegui_chat.main", lambda: called.append("main")
+        "llm_tools.apps.assistant_app.main", lambda: called.append("main")
     )
 
-    sys.modules.pop("llm_tools.apps.nicegui_chat.__main__", None)
+    sys.modules.pop("llm_tools.apps.assistant_app.__main__", None)
     runpy.run_module(
-        "llm_tools.apps.nicegui_chat.__main__",
+        "llm_tools.apps.assistant_app.__main__",
         run_name="__main__",
     )
 
@@ -56,7 +56,7 @@ def test_remaining_console_scripts_are_declared_and_streamlit_scripts_are_gone()
     scripts = pyproject["project"]["scripts"]
 
     assert scripts["llm-tools-harness"] == "llm_tools.apps.harness_cli:main"
-    assert scripts["llm-tools-nicegui-chat"] == "llm_tools.apps.nicegui_chat:main"
+    assert scripts["llm-tools-assistant"] == "llm_tools.apps.assistant_app:main"
     assert "llm-tools-streamlit-assistant" not in scripts
     assert "llm-tools-chat" not in scripts
     assert "llm-tools-workbench" not in scripts

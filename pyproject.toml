@@ -40,7 +40,7 @@ dependencies = [
 
 [project.scripts]
 llm-tools-harness = "llm_tools.apps.harness_cli:main"
-llm-tools-nicegui-chat = "llm_tools.apps.nicegui_chat:main"
+llm-tools-assistant = "llm_tools.apps.assistant_app:main"
 
 [project.optional-dependencies]
 dev = [
