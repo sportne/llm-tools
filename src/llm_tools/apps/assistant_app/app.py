@@ -32,6 +32,9 @@ from llm_tools.apps.assistant_app.models import (
     NiceGUIRuntimeConfig,
     NiceGUIUser,
 )
+from llm_tools.apps.assistant_app.provider_endpoints import (
+    COMMON_OPENAI_COMPATIBLE_ENDPOINTS,
+)
 from llm_tools.apps.assistant_app.store import SQLiteNiceGUIChatStore, default_db_path
 from llm_tools.apps.assistant_config import (
     AssistantConfig,
@@ -335,6 +338,20 @@ def _is_tool_url_setting(name: str) -> bool:
     """Return whether a required tool value is a non-secret URL."""
     normalized = name.strip().upper()
     return normalized.endswith("_BASE_URL") or normalized.endswith("_URL")
+
+
+def _provider_endpoint_menu_rows() -> list[tuple[str, str]]:
+    """Return copyable common OpenAI-compatible endpoint rows."""
+    return [
+        (entry.name, entry.url)
+        for entry in COMMON_OPENAI_COMPATIBLE_ENDPOINTS
+        if entry.name.strip() and entry.url.strip()
+    ]
+
+
+def _provider_base_url_help_text() -> str:
+    """Return concise helper text for provider Base URL inputs."""
+    return "Use the provider's documented OpenAI-compatible base URL."
 
 
 def _models_endpoint_url(base_url: str) -> str:
@@ -1957,6 +1974,27 @@ def build_assistant_ui(  # noqa: C901
         ui.run_javascript(f"navigator.clipboard.writeText({text!r})")
         ui.notify("Copied")
 
+    def render_provider_endpoint_help_button() -> None:
+        with ui.button(icon="help_outline").props("flat round"):
+            ui.tooltip("Common OpenAI-compatible Base URLs").props("delay=700")
+            with ui.menu().classes("w-[420px] max-w-[90vw]"):
+                ui.label("Common OpenAI-compatible Base URLs").classes(
+                    "text-sm llmt-muted q-px-md q-pt-sm"
+                )
+                for provider_name, endpoint_url in _provider_endpoint_menu_rows():
+                    with ui.row().classes(
+                        "w-full items-center justify-between gap-2 no-wrap q-px-sm"
+                    ):
+                        with ui.column().classes("gap-0 min-w-0 grow"):
+                            ui.label(provider_name).classes("text-sm")
+                            ui.label(endpoint_url).classes(
+                                "text-xs llmt-muted ellipsis"
+                            )
+                        ui.button(
+                            icon="content_copy",
+                            on_click=lambda _event, url=endpoint_url: copy_text(url),
+                        ).props("flat round")
+
     def regenerate_last() -> None:
         users = [
             entry
@@ -2612,16 +2650,20 @@ def build_assistant_ui(  # noqa: C901
                 [strategy.value for strategy in ProviderModeStrategy],
                 label="Provider mode",
             ).classes("w-full")
-            base_url_input = (
-                ui.select(
-                    base_url_options(controller.active_record.runtime),
-                    label="Base URL",
-                    with_input=True,
-                    new_value_mode="add-unique",
+            with ui.row().classes("w-full items-end gap-2 no-wrap"):
+                base_url_input = (
+                    ui.select(
+                        base_url_options(controller.active_record.runtime),
+                        label="Base URL",
+                        with_input=True,
+                        new_value_mode="add-unique",
+                    )
+                    .props("clearable")
+                    .classes("grow")
                 )
-                .props("clearable")
-                .classes("w-full")
-            )
+                with base_url_input:
+                    ui.tooltip(_provider_base_url_help_text()).props("delay=700")
+                render_provider_endpoint_help_button()
             with ui.row().classes("w-full items-end gap-2 no-wrap"):
                 provider_api_key_input = (
                     ui.input(
@@ -2742,16 +2784,20 @@ def build_assistant_ui(  # noqa: C901
             NICEGUI_PROVIDER_OPTIONS,
             label="Provider",
         ).classes("w-full")
-        base_url_quick_input = (
-            ui.select(
-                base_url_options(controller.active_record.runtime),
-                label="Base URL",
-                with_input=True,
-                new_value_mode="add-unique",
+        with ui.row().classes("w-full items-end gap-2 no-wrap"):
+            base_url_quick_input = (
+                ui.select(
+                    base_url_options(controller.active_record.runtime),
+                    label="Base URL",
+                    with_input=True,
+                    new_value_mode="add-unique",
+                )
+                .props("clearable")
+                .classes("grow")
             )
-            .props("clearable")
-            .classes("w-full")
-        )
+            with base_url_quick_input:
+                ui.tooltip(_provider_base_url_help_text()).props("delay=700")
+            render_provider_endpoint_help_button()
         with ui.row().classes("w-full items-end gap-2 no-wrap"):
             provider_api_key_quick_input = (
                 ui.input(

@@ -35,6 +35,8 @@ from llm_tools.apps.assistant_app.app import (
     _parse_information_security_categories,
     _protection_corpus_readiness_text,
     _provider_api_key_env_var,
+    _provider_base_url_help_text,
+    _provider_endpoint_menu_rows,
     _runtime_summary_parts,
     _runtime_summary_text,
     _sidebar_container_classes,
@@ -67,6 +69,9 @@ from llm_tools.apps.assistant_app.models import (
     NiceGUIHostedConfig,
     NiceGUIPreferences,
     NiceGUIRuntimeConfig,
+)
+from llm_tools.apps.assistant_app.provider_endpoints import (
+    COMMON_OPENAI_COMPATIBLE_ENDPOINTS,
 )
 from llm_tools.apps.assistant_app.store import SQLiteNiceGUIChatStore
 from llm_tools.apps.assistant_config import AssistantConfig
@@ -560,6 +565,22 @@ def test_model_discovery_payload_helpers() -> None:
     assert _extract_model_names_from_models_payload({"data": ["plain-model"]}) == [
         "plain-model"
     ]
+
+
+def test_common_provider_endpoint_catalog_is_local_and_copyable() -> None:
+    rows = _provider_endpoint_menu_rows()
+    names = {name for name, _url in rows}
+    urls = {url for _name, url in rows}
+
+    assert {"OpenAI", "xAI", "Gemini", "Claude"}.issubset(names)
+    assert "https://api.openai.com/v1" in urls
+    assert "https://api.x.ai/v1" in urls
+    assert "https://generativelanguage.googleapis.com/v1beta/openai/" in urls
+    assert "https://api.anthropic.com/v1/" in urls
+    assert all(name.strip() for name, _url in rows)
+    assert all(url.startswith("https://") for _name, url in rows)
+    assert len(rows) == len(COMMON_OPENAI_COMPATIBLE_ENDPOINTS)
+    assert "OpenAI-compatible base URL" in _provider_base_url_help_text()
 
 
 def test_model_discovery_fetches_openai_compatible_models(

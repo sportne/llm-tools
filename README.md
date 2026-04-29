@@ -231,6 +231,11 @@ proprietary-protection corpus paths that can be saved as part of exported
 config. The harness CLI remains an operational surface over the public
 `harness_api` session service.
 
+The assistant settings include a local, copyable list of common
+OpenAI-compatible provider Base URLs. Deployment-specific builds can tailor that
+list in `src/llm_tools/apps/assistant_app/provider_endpoints.py`; the app does
+not fetch endpoint suggestions at runtime.
+
 ## Dependency Surface
 
 The base package currently includes:
