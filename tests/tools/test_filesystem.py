@@ -17,7 +17,12 @@ from llm_tools.tool_api import (
     ToolRegistry,
     ToolRuntime,
 )
-from llm_tools.tools.filesystem import ListDirectoryTool, ReadFileTool, WriteFileTool
+from llm_tools.tools.filesystem import (
+    FindFilesTool,
+    ListDirectoryTool,
+    ReadFileTool,
+    WriteFileTool,
+)
 from llm_tools.tools.filesystem import tools as filesystem_tools
 
 
@@ -60,6 +65,16 @@ def _invoke_list(context: ToolContext, **arguments: object):
     )
     assert result.ok is True, result.error
     return ListDirectoryTool.output_model.model_validate(result.output), result
+
+
+def test_find_files_model_facing_guidance_explains_recursive_globs() -> None:
+    schema = FindFilesTool.input_model.model_json_schema()
+
+    assert "**/*.py" in FindFilesTool.spec.description
+    assert "*.py" in FindFilesTool.spec.description
+    assert "**/*.py" in schema["properties"]["pattern"]["description"]
+    assert "search root" in schema["properties"]["pattern"]["description"]
+    assert "Hidden paths are excluded" in FindFilesTool.spec.description
 
 
 def test_read_file_tool_reads_text_files(tmp_path: str) -> None:

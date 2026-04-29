@@ -82,6 +82,7 @@ def test_path_helpers_cover_matching_and_resolution(tmp_path: Path) -> None:
         normalize_requested_path(" ")
     assert normalize_required_value(" x ", field_name="demo") == "x"
     assert normalize_required_pattern(" **/*.py ") == "**/*.py"
+    assert matches_path_glob(Path("src/nested/app.py"), "*.py") is False
     assert matches_path_glob(Path("src/nested/app.py"), "**/*.py") is True
     assert matches_path_glob(Path("src/app.py"), "src/*.py") is True
     assert matches_path_glob(Path("src/app.py"), "*.md") is False
