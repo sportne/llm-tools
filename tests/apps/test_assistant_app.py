@@ -41,6 +41,7 @@ from llm_tools.apps.assistant_app.app import (
     _runtime_summary_parts,
     _runtime_summary_text,
     _selected_tool_groups,
+    _session_token_estimate_text,
     _sidebar_container_classes,
     _workbench_container_classes,
     build_assistant_ui,
@@ -84,6 +85,7 @@ from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import SideEffectClass, ToolInvocationRequest
 from llm_tools.workflow_api import (
     ChatMessage,
+    ChatTokenUsage,
     ChatWorkflowInspectorEvent,
     ChatWorkflowResultEvent,
     ChatWorkflowStatusEvent,
@@ -427,8 +429,25 @@ def test_composer_runtime_helpers() -> None:
         ("model", "model-a"),
         ("mode", "auto"),
         ("workspace", "/repo"),
+        ("tokens", "~0 tokens"),
     ]
-    assert _runtime_summary_text(runtime) == "ollama | model-a | auto | /repo"
+    token_usage = ChatTokenUsage(input_tokens=10, output_tokens=5, session_tokens=1234)
+    assert _session_token_estimate_text(token_usage) == "~1,234 tokens"
+    assert _runtime_summary_parts(runtime, token_usage)[-1] == (
+        "tokens",
+        "~1,234 tokens",
+    )
+    assert (
+        _runtime_summary_text(runtime, token_usage)
+        == "ollama | model-a | auto | /repo | ~1,234 tokens"
+    )
+    hidden_token_runtime = runtime.model_copy(update={"show_token_usage": False})
+    assert _runtime_summary_parts(hidden_token_runtime, token_usage) == [
+        ("provider", "ollama"),
+        ("model", "model-a"),
+        ("mode", "auto"),
+        ("workspace", "/repo"),
+    ]
     assert _composer_action_icon(busy=False) == "send"
     assert _composer_action_icon(busy=True) == "stop"
     assert _format_workbench_duration(None) == "duration unknown"

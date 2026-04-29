@@ -51,6 +51,7 @@ from llm_tools.apps.chat_config import ProviderPreset
 from llm_tools.llm_providers import ProviderModeStrategy
 from llm_tools.tool_api import SideEffectClass
 from llm_tools.workflow_api import (
+    ChatTokenUsage,
     ProtectionConfig,
     ProtectionPendingPrompt,
     inspect_protection_corpus,
@@ -179,20 +180,47 @@ def _workbench_container_classes(*, open: bool = True) -> str:
     return classes
 
 
-def _runtime_summary_parts(runtime: NiceGUIRuntimeConfig) -> list[tuple[str, str]]:
+def _session_token_estimate_text(token_usage: ChatTokenUsage | None) -> str:
+    """Return compact session token usage for the composer summary."""
+    token_count = 0
+    if token_usage is not None:
+        usage_count = (
+            token_usage.session_tokens
+            if token_usage.session_tokens is not None
+            else token_usage.total_tokens
+        )
+        if usage_count is None:
+            token_count = token_usage.input_tokens + token_usage.output_tokens
+        else:
+            token_count = usage_count
+    return f"~{token_count:,} tokens"
+
+
+def _runtime_summary_parts(
+    runtime: NiceGUIRuntimeConfig,
+    token_usage: ChatTokenUsage | None = None,
+) -> list[tuple[str, str]]:
     """Return compact clickable runtime metadata labels."""
     root = runtime.root_path or "No workspace"
-    return [
+    parts = [
         ("provider", runtime.provider.value),
         ("model", runtime.model_name),
         ("mode", runtime.provider_mode_strategy.value),
         ("workspace", root),
     ]
+    if runtime.show_token_usage:
+        parts.append(("tokens", _session_token_estimate_text(token_usage)))
+    return parts
 
 
-def _runtime_summary_text(runtime: NiceGUIRuntimeConfig) -> str:
+def _runtime_summary_text(
+    runtime: NiceGUIRuntimeConfig,
+    token_usage: ChatTokenUsage | None = None,
+) -> str:
     """Return compact runtime metadata for tests and text fallbacks."""
-    return " | ".join(value for _label, value in _runtime_summary_parts(runtime))
+    return " | ".join(
+        value for _label, value in _runtime_summary_parts(runtime, token_usage)
+    )
 
 
 def _composer_action_icon(*, busy: bool) -> str:
@@ -1439,12 +1467,20 @@ def build_assistant_ui(  # noqa: C901
         else:
             open_settings_dialog()
 
-    def render_runtime_summary(runtime: NiceGUIRuntimeConfig) -> None:
+    def render_runtime_summary(
+        runtime: NiceGUIRuntimeConfig,
+        token_usage: ChatTokenUsage | None,
+    ) -> None:
         composer_meta_row.clear()
         with composer_meta_row:
-            for index, (label, value) in enumerate(_runtime_summary_parts(runtime)):
+            for index, (label, value) in enumerate(
+                _runtime_summary_parts(runtime, token_usage)
+            ):
                 if index:
                     ui.label("|").classes("text-xs llmt-muted")
+                if label == "tokens":
+                    ui.label(value).classes("text-xs llmt-muted llmt-runtime-chip")
+                    continue
                 ui.button(
                     value,
                     on_click=lambda _event, part=label: open_runtime_part_dialog(part),
@@ -1836,7 +1872,7 @@ def build_assistant_ui(  # noqa: C901
         status_chip.set_text(turn_state.status_text or "ready")
         render_selected_tools()
         render_tool_menu()
-        render_runtime_summary(runtime)
+        render_runtime_summary(runtime, controller.active_record.token_usage)
         composer_action_button.props(
             "icon="
             + _composer_action_icon(busy=turn_state.busy)
