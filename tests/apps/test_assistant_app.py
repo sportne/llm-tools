@@ -28,6 +28,7 @@ from llm_tools.apps.assistant_app.app import (
     _first_nonempty_text,
     _format_information_security_label,
     _format_information_security_level,
+    _format_transcript_time,
     _format_workbench_duration,
     _is_admin_user,
     _is_tool_url_setting,
@@ -519,6 +520,9 @@ def test_workbench_inspector_titles_are_directional() -> None:
     assert _provider_api_key_env_var(ProviderPreset.OLLAMA, None) == ""
     assert _is_tool_url_setting("BITBUCKET_BASE_URL") is True
     assert _is_tool_url_setting("GITLAB_API_TOKEN") is False
+    assert _format_transcript_time(None) == ""
+    assert _format_transcript_time("not a timestamp") == ""
+    assert _format_transcript_time("2026-04-26T10:05:02") == "10:05"
 
 
 def test_controller_helper_edges(tmp_path: Path) -> None:

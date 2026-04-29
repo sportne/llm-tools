@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -224,6 +225,19 @@ def _format_workbench_duration(seconds: float | None) -> str:
         return f"{seconds:.1f} s"
     minutes, remainder = divmod(seconds, 60.0)
     return f"{int(minutes)}m {remainder:.0f}s"
+
+
+def _format_transcript_time(created_at: str | None) -> str:
+    """Return compact local time text for one transcript entry."""
+    if not created_at:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone()
+    return parsed.strftime("%H:%M")
 
 
 def _parse_information_security_categories(value: str) -> list[str]:
@@ -1858,7 +1872,11 @@ def build_assistant_ui(  # noqa: C901
                     ui.row().classes("w-full q-px-xl q-py-sm"),
                     ui.column().classes(message_class),
                 ):
-                    ui.label(entry.role.title()).classes("text-xs llmt-muted")
+                    with ui.row().classes("items-baseline gap-2"):
+                        ui.label(entry.role.title()).classes("text-xs llmt-muted")
+                        posted_at = _format_transcript_time(entry.created_at)
+                        if posted_at:
+                            ui.label(posted_at).classes("text-xs llmt-muted")
                     ui.markdown(entry.text)
                     if entry.final_response and entry.final_response.citations:
                         citations = ", ".join(
