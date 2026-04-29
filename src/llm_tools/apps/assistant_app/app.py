@@ -334,6 +334,19 @@ def _selected_tool_icon(capability: AssistantToolCapability) -> str:
     return "check" if capability.exposed_to_model else "block"
 
 
+def _selected_tool_groups(
+    capabilities: Sequence[AssistantToolCapability],
+) -> list[tuple[str, list[AssistantToolCapability]]]:
+    """Return selected tools grouped by assistant-facing source."""
+    grouped: dict[str, list[AssistantToolCapability]] = {}
+    for capability in capabilities:
+        grouped.setdefault(capability.group, []).append(capability)
+    return [
+        (group_name, sorted(group_items, key=lambda item: item.tool_name))
+        for group_name, group_items in sorted(grouped.items())
+    ]
+
+
 def _is_tool_url_setting(name: str) -> bool:
     """Return whether a required tool value is a non-secret URL."""
     normalized = name.strip().upper()
@@ -1656,19 +1669,21 @@ def build_assistant_ui(  # noqa: C901
                 ui.tooltip(tooltip).props("delay=700")
             if selected:
                 ui.label("Tools").classes("text-xs llmt-muted")
-                for capability in selected:
-                    button = ui.button(
-                        capability.tool_name,
-                        icon=_selected_tool_icon(capability),
-                        on_click=lambda _event, name=capability.tool_name: (
-                            toggle_runtime_tool(name)
-                        ),
-                    ).props("flat dense no-caps")
-                    button.classes(_selected_tool_chip_classes(capability))
-                    with button:
-                        ui.tooltip(_tool_capability_tooltip(capability)).props(
-                            "delay=700"
-                        )
+                for group_name, capabilities in _selected_tool_groups(selected):
+                    ui.label(group_name).classes("text-xs llmt-muted")
+                    for capability in capabilities:
+                        button = ui.button(
+                            capability.tool_name,
+                            icon=_selected_tool_icon(capability),
+                            on_click=lambda _event, name=capability.tool_name: (
+                                toggle_runtime_tool(name)
+                            ),
+                        ).props("flat dense no-caps")
+                        button.classes(_selected_tool_chip_classes(capability))
+                        with button:
+                            ui.tooltip(_tool_capability_tooltip(capability)).props(
+                                "delay=700"
+                            )
 
     def set_interaction_mode(mode: NiceGUIInteractionMode) -> None:
         if controller.set_interaction_mode(mode):

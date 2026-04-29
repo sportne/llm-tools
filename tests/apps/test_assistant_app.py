@@ -39,6 +39,7 @@ from llm_tools.apps.assistant_app.app import (
     _provider_endpoint_menu_rows,
     _runtime_summary_parts,
     _runtime_summary_text,
+    _selected_tool_groups,
     _sidebar_container_classes,
     _workbench_container_classes,
     build_assistant_ui,
@@ -75,6 +76,7 @@ from llm_tools.apps.assistant_app.provider_endpoints import (
 )
 from llm_tools.apps.assistant_app.store import SQLiteNiceGUIChatStore
 from llm_tools.apps.assistant_config import AssistantConfig
+from llm_tools.apps.assistant_tool_capabilities import AssistantToolCapability
 from llm_tools.apps.chat_config import ProviderPreset
 from llm_tools.harness_api import ApprovalResolution
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
@@ -541,6 +543,43 @@ def test_controller_helper_edges(tmp_path: Path) -> None:
     assert _interaction_protocol(_ProtocolProvider(prompt_tools=True)) == "prompt_tools"
     assert _interaction_protocol(_ProtocolProvider(staged_schema=True)) == "staged_json"
     assert _interaction_protocol(_ProtocolProvider()) == "native_tools"
+
+
+def test_selected_tool_groups_are_source_sorted() -> None:
+    read_file = AssistantToolCapability(
+        tool_name="read_file",
+        group="Local Files",
+        enabled=True,
+        exposed_to_model=True,
+        status="available",
+        approval_gate={
+            "required": False,
+            "side_effects": SideEffectClass.LOCAL_READ,
+        },
+        side_effects=SideEffectClass.LOCAL_READ,
+    )
+    search_jira = AssistantToolCapability(
+        tool_name="search_jira",
+        group="Jira",
+        enabled=True,
+        exposed_to_model=True,
+        status="available",
+        approval_gate={
+            "required": False,
+            "side_effects": SideEffectClass.EXTERNAL_READ,
+        },
+        side_effects=SideEffectClass.EXTERNAL_READ,
+    )
+    list_directory = read_file.model_copy(update={"tool_name": "list_directory"})
+
+    grouped = _selected_tool_groups([read_file, search_jira, list_directory])
+
+    assert [
+        (group, [item.tool_name for item in items]) for group, items in grouped
+    ] == [
+        ("Jira", ["search_jira"]),
+        ("Local Files", ["list_directory", "read_file"]),
+    ]
 
 
 def test_model_discovery_payload_helpers() -> None:
