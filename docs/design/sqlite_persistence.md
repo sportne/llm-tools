@@ -24,6 +24,13 @@ The store uses synchronous SQLAlchemy with one short-lived database transaction
 per operation. SQLite foreign keys are enabled and WAL is requested for normal
 file-backed databases.
 
+The database path must be treated as local to the running assistant server.
+Multiple local app instances on different machines must not share one SQLite
+database file through a network drive. SQLite WAL coordination depends on local
+filesystem semantics, and this app does not implement a cross-machine database
+proxy or conflict-resolution layer. Multi-user deployments should run one
+assistant server process with the database on storage local to that server.
+
 The database file is always encrypted with SQLCipher. The app creates or reads
 the SQLCipher key from:
 

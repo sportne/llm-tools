@@ -92,6 +92,12 @@ files as server secrets and back them up separately from normal database copies:
 ~/.llm-tools/assistant/nicegui/hosted/user-kek.key
 ```
 
+Do not use a network-drive SQLite file as a shared live database for multiple
+local assistant instances on different machines. SQLite WAL and file locking are
+not a supported cross-machine concurrency boundary for this app, and the app has
+no conflict-resolution layer for concurrent session edits. Multi-user
+deployments should centralize database access in one assistant server process.
+
 ### NiceGUI Auth Mode
 
 The default assistant app uses local username/password authentication even on

@@ -96,6 +96,12 @@ Direct `--tls-certfile` and `--tls-keyfile` are supported for short-term or
 self-signed certificate testing. Non-loopback HTTP can run, but secret entry is
 blocked unless `--allow-insecure-hosted-secrets` is passed.
 
+The supported multi-user shape is one assistant server process with browser
+clients. Running separate local app instances on multiple machines against a
+shared SQLite file on a network drive is not supported. If the database is
+remote from users, keep SQLite access on the server side rather than exposing
+the database file as shared storage.
+
 Provider API keys and tool credentials are not read from environment variables in
 hosted mode. They are typed into the app and held in server memory for the
 current browser/app session only, matching local loopback mode. Non-secret URLs

@@ -236,6 +236,13 @@ OpenAI-compatible provider Base URLs. Deployment-specific builds can tailor that
 list in `src/llm_tools/apps/assistant_app/provider_endpoints.py`; the app does
 not fetch endpoint suggestions at runtime.
 
+Do not run multiple local assistant app instances on different machines against
+the same SQLite database file on a network drive. The assistant uses
+SQLCipher-backed SQLite with WAL-style local file coordination, which is not a
+supported multi-machine database deployment model. For multi-user use, run one
+assistant server with its database on storage local to that server and have users
+connect through the browser.
+
 ## Dependency Surface
 
 The base package currently includes:
