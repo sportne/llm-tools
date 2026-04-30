@@ -77,11 +77,16 @@ def test_path_helpers_cover_matching_and_resolution(tmp_path: Path) -> None:
 
     assert matches_patterns(Path("src/app.py"), ["src/*.py"]) is True
     assert normalize_requested_path(" src/app.py ") == "src/app.py"
+    assert normalize_requested_path("src\\app.py") == "src/app.py"
     assert normalize_requested_path(".") == "."
     with pytest.raises(ValueError):
         normalize_requested_path(" ")
+    for absolute_path in ("C:\\repo\\app.py", "C:/repo/app.py", "C:repo/app.py"):
+        with pytest.raises(ValueError, match="relative"):
+            normalize_requested_path(absolute_path)
     assert normalize_required_value(" x ", field_name="demo") == "x"
     assert normalize_required_pattern(" **/*.py ") == "**/*.py"
+    assert normalize_required_pattern("src\\*.py") == "src/*.py"
     assert matches_path_glob(Path("src/nested/app.py"), "*.py") is False
     assert matches_path_glob(Path("src/nested/app.py"), "**/*.py") is True
     assert matches_path_glob(Path("src/app.py"), "src/*.py") is True
@@ -114,6 +119,8 @@ def test_path_helpers_cover_matching_and_resolution(tmp_path: Path) -> None:
     assert resolve_file_path(tmp_path, "src/app.py").resolved_path == "src/app.py"
     with pytest.raises(ValueError):
         resolve_directory_path(tmp_path, str((tmp_path / "src").resolve()))
+    with pytest.raises(ValueError):
+        resolve_file_path(tmp_path, "C:/repo/app.py")
     with pytest.raises(ValueError):
         resolve_directory_path(tmp_path, "missing")
     with pytest.raises(ValueError):

@@ -21,6 +21,7 @@ from llm_tools.apps.assistant_app.models import (
     NiceGUITranscriptEntry,
     NiceGUIWorkbenchItem,
 )
+from llm_tools.apps.assistant_app.paths import expanded_path_text
 from llm_tools.apps.assistant_app.store import (
     NICEGUI_DB_ENV_VAR,
     SQLiteNiceGUIChatStore,
@@ -70,6 +71,45 @@ def test_default_db_path_prefers_env_then_pointer(
     monkeypatch.setenv(NICEGUI_DB_ENV_VAR, str(env_path))
 
     assert default_db_path() == env_path
+
+
+def test_assistant_store_paths_expand_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from llm_tools.apps.assistant_app import store as store_module
+
+    home = tmp_path / "home"
+    pointer_path = tmp_path / "pointer.txt"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(store_module, "_DB_POINTER_PATH", pointer_path)
+    monkeypatch.delenv(NICEGUI_DB_ENV_VAR, raising=False)
+
+    remember_default_db_path("~/chosen/chat.sqlite3")
+
+    assert default_db_path() == home / "chosen" / "chat.sqlite3"
+    assert expanded_path_text("~/chosen/chat.sqlite3") == str(
+        home / "chosen" / "chat.sqlite3"
+    )
+
+    store = SQLiteNiceGUIChatStore(
+        "~/state/chat.sqlite3",
+        db_key_file="~/keys/db.key",
+        user_key_file="~/keys/user-kek.key",
+    )
+    assert store.db_path == home / "state" / "chat.sqlite3"
+    assert store.db_key_file == home / "keys" / "db.key"
+    assert store.user_key_file == home / "keys" / "user-kek.key"
+
+    startup = validate_hosted_startup(
+        auth_mode="local",
+        host="127.0.0.1",
+        public_base_url=None,
+        tls_certfile=None,
+        tls_keyfile=None,
+        allow_insecure_hosted_secrets=False,
+        secret_key_path=Path("~/keys/app.secret"),
+    )
+    assert startup.config.secret_key_path == str(home / "keys" / "app.secret")
 
 
 def test_store_initializes_and_round_trips_session(tmp_path: Path) -> None:

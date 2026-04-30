@@ -34,9 +34,19 @@ src/llm_tools/
 
 ## Setup
 
+Linux/macOS or WSL:
+
 ```bash
 make setup-venv
 make install-dev
+```
+
+Native Windows PowerShell:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python -m pip install --upgrade pip
+.\.venv\Scripts\python -m pip install -e ".[dev]"
 ```
 
 The default development environment is shared across the main checkout and any
@@ -50,6 +60,8 @@ development and CI.
 
 ## Development
 
+Linux/macOS or WSL:
+
 ```bash
 make format
 make lint
@@ -57,6 +69,16 @@ make typecheck
 make test
 make coverage
 make package
+```
+
+Native Windows PowerShell equivalents:
+
+```powershell
+.\.venv\Scripts\python -m ruff format src tests
+.\.venv\Scripts\python -m ruff check src tests
+.\.venv\Scripts\python -m mypy src
+.\.venv\Scripts\python -m pytest
+.\.venv\Scripts\python -m build
 ```
 
 ## Main Entry Points
@@ -200,6 +222,12 @@ Launch the LLM Tools Assistant:
 
 ```bash
 python -m llm_tools.apps.assistant_app <directory>
+```
+
+Native Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\llm-tools-assistant.exe <directory>
 ```
 
 or with an optional reusable YAML preset:

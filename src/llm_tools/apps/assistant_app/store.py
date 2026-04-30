@@ -8,7 +8,6 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -32,7 +31,7 @@ from sqlalchemy import (
     select,
     update,
 )
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import URL, Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from llm_tools.apps.assistant_app.crypto import (
@@ -53,6 +52,7 @@ from llm_tools.apps.assistant_app.models import (
     NiceGUIUserSession,
     NiceGUIWorkbenchItem,
 )
+from llm_tools.apps.assistant_app.paths import expand_app_path
 from llm_tools.harness_api.replay import StoredHarnessArtifacts
 from llm_tools.harness_api.store import (
     HarnessStateConflictError,
@@ -224,17 +224,17 @@ def default_db_path() -> Path:
     """Return the configured NiceGUI SQLite database path."""
     configured = os.getenv(NICEGUI_DB_ENV_VAR)
     if configured and configured.strip():
-        return Path(configured).expanduser()
+        return expand_app_path(configured)
     with suppress(OSError):
         configured_path = _DB_POINTER_PATH.read_text(encoding="utf-8").strip()
         if configured_path:
-            return Path(configured_path).expanduser()
+            return expand_app_path(configured_path)
     return _DEFAULT_DB_PATH
 
 
 def remember_default_db_path(path: Path | str) -> None:
     """Persist the preferred NiceGUI SQLite database path for future launches."""
-    db_path = Path(path).expanduser()
+    db_path = expand_app_path(path)
     _DB_POINTER_PATH.parent.mkdir(parents=True, exist_ok=True)
     _DB_POINTER_PATH.write_text(str(db_path), encoding="utf-8")
 
@@ -244,10 +244,11 @@ def create_sqlcipher_engine(
 ) -> Engine:
     """Create a SQLCipher-backed SQLite engine with app defaults."""
     path_text = str(path)
-    key_path = Path(db_key_file).expanduser() if db_key_file else _DEFAULT_DB_KEY_PATH
-    db_path = Path(path_text).expanduser()
+    is_memory = path_text == ":memory:"
+    key_path = expand_app_path(db_key_file) if db_key_file else _DEFAULT_DB_KEY_PATH
+    db_path = Path(path_text) if is_memory else expand_app_path(path_text)
     existing_database = (
-        path_text != ":memory:" and db_path.exists() and db_path.stat().st_size > 0
+        not is_memory and db_path.exists() and db_path.stat().st_size > 0
     )
     try:
         passphrase = ensure_text_key_file(key_path, create=not existing_database)
@@ -256,19 +257,18 @@ def create_sqlcipher_engine(
             f"Cannot open existing encrypted NiceGUI database without key file: {key_path}"
         ) from exc
     try:
-        import sqlcipher3  # type: ignore[import-untyped]
+        import sqlcipher3
     except ImportError as exc:  # pragma: no cover - dependency guard
         raise NiceGUIChatStoreError(
-            "NiceGUI encrypted persistence requires sqlcipher3-binary."
+            "NiceGUI encrypted persistence requires sqlcipher3-wheels."
         ) from exc
-    quoted_passphrase = quote(passphrase, safe="")
-    url = (
-        f"sqlite+pysqlcipher://:{quoted_passphrase}@/:memory:"
-        if path_text == ":memory:"
-        else f"sqlite+pysqlcipher://:{quoted_passphrase}@/{path_text}"
+    url = URL.create(
+        "sqlite+pysqlcipher",
+        password=passphrase,
+        database=":memory:" if is_memory else str(db_path),
     )
-    if path_text != ":memory:":
-        Path(path_text).expanduser().parent.mkdir(parents=True, exist_ok=True)
+    if not is_memory:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(
         url,
         module=sqlcipher3,
@@ -281,7 +281,7 @@ def create_sqlcipher_engine(
         cursor = dbapi_connection.cursor()
         cursor.execute("SELECT count(*) FROM sqlite_master")
         cursor.execute("PRAGMA foreign_keys=ON")
-        if path_text != ":memory:":
+        if not is_memory:
             with suppress(Exception):
                 cursor.execute("PRAGMA journal_mode=WAL")
         cursor.close()
@@ -387,15 +387,13 @@ class SQLiteNiceGUIChatStore:
         user_key_file: Path | str | None = None,
     ) -> None:
         self.db_path = (
-            Path(db_path).expanduser() if db_path is not None else default_db_path()
+            expand_app_path(db_path) if db_path is not None else default_db_path()
         )
         self.db_key_file = (
-            Path(db_key_file).expanduser() if db_key_file else _DEFAULT_DB_KEY_PATH
+            expand_app_path(db_key_file) if db_key_file else _DEFAULT_DB_KEY_PATH
         )
         self.user_key_file = (
-            Path(user_key_file).expanduser()
-            if user_key_file
-            else _DEFAULT_USER_KEY_PATH
+            expand_app_path(user_key_file) if user_key_file else _DEFAULT_USER_KEY_PATH
         )
         self._data_key_cache: dict[str, bytes] = {}
         self.engine = create_sqlcipher_engine(

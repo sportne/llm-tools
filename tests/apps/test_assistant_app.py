@@ -16,6 +16,7 @@ from llm_tools.apps.assistant_app.app import (
     NICEGUI_APPROVAL_LABELS,
     NICEGUI_APPROVAL_OPTIONS,
     NICEGUI_PROVIDER_OPTIONS,
+    _available_windows_drive_roots,
     _branding_favicon_href,
     _branding_favicon_javascript,
     _branding_icon_uses_material,
@@ -643,6 +644,14 @@ def test_common_provider_endpoint_catalog_is_local_and_copyable() -> None:
     assert all(url.startswith("https://") for _name, url in rows)
     assert len(rows) == len(COMMON_OPENAI_COMPATIBLE_ENDPOINTS)
     assert "OpenAI-compatible base URL" in _provider_base_url_help_text()
+
+
+def test_available_windows_drive_roots_uses_probe() -> None:
+    roots = _available_windows_drive_roots(
+        path_exists=lambda path: str(path) in {"C:\\", "Z:\\"}
+    )
+
+    assert [str(path) for path in roots] == ["C:\\", "Z:\\"]
 
 
 def test_model_discovery_fetches_openai_compatible_models(

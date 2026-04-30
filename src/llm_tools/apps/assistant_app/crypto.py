@@ -11,6 +11,8 @@ from pathlib import Path
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from llm_tools.apps.assistant_app.paths import expand_app_path
+
 _ENVELOPE_VERSION = 1
 _ALGORITHM = "AES-256-GCM"
 
@@ -31,7 +33,7 @@ def ensure_text_key_file(
     path: Path, *, token_bytes: int = 32, create: bool = True
 ) -> str:
     """Return a persistent text key, creating it with restrictive permissions."""
-    path = path.expanduser()
+    path = expand_app_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         value = path.read_text(encoding="utf-8").strip()
@@ -48,7 +50,7 @@ def ensure_text_key_file(
 
 def ensure_binary_key_file(path: Path, *, create: bool = True) -> bytes:
     """Return a persistent 256-bit key, creating it with restrictive permissions."""
-    path = path.expanduser()
+    path = expand_app_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         encoded = path.read_text(encoding="utf-8").strip()
@@ -69,7 +71,7 @@ class CryptoManager:
     """Authenticated envelope encryption for per-user persisted fields."""
 
     def __init__(self, user_key_file: Path | str, *, create_key: bool = True) -> None:
-        self.key_path = Path(user_key_file).expanduser()
+        self.key_path = expand_app_path(user_key_file)
         self._kek = ensure_binary_key_file(self.key_path, create=create_key)
 
     def new_data_key(self) -> bytes:

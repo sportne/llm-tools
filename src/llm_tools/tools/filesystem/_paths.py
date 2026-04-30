@@ -38,6 +38,9 @@ def normalize_requested_path(path: str) -> str:
     cleaned = path.strip()
     if not cleaned:
         raise ValueError("Requested tool path must not be empty.")
+    if _looks_like_windows_rooted_path(cleaned):
+        raise ValueError("Tool paths must be relative to the configured root.")
+    cleaned = cleaned.replace("\\", "/")
     if cleaned == ".":
         return "."
     return PurePosixPath(cleaned).as_posix()
@@ -54,8 +57,17 @@ def normalize_required_value(value: str, *, field_name: str) -> str:
 def normalize_required_pattern(pattern: str) -> str:
     """Return a stable non-empty file glob pattern."""
     return PurePosixPath(
-        normalize_required_value(pattern, field_name="find_files pattern")
+        normalize_required_value(pattern, field_name="find_files pattern").replace(
+            "\\", "/"
+        )
     ).as_posix()
+
+
+def _looks_like_windows_rooted_path(path: str) -> bool:
+    """Return whether a request uses a Windows drive or UNC root."""
+    if len(path) >= 2 and path[0].isalpha() and path[1] == ":":
+        return True
+    return path.startswith(("\\\\", "//"))
 
 
 def matches_path_glob(relative_path: Path, pattern: str) -> bool:

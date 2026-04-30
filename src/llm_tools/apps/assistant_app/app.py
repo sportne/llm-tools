@@ -6,7 +6,7 @@ import argparse
 import json
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -33,6 +33,7 @@ from llm_tools.apps.assistant_app.models import (
     NiceGUIRuntimeConfig,
     NiceGUIUser,
 )
+from llm_tools.apps.assistant_app.paths import expand_app_path, expanded_path_text
 from llm_tools.apps.assistant_app.provider_endpoints import (
     COMMON_OPENAI_COMPATIBLE_ENDPOINTS,
 )
@@ -306,7 +307,20 @@ def _default_protection_corrections_path(corpus_directory: str) -> str:
     cleaned = corpus_directory.strip()
     if not cleaned:
         return ""
-    return str(Path(cleaned).expanduser() / PROTECTION_CORRECTIONS_FILENAME)
+    return str(expand_app_path(cleaned) / PROTECTION_CORRECTIONS_FILENAME)
+
+
+def _available_windows_drive_roots(
+    path_exists: Callable[[Path], bool] | None = None,
+) -> list[Path]:
+    """Return currently available Windows drive roots."""
+    exists = path_exists or (lambda path: path.exists())
+    roots: list[Path] = []
+    for codepoint in range(ord("A"), ord("Z") + 1):
+        root = Path(f"{chr(codepoint)}:\\")
+        if exists(root):
+            roots.append(root)
+    return roots
 
 
 def _protection_corpus_readiness_text(config: ProtectionConfig) -> str:
@@ -571,8 +585,8 @@ def resolve_root_argument(
         default_root = config.workspace.default_root
         if default_root is None:
             return None
-        return Path(default_root).expanduser().resolve()
-    return Path(candidate).expanduser().resolve()
+        return expand_app_path(default_root).resolve()
+    return expand_app_path(candidate).resolve()
 
 
 def run_assistant_app(
@@ -596,9 +610,11 @@ def run_assistant_app(
     from nicegui import ui
 
     store = SQLiteNiceGUIChatStore(
-        db_path or default_db_path(),
-        db_key_file=db_key_file,
-        user_key_file=user_key_file,
+        expand_app_path(db_path) if db_path is not None else default_db_path(),
+        db_key_file=expand_app_path(db_key_file) if db_key_file is not None else None,
+        user_key_file=(
+            expand_app_path(user_key_file) if user_key_file is not None else None
+        ),
     )
     store.initialize()
     branding = store.load_admin_settings().branding
@@ -616,7 +632,9 @@ def run_assistant_app(
     storage_secret: str | None = None
     auth_provider: LocalAuthProvider | None = None
     if startup.config.auth_mode == "local":
-        storage_secret = ensure_secret_file(Path(str(startup.config.secret_key_path)))
+        storage_secret = ensure_secret_file(
+            expand_app_path(str(startup.config.secret_key_path))
+        )
         auth_provider = LocalAuthProvider(store)
 
         @ui.page("/")
@@ -2278,7 +2296,10 @@ def build_assistant_ui(  # noqa: C901
             for name, url_input in tool_url_inputs.items()
             if str(url_input.value or "").strip()
         }
-        runtime.root_path = str(workspace_input.value or "").strip() or None
+        workspace_path = str(workspace_input.value or "").strip()
+        runtime.root_path = (
+            expanded_path_text(workspace_path) if workspace_path else None
+        )
         requested_db_path = str(database_path_input.value or "").strip()
         runtime.allow_network = bool(allow_network_switch.value)
         runtime.allow_filesystem = bool(allow_filesystem_switch.value)
@@ -2293,9 +2314,9 @@ def build_assistant_ui(  # noqa: C901
         if (
             controller.current_user is None
             and requested_db_path
-            and Path(requested_db_path).expanduser() != controller.store.db_path
+            and expand_app_path(requested_db_path) != controller.store.db_path
         ):
-            controller.switch_database(Path(requested_db_path).expanduser())
+            controller.switch_database(expand_app_path(requested_db_path))
         else:
             controller.save_active_session()
         controller.save_preferences()
@@ -2307,8 +2328,14 @@ def build_assistant_ui(  # noqa: C901
 
     def apply_information_security_settings() -> None:
         protection = active_runtime().protection
-        corpus_directory = str(protection_corpus_input.value or "").strip()
-        corrections_path = str(protection_corrections_input.value or "").strip()
+        raw_corpus_directory = str(protection_corpus_input.value or "").strip()
+        corpus_directory = (
+            expanded_path_text(raw_corpus_directory) if raw_corpus_directory else ""
+        )
+        raw_corrections_path = str(protection_corrections_input.value or "").strip()
+        corrections_path = (
+            expanded_path_text(raw_corrections_path) if raw_corrections_path else ""
+        )
         protection.enabled = bool(protection_enabled_switch.value)
         protection.allowed_sensitivity_labels = _parse_information_security_categories(
             str(protection_categories_input.value or "")
@@ -2434,7 +2461,10 @@ def build_assistant_ui(  # noqa: C901
 
     def apply_workspace_settings_and_close() -> None:
         runtime = active_runtime()
-        runtime.root_path = str(workspace_quick_input.value or "").strip() or None
+        workspace_path = str(workspace_quick_input.value or "").strip()
+        runtime.root_path = (
+            expanded_path_text(workspace_path) if workspace_path else None
+        )
         remember_recent_runtime_values(runtime)
         controller.save_active_session()
         dialogs["workspace_settings"].close()
@@ -2461,7 +2491,7 @@ def build_assistant_ui(  # noqa: C901
         )
         raw = str(source_input.value or fallback or Path.cwd())
         try:
-            candidate = Path(raw).expanduser().resolve()
+            candidate = expand_app_path(raw).resolve()
         except OSError:
             return Path.cwd().resolve()
         if candidate.is_file():
@@ -2475,6 +2505,19 @@ def build_assistant_ui(  # noqa: C901
         workspace_browser_label.set_text(str(path))
         workspace_browser_column.clear()
         with workspace_browser_column:
+            if os.name == "nt":
+                drive_roots = _available_windows_drive_roots()
+                if drive_roots:
+                    ui.label("Drives").classes("text-xs llmt-muted q-px-sm")
+                    with ui.row().classes("w-full items-center gap-1 q-px-sm"):
+                        for drive_root in drive_roots:
+                            ui.button(
+                                str(drive_root),
+                                icon="storage",
+                                on_click=lambda _event, target=drive_root: (
+                                    render_workspace_browser(target)
+                                ),
+                            ).props("flat no-caps")
             parent = path.parent
             ui.button(
                 "Parent folder",

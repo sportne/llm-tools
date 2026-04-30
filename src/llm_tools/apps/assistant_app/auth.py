@@ -14,6 +14,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
 from llm_tools.apps.assistant_app.models import NiceGUIHostedConfig, NiceGUIUser
+from llm_tools.apps.assistant_app.paths import expand_app_path
 from llm_tools.apps.assistant_app.store import SQLiteNiceGUIChatStore
 
 _DEFAULT_HOSTED_DIR = Path.home() / ".llm-tools" / "assistant" / "nicegui" / "hosted"
@@ -38,7 +39,7 @@ def is_loopback_host(host: str | None) -> bool:
 
 def ensure_secret_file(path: Path, *, token_bytes: int = 32) -> str:
     """Return a persistent local secret, creating it when missing."""
-    path = path.expanduser()
+    path = expand_app_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         return path.read_text(encoding="utf-8").strip()
@@ -78,7 +79,9 @@ def validate_hosted_startup(
         warning = (
             "Secret entry is disabled because hosted mode is reachable without HTTPS."
         )
-    resolved_secret_key_path = secret_key_path or _DEFAULT_HOSTED_DIR / "app.secret"
+    resolved_secret_key_path = expand_app_path(
+        secret_key_path or _DEFAULT_HOSTED_DIR / "app.secret"
+    )
     return HostedStartupValidation(
         config=NiceGUIHostedConfig(
             auth_mode=mode,  # type: ignore[arg-type]
