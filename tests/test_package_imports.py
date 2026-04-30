@@ -30,6 +30,7 @@ def test_pyproject_includes_current_app_runtime_dependencies_in_base_install() -
     dependencies = pyproject["project"]["dependencies"]
 
     assert any(dep.startswith("nicegui>=") for dep in dependencies)
+    assert any(dep.startswith("pathspec>=") for dep in dependencies)
     assert any(dep.startswith("sqlcipher3-wheels>=") for dep in dependencies)
     assert all(not dep.startswith("sqlcipher3-binary") for dep in dependencies)
     assert all(not dep.startswith("streamlit") for dep in dependencies)

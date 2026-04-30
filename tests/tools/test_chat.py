@@ -150,6 +150,127 @@ def test_chat_tools_list_find_and_search(tmp_path: Path) -> None:
     ] == [".hidden/secret.py"]
 
 
+def test_chat_tools_treat_gitignored_paths_as_hidden(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text(
+        "ignored/\n*.log\n!keep.log\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "ignored").mkdir()
+    (tmp_path / "src" / "app.py").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "ignored" / "skip.py").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "app.log").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "keep.log").write_text("needle\n", encoding="utf-8")
+    runtime, context = _runtime(tmp_path)
+
+    listing = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="list_directory", arguments={"path": ".", "recursive": True}
+        ),
+        context.model_copy(),
+    )
+    assert listing.ok is True
+    assert all(
+        entry["path"] not in {"ignored", "ignored/skip.py", "app.log"}
+        for entry in listing.output["entries"]
+    )
+
+    hidden_listing = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="list_directory",
+            arguments={"path": ".", "recursive": True, "include_hidden": True},
+        ),
+        context.model_copy(),
+    )
+    assert hidden_listing.ok is True
+    hidden_entries = {
+        entry["path"]: entry["is_hidden"] for entry in hidden_listing.output["entries"]
+    }
+    assert hidden_entries["ignored"] is True
+    assert hidden_entries["ignored/skip.py"] is True
+    assert hidden_entries["app.log"] is True
+    assert hidden_entries["keep.log"] is False
+
+    find_result = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="find_files",
+            arguments={"path": ".", "pattern": "**/*.py"},
+        ),
+        context.model_copy(),
+    )
+    assert find_result.ok is True
+    assert [match["path"] for match in find_result.output["matches"]] == ["src/app.py"]
+
+    hidden_find_result = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="find_files",
+            arguments={"path": ".", "pattern": "**/*.py", "include_hidden": True},
+        ),
+        context.model_copy(),
+    )
+    assert hidden_find_result.ok is True
+    hidden_matches = {
+        match["path"]: match["is_hidden"]
+        for match in hidden_find_result.output["matches"]
+    }
+    assert hidden_matches["ignored/skip.py"] is True
+    assert hidden_matches["src/app.py"] is False
+
+    search_result = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="search_text",
+            arguments={"path": ".", "query": "needle"},
+        ),
+        context.model_copy(),
+    )
+    assert search_result.ok is True
+    assert [match["path"] for match in search_result.output["matches"]] == [
+        "keep.log",
+        "src/app.py",
+    ]
+
+    hidden_search_result = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="search_text",
+            arguments={"path": ".", "query": "needle", "include_hidden": True},
+        ),
+        context.model_copy(),
+    )
+    assert hidden_search_result.ok is True
+    hidden_text_matches = {
+        match["path"]: match["is_hidden"]
+        for match in hidden_search_result.output["matches"]
+    }
+    assert hidden_text_matches["ignored/skip.py"] is True
+
+    direct_search_result = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="search_text",
+            arguments={"path": "ignored/skip.py", "query": "needle"},
+        ),
+        context.model_copy(),
+    )
+    assert direct_search_result.ok is True
+    assert direct_search_result.output["matches"] == []
+
+    direct_hidden_search_result = runtime.execute(
+        ToolInvocationRequest(
+            tool_name="search_text",
+            arguments={
+                "path": "ignored/skip.py",
+                "query": "needle",
+                "include_hidden": True,
+            },
+        ),
+        context.model_copy(),
+    )
+    assert direct_hidden_search_result.ok is True
+    assert [
+        match["path"] for match in direct_hidden_search_result.output["matches"]
+    ] == ["ignored/skip.py"]
+    assert direct_hidden_search_result.output["matches"][0]["is_hidden"] is True
+
+
 def test_chat_tools_get_file_info_and_read_file_apply_limits(tmp_path: Path) -> None:
     file_path = tmp_path / "notes.txt"
     file_path.write_text("abcdefghijklmno", encoding="utf-8")

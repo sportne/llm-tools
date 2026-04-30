@@ -11,7 +11,9 @@ from llm_tools.tools.filesystem._content import (
 )
 from llm_tools.tools.filesystem._ops import resolve_search_file_or_directory
 from llm_tools.tools.filesystem._paths import (
+    GitignoreMatcher,
     ResolvedRootPath,
+    is_hidden,
     resolve_directory_path,
     should_include_entry,
     should_prune_directory,
@@ -26,6 +28,7 @@ def build_text_search_match(
     *,
     line_number: int,
     line_text: str,
+    gitignore_matcher: GitignoreMatcher | None = None,
 ) -> TextSearchMatch:
     """Return one text-search match payload."""
     relative_path = path.relative_to(root_path)
@@ -33,7 +36,7 @@ def build_text_search_match(
         path=relative_path.as_posix(),
         line_number=line_number,
         line_text=line_text,
-        is_hidden=any(part.startswith(".") for part in relative_path.parts),
+        is_hidden=is_hidden(relative_path, gitignore_matcher=gitignore_matcher),
     )
 
 
@@ -53,6 +56,7 @@ def search_text_impl(
     normalized_path, resolved_root, candidate_target, resolved_relative = (
         resolve_search_file_or_directory(root_path, path)
     )
+    gitignore_matcher = GitignoreMatcher.from_root(resolved_root)
     if candidate_target.is_file():
         return _search_single_file(
             normalized_path=normalized_path,
@@ -61,6 +65,7 @@ def search_text_impl(
             resolved_relative=resolved_relative,
             query=normalized_query,
             source_filters=source_filters,
+            gitignore_matcher=gitignore_matcher,
             tool_limits=tool_limits,
             cache_root=cache_root,
         )
@@ -69,6 +74,7 @@ def search_text_impl(
         path=path,
         query=normalized_query,
         source_filters=source_filters,
+        gitignore_matcher=gitignore_matcher,
         tool_limits=tool_limits,
         cache_root=cache_root,
     )
@@ -82,6 +88,7 @@ def _search_single_file(
     resolved_relative: Path,
     query: str,
     source_filters: SourceFilters,
+    gitignore_matcher: GitignoreMatcher,
     tool_limits: ToolLimits,
     cache_root: Path | None,
 ) -> TextSearchResult:
@@ -95,7 +102,11 @@ def _search_single_file(
         requested_path=normalized_path,
         resolved_path=resolved_path,
     )
-    if not should_include_entry(resolved_relative, source_filters=source_filters):
+    if not should_include_entry(
+        resolved_relative,
+        source_filters=source_filters,
+        gitignore_matcher=gitignore_matcher,
+    ):
         return TextSearchResult(
             requested_path=resolved_request.requested_path,
             resolved_path=resolved_request.resolved_path,
@@ -111,6 +122,7 @@ def _search_single_file(
     return _search_loaded_content(
         resolved_request=resolved_request,
         query=query,
+        gitignore_matcher=gitignore_matcher,
         tool_limits=tool_limits,
         loaded_content=loaded_content,
     )
@@ -122,6 +134,7 @@ def _search_directory(
     path: str,
     query: str,
     source_filters: SourceFilters,
+    gitignore_matcher: GitignoreMatcher,
     tool_limits: ToolLimits,
     cache_root: Path | None,
 ) -> TextSearchResult:
@@ -139,6 +152,7 @@ def _search_directory(
                 relative_child=relative_child,
                 depth=depth,
                 source_filters=source_filters,
+                gitignore_matcher=gitignore_matcher,
                 tool_limits=tool_limits,
             )
             if depth_limited:
@@ -159,6 +173,7 @@ def _search_directory(
                 relative_child=relative_child,
                 query=query,
                 source_filters=source_filters,
+                gitignore_matcher=gitignore_matcher,
                 tool_limits=tool_limits,
                 cache_root=cache_root,
             )
@@ -186,13 +201,18 @@ def _classify_directory_child(
     relative_child: Path,
     depth: int,
     source_filters: SourceFilters,
+    gitignore_matcher: GitignoreMatcher,
     tool_limits: ToolLimits,
 ) -> tuple[bool, bool]:
     if child.is_symlink() or not child.is_dir():
         return False, False
     if depth >= tool_limits.max_recursive_depth:
         return False, True
-    if should_prune_directory(relative_child, source_filters=source_filters):
+    if should_prune_directory(
+        relative_child,
+        source_filters=source_filters,
+        gitignore_matcher=gitignore_matcher,
+    ):
         return False, False
     return True, False
 
@@ -204,10 +224,15 @@ def _search_directory_file(
     relative_child: Path,
     query: str,
     source_filters: SourceFilters,
+    gitignore_matcher: GitignoreMatcher,
     tool_limits: ToolLimits,
     cache_root: Path | None,
 ) -> list[TextSearchMatch]:
-    if not should_include_entry(relative_child, source_filters=source_filters):
+    if not should_include_entry(
+        relative_child,
+        source_filters=source_filters,
+        gitignore_matcher=gitignore_matcher,
+    ):
         return []
     loaded_content = load_readable_content(
         child,
@@ -224,6 +249,7 @@ def _search_directory_file(
             child,
             line_number=line_number,
             line_text=line_text,
+            gitignore_matcher=gitignore_matcher,
         )
         for line_number, line_text in enumerate(
             loaded_content.content.splitlines(),
@@ -237,6 +263,7 @@ def _search_loaded_content(
     *,
     resolved_request: ResolvedRootPath,
     query: str,
+    gitignore_matcher: GitignoreMatcher,
     tool_limits: ToolLimits,
     loaded_content: LoadedReadableContent,
 ) -> TextSearchResult:
@@ -272,6 +299,7 @@ def _search_loaded_content(
                 resolved_request.resolved,
                 line_number=line_number,
                 line_text=line_text,
+                gitignore_matcher=gitignore_matcher,
             )
         )
     return TextSearchResult(

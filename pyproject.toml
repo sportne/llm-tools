@@ -33,6 +33,7 @@ dependencies = [
   "mpxj>=16,<17",
   "openai>=1,<2",
   "nicegui>=3,<4",
+  "pathspec>=0.12,<0.13",
   "pydantic>=2,<3",
   "PyYAML>=6,<7",
   "SQLAlchemy>=2.0,<2.1",

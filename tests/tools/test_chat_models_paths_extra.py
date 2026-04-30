@@ -22,6 +22,7 @@ from llm_tools.tools.filesystem._ops import (
     resolve_search_file_or_directory,
 )
 from llm_tools.tools.filesystem._paths import (
+    GitignoreMatcher,
     build_entry,
     build_file_match,
     entry_type,
@@ -148,6 +149,92 @@ def test_path_helpers_cover_matching_and_resolution(tmp_path: Path) -> None:
     assert built_match.parent_path == "src"
     assert built_text_match.path == "src/app.py"
     assert entry_type(link_file) == "symlink"
+
+
+def test_gitignore_matcher_treats_ignored_paths_as_hidden(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text(
+        "ignored/\n*.log\n!keep.log\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "ignored").mkdir()
+    (tmp_path / "ignored" / "skip.py").write_text("skip\n", encoding="utf-8")
+    (tmp_path / "app.log").write_text("skip\n", encoding="utf-8")
+    (tmp_path / "keep.log").write_text("keep\n", encoding="utf-8")
+
+    matcher = GitignoreMatcher.from_root(tmp_path)
+
+    assert (
+        should_include_entry(
+            Path("ignored/skip.py"),
+            source_filters=SourceFilters(),
+            gitignore_matcher=matcher,
+        )
+        is False
+    )
+    assert (
+        should_prune_directory(
+            Path("ignored"),
+            source_filters=SourceFilters(),
+            gitignore_matcher=matcher,
+        )
+        is True
+    )
+    assert (
+        should_include_entry(
+            Path("ignored/skip.py"),
+            source_filters=SourceFilters(include_hidden=True),
+            gitignore_matcher=matcher,
+        )
+        is True
+    )
+    assert (
+        should_include_entry(
+            Path("app.log"),
+            source_filters=SourceFilters(),
+            gitignore_matcher=matcher,
+        )
+        is False
+    )
+    assert (
+        should_include_entry(
+            Path("keep.log"),
+            source_filters=SourceFilters(),
+            gitignore_matcher=matcher,
+        )
+        is True
+    )
+    assert (
+        build_file_match(
+            tmp_path,
+            tmp_path / "ignored" / "skip.py",
+            gitignore_matcher=matcher,
+        ).is_hidden
+        is True
+    )
+
+
+def test_gitignore_matcher_supports_nested_rules_and_skips_symlinks(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested" / ".gitignore").write_text(
+        "local.py\n!keep.py\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "nested" / "local.py").write_text("skip\n", encoding="utf-8")
+    (tmp_path / "nested" / "keep.py").write_text("keep\n", encoding="utf-8")
+    (tmp_path / "local.py").write_text("root\n", encoding="utf-8")
+    symlink_target = tmp_path / "target"
+    symlink_target.mkdir()
+    (symlink_target / ".gitignore").write_text("linked.py\n", encoding="utf-8")
+    (tmp_path / "link").symlink_to(symlink_target, target_is_directory=True)
+
+    matcher = GitignoreMatcher.from_root(tmp_path)
+
+    assert matcher.is_ignored(Path("nested/local.py")) is True
+    assert matcher.is_ignored(Path("nested/keep.py")) is False
+    assert matcher.is_ignored(Path("local.py")) is False
+    assert matcher.is_ignored(Path("link/linked.py")) is False
 
 
 def test_ops_cover_recursive_listing_and_file_edge_cases(

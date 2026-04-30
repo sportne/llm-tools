@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+
+from pathspec import GitIgnoreSpec
 
 from llm_tools.tools.filesystem.models import (
     DirectoryEntry,
@@ -17,6 +20,73 @@ _INTERNAL_TOOL_PATH_PART = ".llm_tools"
 
 
 @dataclass(frozen=True, slots=True)
+class GitignoreSpecEntry:
+    """One parsed .gitignore file scoped to a root-relative base path."""
+
+    base_path: Path
+    spec: GitIgnoreSpec
+
+
+@dataclass(frozen=True, slots=True)
+class GitignoreMatcher:
+    """Per-call matcher for root and nested .gitignore rules."""
+
+    entries: tuple[GitignoreSpecEntry, ...] = ()
+
+    @classmethod
+    def from_root(cls, root_path: Path) -> GitignoreMatcher:
+        """Build a matcher from .gitignore files under one workspace root."""
+        resolved_root = root_path.resolve()
+        entries: list[GitignoreSpecEntry] = []
+        for directory, dirnames, filenames in os.walk(resolved_root, followlinks=False):
+            directory_path = Path(directory)
+            relative_directory = directory_path.relative_to(resolved_root)
+            dirnames[:] = [
+                dirname
+                for dirname in dirnames
+                if not (directory_path / dirname).is_symlink()
+                and not is_internal_tool_path(relative_directory / dirname)
+            ]
+            if ".gitignore" not in filenames:
+                continue
+            gitignore_path = directory_path / ".gitignore"
+            try:
+                lines = gitignore_path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            entries.append(
+                GitignoreSpecEntry(
+                    base_path=relative_directory,
+                    spec=GitIgnoreSpec.from_lines(lines),
+                )
+            )
+        entries.sort(key=lambda entry: len(entry.base_path.parts))
+        return cls(tuple(entries))
+
+    def is_ignored(self, relative_path: Path, *, is_dir: bool = False) -> bool:
+        """Return whether a root-relative path is ignored by any .gitignore."""
+        ignored = False
+        for entry in self.entries:
+            relative_to_base = _relative_to_gitignore_base(
+                relative_path,
+                entry.base_path,
+            )
+            if relative_to_base is None:
+                continue
+            path_text = relative_to_base.as_posix()
+            if not path_text or path_text == ".":
+                continue
+            if is_dir and not path_text.endswith("/"):
+                path_text += "/"
+            result = entry.spec.check_file(path_text)
+            if result.include is True:
+                ignored = True
+            elif result.include is False:
+                ignored = False
+        return ignored
+
+
+@dataclass(frozen=True, slots=True)
 class ResolvedRootPath:
     """Normalized and root-confined request path metadata."""
 
@@ -25,6 +95,16 @@ class ResolvedRootPath:
     resolved: Path
     requested_path: str
     resolved_path: str
+
+
+def _relative_to_gitignore_base(relative_path: Path, base_path: Path) -> Path | None:
+    """Return relative_path scoped to one .gitignore base, if applicable."""
+    if not base_path.parts:
+        return relative_path
+    try:
+        return relative_path.relative_to(base_path)
+    except ValueError:
+        return None
 
 
 def matches_patterns(path: Path, patterns: list[str]) -> bool:
@@ -252,9 +332,19 @@ def is_internal_tool_path(path: Path) -> bool:
     return bool(path.parts) and path.parts[0] == _INTERNAL_TOOL_PATH_PART
 
 
-def is_hidden(path: Path) -> bool:
+def is_hidden(
+    path: Path,
+    *,
+    gitignore_matcher: GitignoreMatcher | None = None,
+    is_dir: bool = False,
+) -> bool:
     """Return whether any path component is hidden."""
-    return any(part.startswith(".") for part in path.parts if part not in {".", ".."})
+    return any(
+        part.startswith(".") for part in path.parts if part not in {".", ".."}
+    ) or (
+        gitignore_matcher is not None
+        and gitignore_matcher.is_ignored(path, is_dir=is_dir)
+    )
 
 
 def entry_type(path: Path) -> DirectoryEntryType:
@@ -272,11 +362,20 @@ def should_include_entry(
     relative_path: Path,
     *,
     source_filters: SourceFilters,
+    gitignore_matcher: GitignoreMatcher | None = None,
+    is_dir: bool = False,
 ) -> bool:
     """Return whether an entry should be exposed to the model."""
     if is_internal_tool_path(relative_path):
         return False
-    if is_hidden(relative_path) and not source_filters.include_hidden:
+    if (
+        is_hidden(
+            relative_path,
+            gitignore_matcher=gitignore_matcher,
+            is_dir=is_dir,
+        )
+        and not source_filters.include_hidden
+    ):
         return False
     if matches_patterns(relative_path, source_filters.exclude):
         return False
@@ -290,29 +389,53 @@ def should_prune_directory(
     relative_path: Path,
     *,
     source_filters: SourceFilters,
+    gitignore_matcher: GitignoreMatcher | None = None,
 ) -> bool:
     """Return whether a directory subtree should be skipped entirely."""
     if is_internal_tool_path(relative_path):
         return True
-    if is_hidden(relative_path) and not source_filters.include_hidden:
+    if (
+        is_hidden(
+            relative_path,
+            gitignore_matcher=gitignore_matcher,
+            is_dir=True,
+        )
+        and not source_filters.include_hidden
+    ):
         return True
     return matches_patterns(relative_path, source_filters.exclude)
 
 
-def build_entry(root_path: Path, path: Path, *, depth: int) -> DirectoryEntry:
+def build_entry(
+    root_path: Path,
+    path: Path,
+    *,
+    depth: int,
+    gitignore_matcher: GitignoreMatcher | None = None,
+) -> DirectoryEntry:
     """Return one directory-entry payload."""
     relative_path = path.relative_to(root_path)
+    path_type = entry_type(path)
     return DirectoryEntry(
         path=relative_path.as_posix(),
         name=path.name,
-        entry_type=entry_type(path),
+        entry_type=path_type,
         depth=depth,
-        is_hidden=is_hidden(relative_path),
+        is_hidden=is_hidden(
+            relative_path,
+            gitignore_matcher=gitignore_matcher,
+            is_dir=path_type == "directory",
+        ),
         is_symlink=path.is_symlink(),
     )
 
 
-def build_file_match(root_path: Path, path: Path) -> FileMatch:
+def build_file_match(
+    root_path: Path,
+    path: Path,
+    *,
+    gitignore_matcher: GitignoreMatcher | None = None,
+) -> FileMatch:
     """Return one file-search match payload."""
     relative_path = path.relative_to(root_path)
     parent_path = relative_path.parent.as_posix()
@@ -320,5 +443,5 @@ def build_file_match(root_path: Path, path: Path) -> FileMatch:
         path=relative_path.as_posix(),
         name=path.name,
         parent_path="." if parent_path == "." else parent_path,
-        is_hidden=is_hidden(relative_path),
+        is_hidden=is_hidden(relative_path, gitignore_matcher=gitignore_matcher),
     )

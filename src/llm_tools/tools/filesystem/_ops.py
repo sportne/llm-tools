@@ -13,6 +13,7 @@ from llm_tools.tools.filesystem._content import (
     normalize_range,
 )
 from llm_tools.tools.filesystem._paths import (
+    GitignoreMatcher,
     build_entry,
     build_file_match,
     matches_path_glob,
@@ -49,6 +50,7 @@ def list_directory_impl(
     if max_depth is not None and max_depth <= 0:
         raise ValueError("max_depth must be greater than 0 when provided")
     resolved_request = resolve_directory_path(root_path, path)
+    gitignore_matcher = GitignoreMatcher.from_root(resolved_request.root)
     applied_max_depth = (
         1
         if not recursive
@@ -64,16 +66,33 @@ def list_directory_impl(
         nonlocal truncated
         for child in sorted(directory.iterdir(), key=lambda item: item.name):
             relative_child = child.relative_to(resolved_request.root)
-            if should_include_entry(relative_child, source_filters=source_filters):
+            child_is_dir = child.is_dir() and not child.is_symlink()
+            if should_include_entry(
+                relative_child,
+                source_filters=source_filters,
+                gitignore_matcher=gitignore_matcher,
+                is_dir=child_is_dir,
+            ):
                 if len(entries) >= tool_limits.max_entries_per_call:
                     truncated = True
                     return False
-                entries.append(build_entry(resolved_request.root, child, depth=depth))
+                entries.append(
+                    build_entry(
+                        resolved_request.root,
+                        child,
+                        depth=depth,
+                        gitignore_matcher=gitignore_matcher,
+                    )
+                )
             if depth >= applied_max_depth:
                 continue
             if child.is_symlink() or not child.is_dir():
                 continue
-            if should_prune_directory(relative_child, source_filters=source_filters):
+            if should_prune_directory(
+                relative_child,
+                source_filters=source_filters,
+                gitignore_matcher=gitignore_matcher,
+            ):
                 continue
             if not walk_directory(child, depth=depth + 1):
                 return False
@@ -101,6 +120,7 @@ def find_files_impl(
     """Return matching files beneath one root-confined directory subtree."""
     normalized_pattern = normalize_required_pattern(pattern)
     resolved_request = resolve_directory_path(root_path, path)
+    gitignore_matcher = GitignoreMatcher.from_root(resolved_request.root)
     matches: list[FileMatch] = []
     truncated = False
     files_scanned = 0
@@ -116,7 +136,9 @@ def find_files_impl(
                     truncated = True
                     continue
                 if should_prune_directory(
-                    relative_child, source_filters=source_filters
+                    relative_child,
+                    source_filters=source_filters,
+                    gitignore_matcher=gitignore_matcher,
                 ):
                     continue
                 if not walk_directory(child, depth=depth + 1):
@@ -128,14 +150,24 @@ def find_files_impl(
             if files_scanned > tool_limits.max_files_scanned:
                 truncated = True
                 return False
-            if not should_include_entry(relative_child, source_filters=source_filters):
+            if not should_include_entry(
+                relative_child,
+                source_filters=source_filters,
+                gitignore_matcher=gitignore_matcher,
+            ):
                 continue
             if not matches_path_glob(relative_child, normalized_pattern):
                 continue
             if len(matches) >= tool_limits.max_entries_per_call:
                 truncated = True
                 return False
-            matches.append(build_file_match(resolved_request.root, child))
+            matches.append(
+                build_file_match(
+                    resolved_request.root,
+                    child,
+                    gitignore_matcher=gitignore_matcher,
+                )
+            )
         return True
 
     walk_directory(resolved_request.resolved, depth=1)
