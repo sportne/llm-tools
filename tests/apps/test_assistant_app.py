@@ -17,6 +17,7 @@ from llm_tools.apps.assistant_app.app import (
     NICEGUI_APPROVAL_OPTIONS,
     NICEGUI_PROVIDER_OPTIONS,
     _account_menu_action_labels,
+    _account_menu_identity_labels,
     _available_windows_drive_roots,
     _branding_favicon_href,
     _branding_favicon_javascript,
@@ -346,7 +347,10 @@ def test_account_menu_actions_and_settings_section_defaults(tmp_path: Path) -> N
 
     assert _account_menu_action_labels(admin) == ["Settings", "Admin", "Log out"]
     assert _account_menu_action_labels(user) == ["Settings", "Log out"]
-    assert _account_menu_action_labels(None) == ["Settings", "Log out"]
+    assert _account_menu_action_labels(None) == ["Settings"]
+    assert _account_menu_identity_labels(admin) == ("admin", "admin")
+    assert _account_menu_identity_labels(user) == ("user", "user")
+    assert _account_menu_identity_labels(None) == ("Development mode", "no auth")
     assert _settings_section_default_open("Connection") is True
     assert _settings_section_default_open("Workspace") is True
     assert _settings_section_default_open("Appearance") is False

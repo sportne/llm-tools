@@ -259,8 +259,16 @@ def _account_menu_action_labels(user: NiceGUIUser | None) -> list[str]:
     labels = ["Settings"]
     if _is_admin_user(user):
         labels.append("Admin")
-    labels.append("Log out")
+    if user is not None:
+        labels.append("Log out")
     return labels
+
+
+def _account_menu_identity_labels(user: NiceGUIUser | None) -> tuple[str, str]:
+    """Return account menu identity text for authenticated and no-auth modes."""
+    if user is None:
+        return ("Development mode", "no auth")
+    return (user.username, user.role)
 
 
 def _settings_section_default_open(section_name: str) -> bool:
@@ -2601,26 +2609,26 @@ def build_assistant_ui(  # noqa: C901
                     )
                 with ui.row().classes("llmt-header-actions items-center gap-2"):
                     status_chip = ui.badge("ready").props("outline")
-                    if controller.current_user is not None:
-                        with (
-                            ui.button(icon="account_circle").props("flat round"),
-                            ui.menu().classes("llmt-account-menu"),
+                    with (
+                        ui.button(icon="account_circle").props("flat round"),
+                        ui.menu().classes("llmt-account-menu"),
+                    ):
+                        account_name, account_role = _account_menu_identity_labels(
+                            controller.current_user
+                        )
+                        ui.label(account_name).classes("text-sm q-px-sm q-pt-sm")
+                        ui.label(account_role).classes(
+                            "text-xs llmt-muted q-px-sm q-pb-sm"
+                        )
+                        for label in _account_menu_action_labels(
+                            controller.current_user
                         ):
-                            ui.label(controller.current_user.username).classes(
-                                "text-sm q-px-sm q-pt-sm"
-                            )
-                            ui.label(controller.current_user.role).classes(
-                                "text-xs llmt-muted q-px-sm q-pb-sm"
-                            )
-                            for label in _account_menu_action_labels(
-                                controller.current_user
-                            ):
-                                if label == "Settings":
-                                    ui.menu_item(label, on_click=open_settings_dialog)
-                                elif label == "Admin":
-                                    ui.menu_item(label, on_click=open_admin_dialog)
-                                elif label == "Log out":
-                                    ui.menu_item(label, on_click=logout_hosted_user)
+                            if label == "Settings":
+                                ui.menu_item(label, on_click=open_settings_dialog)
+                            elif label == "Admin":
+                                ui.menu_item(label, on_click=open_admin_dialog)
+                            elif label == "Log out":
+                                ui.menu_item(label, on_click=logout_hosted_user)
                     ui.button(
                         icon="view_sidebar",
                         on_click=toggle_workbench,
