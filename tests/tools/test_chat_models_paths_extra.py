@@ -237,6 +237,36 @@ def test_gitignore_matcher_supports_nested_rules_and_skips_symlinks(
     assert matcher.is_ignored(Path("link/linked.py")) is False
 
 
+def test_gitignore_matcher_keeps_ignored_parent_authoritative(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".gitignore").write_text(
+        "ignored/\n!ignored/keep.py\nvisible/\n!visible/\n!visible/keep.py\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "ignored").mkdir()
+    (tmp_path / "ignored" / ".gitignore").write_text(
+        "!nested_keep.py\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "ignored" / "keep.py").write_text("keep\n", encoding="utf-8")
+    (tmp_path / "ignored" / "nested_keep.py").write_text(
+        "nested\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "visible").mkdir()
+    (tmp_path / "visible" / "keep.py").write_text("keep\n", encoding="utf-8")
+
+    matcher = GitignoreMatcher.from_root(tmp_path)
+
+    assert matcher.is_ignored(Path("ignored"), is_dir=True) is True
+    assert matcher.is_ignored(Path("ignored/keep.py")) is True
+    assert matcher.is_ignored(Path("ignored/nested_keep.py")) is True
+    assert matcher.is_ignored(Path("visible"), is_dir=True) is False
+    assert matcher.is_ignored(Path("visible/keep.py")) is False
+    assert all(entry.base_path != Path("ignored") for entry in matcher.entries)
+
+
 def test_ops_cover_recursive_listing_and_file_edge_cases(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

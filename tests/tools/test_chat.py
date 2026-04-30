@@ -157,6 +157,10 @@ def test_chat_tools_treat_gitignored_paths_as_hidden(tmp_path: Path) -> None:
     )
     (tmp_path / "src").mkdir()
     (tmp_path / "ignored").mkdir()
+    (tmp_path / "ignored" / ".gitignore").write_text(
+        "!skip.py\n",
+        encoding="utf-8",
+    )
     (tmp_path / "src" / "app.py").write_text("needle\n", encoding="utf-8")
     (tmp_path / "ignored" / "skip.py").write_text("needle\n", encoding="utf-8")
     (tmp_path / "app.log").write_text("needle\n", encoding="utf-8")

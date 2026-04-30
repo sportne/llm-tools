@@ -41,30 +41,44 @@ class GitignoreMatcher:
         for directory, dirnames, filenames in os.walk(resolved_root, followlinks=False):
             directory_path = Path(directory)
             relative_directory = directory_path.relative_to(resolved_root)
+            if ".gitignore" in filenames:
+                gitignore_path = directory_path / ".gitignore"
+                try:
+                    lines = gitignore_path.read_text(encoding="utf-8").splitlines()
+                except OSError:
+                    pass
+                else:
+                    entries.append(
+                        GitignoreSpecEntry(
+                            base_path=relative_directory,
+                            spec=GitIgnoreSpec.from_lines(lines),
+                        )
+                    )
+            matcher = cls(tuple(entries))
             dirnames[:] = [
                 dirname
                 for dirname in dirnames
                 if not (directory_path / dirname).is_symlink()
                 and not is_internal_tool_path(relative_directory / dirname)
-            ]
-            if ".gitignore" not in filenames:
-                continue
-            gitignore_path = directory_path / ".gitignore"
-            try:
-                lines = gitignore_path.read_text(encoding="utf-8").splitlines()
-            except OSError:
-                continue
-            entries.append(
-                GitignoreSpecEntry(
-                    base_path=relative_directory,
-                    spec=GitIgnoreSpec.from_lines(lines),
+                and not matcher.is_ignored(
+                    relative_directory / dirname,
+                    is_dir=True,
                 )
-            )
+            ]
         entries.sort(key=lambda entry: len(entry.base_path.parts))
         return cls(tuple(entries))
 
     def is_ignored(self, relative_path: Path, *, is_dir: bool = False) -> bool:
         """Return whether a root-relative path is ignored by any .gitignore."""
+        for parent in _relative_parent_directories(relative_path):
+            if self._is_ignored_by_matching_specs(parent, is_dir=True):
+                return True
+        return self._is_ignored_by_matching_specs(relative_path, is_dir=is_dir)
+
+    def _is_ignored_by_matching_specs(
+        self, relative_path: Path, *, is_dir: bool = False
+    ) -> bool:
+        """Return whether matching .gitignore specs ignore this exact path."""
         ignored = False
         for entry in self.entries:
             relative_to_base = _relative_to_gitignore_base(
@@ -105,6 +119,15 @@ def _relative_to_gitignore_base(relative_path: Path, base_path: Path) -> Path | 
         return relative_path.relative_to(base_path)
     except ValueError:
         return None
+
+
+def _relative_parent_directories(relative_path: Path) -> tuple[Path, ...]:
+    """Return root-relative parent directories nearest first, excluding root."""
+    return tuple(
+        parent
+        for parent in relative_path.parents
+        if parent.parts and parent.as_posix() != "."
+    )
 
 
 def matches_patterns(path: Path, patterns: list[str]) -> bool:
