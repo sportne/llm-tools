@@ -6,7 +6,7 @@ import argparse
 import json
 import os
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -38,10 +38,7 @@ from llm_tools.apps.assistant_app.provider_endpoints import (
     COMMON_OPENAI_COMPATIBLE_ENDPOINTS,
 )
 from llm_tools.apps.assistant_app.store import SQLiteNiceGUIChatStore, default_db_path
-from llm_tools.apps.assistant_config import (
-    AssistantConfig,
-    load_assistant_config,
-)
+from llm_tools.apps.assistant_config import AssistantConfig, load_assistant_config
 from llm_tools.apps.assistant_tool_capabilities import (
     AssistantToolCapability,
     build_tool_capabilities,
@@ -51,7 +48,9 @@ from llm_tools.apps.assistant_tool_registry import build_assistant_available_too
 from llm_tools.apps.chat_config import ProviderPreset
 from llm_tools.llm_providers import ProviderModeStrategy
 from llm_tools.tool_api import SideEffectClass
+from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import (
+    ChatSessionConfig,
     ChatTokenUsage,
     ProtectionConfig,
     ProtectionPendingPrompt,
@@ -247,9 +246,12 @@ def _can_admin_disable_user(
 _SETTINGS_SECTION_DEFAULT_OPEN = {
     "Connection": True,
     "Workspace": True,
-    "Appearance": False,
+    "Display": False,
     "Persistence": False,
     "Session permissions": False,
+    "Chat limits": False,
+    "Tool limits": False,
+    "Deep Task limits": False,
     "Tool credentials": False,
 }
 
@@ -274,6 +276,134 @@ def _account_menu_identity_labels(user: NiceGUIUser | None) -> tuple[str, str]:
 def _settings_section_default_open(section_name: str) -> bool:
     """Return whether a settings section should open by default."""
     return _SETTINGS_SECTION_DEFAULT_OPEN.get(section_name, False)
+
+
+def _setting_text(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _parse_positive_int_setting(label: str, value: object) -> int:
+    """Parse a required positive integer setting."""
+    raw = _setting_text(value)
+    try:
+        parsed = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a positive integer.") from exc
+    if parsed <= 0:
+        raise ValueError(f"{label} must be a positive integer.")
+    return parsed
+
+
+def _parse_optional_positive_int_setting(label: str, value: object) -> int | None:
+    """Parse an optional positive integer setting."""
+    raw = _setting_text(value)
+    if not raw:
+        return None
+    return _parse_positive_int_setting(label, raw)
+
+
+def _parse_positive_float_setting(label: str, value: object) -> float:
+    """Parse a required positive float setting."""
+    raw = _setting_text(value)
+    try:
+        parsed = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a positive number.") from exc
+    if parsed <= 0:
+        raise ValueError(f"{label} must be a positive number.")
+    return parsed
+
+
+def _parse_temperature_setting(value: object) -> float:
+    """Parse a model temperature setting."""
+    raw = _setting_text(value)
+    try:
+        parsed = float(raw)
+    except ValueError as exc:
+        raise ValueError("Temperature must be a number between 0 and 1.") from exc
+    if parsed < 0.0 or parsed > 1.0:
+        raise ValueError("Temperature must be a number between 0 and 1.")
+    return parsed
+
+
+def _runtime_with_settings_values(
+    runtime: NiceGUIRuntimeConfig, values: Mapping[str, object]
+) -> NiceGUIRuntimeConfig:
+    """Return a runtime copy with advanced settings parsed from UI values."""
+    session_config = ChatSessionConfig(
+        max_context_tokens=_parse_positive_int_setting(
+            "Max context tokens", values.get("max_context_tokens")
+        ),
+        max_tool_round_trips=_parse_positive_int_setting(
+            "Max tool rounds", values.get("max_tool_round_trips")
+        ),
+        max_tool_calls_per_round=_parse_positive_int_setting(
+            "Max tool calls per round", values.get("max_tool_calls_per_round")
+        ),
+        max_total_tool_calls_per_turn=_parse_positive_int_setting(
+            "Max total tool calls per turn",
+            values.get("max_total_tool_calls_per_turn"),
+        ),
+    )
+    tool_limits = ToolLimits(
+        max_entries_per_call=_parse_positive_int_setting(
+            "Max entries per call", values.get("max_entries_per_call")
+        ),
+        max_recursive_depth=_parse_positive_int_setting(
+            "Max recursive depth", values.get("max_recursive_depth")
+        ),
+        max_files_scanned=_parse_positive_int_setting(
+            "Max files scanned", values.get("max_files_scanned")
+        ),
+        max_search_matches=_parse_positive_int_setting(
+            "Max search matches", values.get("max_search_matches")
+        ),
+        max_read_lines=_parse_positive_int_setting(
+            "Max read lines", values.get("max_read_lines")
+        ),
+        max_read_input_bytes=_parse_positive_int_setting(
+            "Max read input bytes", values.get("max_read_input_bytes")
+        ),
+        max_file_size_characters=_parse_positive_int_setting(
+            "Max file size characters", values.get("max_file_size_characters")
+        ),
+        max_read_file_chars=_parse_optional_positive_int_setting(
+            "Max read file chars", values.get("max_read_file_chars")
+        ),
+        max_tool_result_chars=_parse_positive_int_setting(
+            "Max tool result chars", values.get("max_tool_result_chars")
+        ),
+    )
+    research = runtime.research.model_copy(
+        update={
+            "default_max_turns": _parse_positive_int_setting(
+                "Deep Task max turns", values.get("deep_task_max_turns")
+            ),
+            "default_max_tool_invocations": _parse_optional_positive_int_setting(
+                "Deep Task max tool invocations",
+                values.get("deep_task_max_tool_invocations"),
+            ),
+            "default_max_elapsed_seconds": _parse_optional_positive_int_setting(
+                "Deep Task max elapsed seconds",
+                values.get("deep_task_max_elapsed_seconds"),
+            ),
+            "include_replay_by_default": bool(values.get("deep_task_include_replay")),
+        }
+    )
+    return runtime.model_copy(
+        update={
+            "temperature": _parse_temperature_setting(values.get("temperature")),
+            "timeout_seconds": _parse_positive_float_setting(
+                "Provider timeout seconds", values.get("timeout_seconds")
+            ),
+            "show_token_usage": bool(values.get("show_token_usage")),
+            "show_footer_help": bool(values.get("show_footer_help")),
+            "inspector_open": bool(values.get("inspector_open")),
+            "session_config": session_config,
+            "tool_limits": tool_limits,
+            "research": research,
+        }
+    )
 
 
 def _format_workbench_duration(seconds: float | None) -> str:
@@ -1216,6 +1346,8 @@ def build_assistant_ui(  # noqa: C901
         """
     )
 
+    if controller.active_record.runtime.inspector_open:
+        controller.preferences.workbench_open = True
     dark_mode_control = ui.dark_mode(value=controller.preferences.theme_mode == "dark")
     session_filter = {"value": ""}
     model_options_state: dict[str, list[str]] = {"values": []}
@@ -1233,6 +1365,7 @@ def build_assistant_ui(  # noqa: C901
     tool_menu_column: Any = None
     composer_meta_row: Any = None
     composer_action_button: Any = None
+    composer_disclaimer_label: Any = None
     provider_select: Any = None
     model_input: Any = None
     base_url_input: Any = None
@@ -1247,6 +1380,28 @@ def build_assistant_ui(  # noqa: C901
     mode_quick_select: Any = None
     workspace_quick_input: Any = None
     dark_mode_switch: Any = None
+    temperature_input: Any = None
+    timeout_seconds_input: Any = None
+    show_token_usage_switch: Any = None
+    show_footer_help_switch: Any = None
+    inspector_open_switch: Any = None
+    max_context_tokens_input: Any = None
+    max_tool_round_trips_input: Any = None
+    max_tool_calls_per_round_input: Any = None
+    max_total_tool_calls_per_turn_input: Any = None
+    max_entries_per_call_input: Any = None
+    max_recursive_depth_input: Any = None
+    max_files_scanned_input: Any = None
+    max_search_matches_input: Any = None
+    max_read_lines_input: Any = None
+    max_read_input_bytes_input: Any = None
+    max_file_size_characters_input: Any = None
+    max_read_file_chars_input: Any = None
+    max_tool_result_chars_input: Any = None
+    deep_task_max_turns_input: Any = None
+    deep_task_max_tool_invocations_input: Any = None
+    deep_task_max_elapsed_seconds_input: Any = None
+    deep_task_include_replay_switch: Any = None
     admin_user_list_column: Any = None
     admin_create_username_input: Any = None
     admin_create_password_input: Any = None
@@ -1378,8 +1533,7 @@ def build_assistant_ui(  # noqa: C901
         if model_quick_select is not None:
             model_quick_select.set_options(options, value=selected or None)
 
-    def sync_settings_inputs() -> None:
-        runtime = active_runtime()
+    def sync_connection_settings(runtime: NiceGUIRuntimeConfig) -> None:
         if provider_select is not None:
             provider_select.value = runtime.provider.value
         if model_input is not None:
@@ -1393,14 +1547,102 @@ def build_assistant_ui(  # noqa: C901
                 base_url_options(runtime), value=runtime.api_base_url or None
             )
             base_url_input.value = runtime.api_base_url or ""
+        if temperature_input is not None:
+            temperature_input.value = str(runtime.temperature)
+        if timeout_seconds_input is not None:
+            timeout_seconds_input.value = str(runtime.timeout_seconds)
         if provider_api_key_input is not None:
             provider_api_key_input.value = ""
+
+    def sync_display_settings(runtime: NiceGUIRuntimeConfig) -> None:
+        if dark_mode_switch is not None:
+            dark_mode_switch.value = controller.preferences.theme_mode == "dark"
+        if show_token_usage_switch is not None:
+            show_token_usage_switch.value = runtime.show_token_usage
+        if show_footer_help_switch is not None:
+            show_footer_help_switch.value = runtime.show_footer_help
+        if inspector_open_switch is not None:
+            inspector_open_switch.value = runtime.inspector_open
+
+    def sync_path_settings(runtime: NiceGUIRuntimeConfig) -> None:
         if workspace_input is not None:
             workspace_input.value = runtime.root_path or ""
         if database_path_input is not None:
             database_path_input.value = str(controller.store.db_path)
-        if dark_mode_switch is not None:
-            dark_mode_switch.value = controller.preferences.theme_mode == "dark"
+
+    def sync_chat_limit_settings(runtime: NiceGUIRuntimeConfig) -> None:
+        if max_context_tokens_input is not None:
+            max_context_tokens_input.value = str(
+                runtime.session_config.max_context_tokens
+            )
+        if max_tool_round_trips_input is not None:
+            max_tool_round_trips_input.value = str(
+                runtime.session_config.max_tool_round_trips
+            )
+        if max_tool_calls_per_round_input is not None:
+            max_tool_calls_per_round_input.value = str(
+                runtime.session_config.max_tool_calls_per_round
+            )
+        if max_total_tool_calls_per_turn_input is not None:
+            max_total_tool_calls_per_turn_input.value = str(
+                runtime.session_config.max_total_tool_calls_per_turn
+            )
+
+    def sync_tool_limit_settings(runtime: NiceGUIRuntimeConfig) -> None:
+        if max_entries_per_call_input is not None:
+            max_entries_per_call_input.value = str(
+                runtime.tool_limits.max_entries_per_call
+            )
+        if max_recursive_depth_input is not None:
+            max_recursive_depth_input.value = str(
+                runtime.tool_limits.max_recursive_depth
+            )
+        if max_files_scanned_input is not None:
+            max_files_scanned_input.value = str(runtime.tool_limits.max_files_scanned)
+        if max_search_matches_input is not None:
+            max_search_matches_input.value = str(runtime.tool_limits.max_search_matches)
+        if max_read_lines_input is not None:
+            max_read_lines_input.value = str(runtime.tool_limits.max_read_lines)
+        if max_read_input_bytes_input is not None:
+            max_read_input_bytes_input.value = str(
+                runtime.tool_limits.max_read_input_bytes
+            )
+        if max_file_size_characters_input is not None:
+            max_file_size_characters_input.value = str(
+                runtime.tool_limits.max_file_size_characters
+            )
+        if max_read_file_chars_input is not None:
+            max_read_file_chars_input.value = (
+                ""
+                if runtime.tool_limits.max_read_file_chars is None
+                else str(runtime.tool_limits.max_read_file_chars)
+            )
+        if max_tool_result_chars_input is not None:
+            max_tool_result_chars_input.value = str(
+                runtime.tool_limits.max_tool_result_chars
+            )
+
+    def sync_deep_task_settings(runtime: NiceGUIRuntimeConfig) -> None:
+        if deep_task_max_turns_input is not None:
+            deep_task_max_turns_input.value = str(runtime.research.default_max_turns)
+        if deep_task_max_tool_invocations_input is not None:
+            deep_task_max_tool_invocations_input.value = (
+                ""
+                if runtime.research.default_max_tool_invocations is None
+                else str(runtime.research.default_max_tool_invocations)
+            )
+        if deep_task_max_elapsed_seconds_input is not None:
+            deep_task_max_elapsed_seconds_input.value = (
+                ""
+                if runtime.research.default_max_elapsed_seconds is None
+                else str(runtime.research.default_max_elapsed_seconds)
+            )
+        if deep_task_include_replay_switch is not None:
+            deep_task_include_replay_switch.value = (
+                runtime.research.include_replay_by_default
+            )
+
+    def sync_permission_settings(runtime: NiceGUIRuntimeConfig) -> None:
         if allow_network_switch is not None:
             allow_network_switch.value = runtime.allow_network
         if allow_filesystem_switch is not None:
@@ -1415,6 +1657,16 @@ def build_assistant_ui(  # noqa: C901
             ]
         if tool_credentials_column is not None:
             render_tool_credentials()
+
+    def sync_settings_inputs() -> None:
+        runtime = active_runtime()
+        sync_connection_settings(runtime)
+        sync_display_settings(runtime)
+        sync_path_settings(runtime)
+        sync_chat_limit_settings(runtime)
+        sync_tool_limit_settings(runtime)
+        sync_deep_task_settings(runtime)
+        sync_permission_settings(runtime)
 
     def open_settings_dialog() -> None:
         sync_settings_inputs()
@@ -1900,6 +2152,8 @@ def build_assistant_ui(  # noqa: C901
             _format_information_security_label(runtime.protection)
         )
         status_chip.set_text(turn_state.status_text or "ready")
+        if composer_disclaimer_label is not None:
+            composer_disclaimer_label.set_visibility(runtime.show_footer_help)
         render_selected_tools()
         render_tool_menu()
         render_runtime_summary(runtime, controller.active_record.token_usage)
@@ -2026,10 +2280,14 @@ def build_assistant_ui(  # noqa: C901
 
     def new_chat(temporary: bool) -> None:
         controller.create_session(temporary=temporary)
+        if controller.active_record.runtime.inspector_open:
+            controller.preferences.workbench_open = True
         refresh_all()
 
     def select_session(session_id: str) -> None:
         controller.select_session(session_id)
+        if controller.active_record.runtime.inspector_open:
+            controller.preferences.workbench_open = True
         refresh_all()
 
     def delete_chat(session_id: str) -> None:
@@ -2288,12 +2546,57 @@ def build_assistant_ui(  # noqa: C901
         except Exception as exc:  # pragma: no cover - UI guard
             ui.notify(f"Could not create user: {exc}", type="negative")
 
-    def apply_settings() -> None:
+    def apply_settings() -> bool:
         runtime = active_runtime()
+        try:
+            updated_runtime = _runtime_with_settings_values(
+                runtime,
+                {
+                    "temperature": temperature_input.value,
+                    "timeout_seconds": timeout_seconds_input.value,
+                    "show_token_usage": show_token_usage_switch.value,
+                    "show_footer_help": show_footer_help_switch.value,
+                    "inspector_open": inspector_open_switch.value,
+                    "max_context_tokens": max_context_tokens_input.value,
+                    "max_tool_round_trips": max_tool_round_trips_input.value,
+                    "max_tool_calls_per_round": max_tool_calls_per_round_input.value,
+                    "max_total_tool_calls_per_turn": (
+                        max_total_tool_calls_per_turn_input.value
+                    ),
+                    "max_entries_per_call": max_entries_per_call_input.value,
+                    "max_recursive_depth": max_recursive_depth_input.value,
+                    "max_files_scanned": max_files_scanned_input.value,
+                    "max_search_matches": max_search_matches_input.value,
+                    "max_read_lines": max_read_lines_input.value,
+                    "max_read_input_bytes": max_read_input_bytes_input.value,
+                    "max_file_size_characters": (max_file_size_characters_input.value),
+                    "max_read_file_chars": max_read_file_chars_input.value,
+                    "max_tool_result_chars": max_tool_result_chars_input.value,
+                    "deep_task_max_turns": deep_task_max_turns_input.value,
+                    "deep_task_max_tool_invocations": (
+                        deep_task_max_tool_invocations_input.value
+                    ),
+                    "deep_task_max_elapsed_seconds": (
+                        deep_task_max_elapsed_seconds_input.value
+                    ),
+                    "deep_task_include_replay": deep_task_include_replay_switch.value,
+                },
+            )
+        except ValueError as exc:
+            ui.notify(str(exc), type="negative")
+            return False
         runtime.provider = ProviderPreset(str(provider_select.value))
         runtime.model_name = str(model_input.value or runtime.model_name)
         runtime.provider_mode_strategy = ProviderModeStrategy(str(mode_select.value))
         runtime.api_base_url = str(base_url_input.value or "").strip() or None
+        runtime.temperature = updated_runtime.temperature
+        runtime.timeout_seconds = updated_runtime.timeout_seconds
+        runtime.show_token_usage = updated_runtime.show_token_usage
+        runtime.show_footer_help = updated_runtime.show_footer_help
+        runtime.inspector_open = updated_runtime.inspector_open
+        runtime.session_config = updated_runtime.session_config
+        runtime.tool_limits = updated_runtime.tool_limits
+        runtime.research = updated_runtime.research
         provider_api_key = str(provider_api_key_input.value or "").strip()
         if provider_api_key and secret_entry_enabled():
             controller.set_session_secret(PROVIDER_API_KEY_FIELD, provider_api_key)
@@ -2322,6 +2625,8 @@ def build_assistant_ui(  # noqa: C901
         controller.preferences.theme_mode = (
             "dark" if bool(dark_mode_switch.value) else "light"
         )
+        if runtime.inspector_open:
+            controller.preferences.workbench_open = True
         remember_recent_runtime_values(runtime)
         if (
             controller.current_user is None
@@ -2333,10 +2638,11 @@ def build_assistant_ui(  # noqa: C901
             controller.save_active_session()
         controller.save_preferences()
         refresh_all()
+        return True
 
     def apply_settings_and_close() -> None:
-        apply_settings()
-        dialogs["settings"].close()
+        if apply_settings():
+            dialogs["settings"].close()
 
     def apply_information_security_settings() -> None:
         protection = active_runtime().protection
@@ -2683,8 +2989,11 @@ def build_assistant_ui(  # noqa: C901
                     "llmt-composer-meta w-full items-center gap-1"
                 ) as composer_meta_row:
                     pass
-                ui.label("AI can make mistakes. Check important info.").classes(
-                    "llmt-composer-disclaimer llmt-muted"
+                composer_disclaimer_label = ui.label(
+                    "AI can make mistakes. Check important info."
+                ).classes("llmt-composer-disclaimer llmt-muted")
+                composer_disclaimer_label.set_visibility(
+                    controller.active_record.runtime.show_footer_help
                 )
 
         with ui.column() as workbench_column:
@@ -2787,6 +3096,17 @@ def build_assistant_ui(  # noqa: C901
                     [strategy.value for strategy in ProviderModeStrategy],
                     label="Provider mode",
                 ).classes("w-full")
+                with ui.row().classes("w-full items-end gap-2"):
+                    temperature_input = (
+                        ui.input("Temperature")
+                        .props("type=number step=0.05 min=0 max=1")
+                        .classes("grow")
+                    )
+                    timeout_seconds_input = (
+                        ui.input("Provider timeout seconds")
+                        .props("type=number step=1 min=1")
+                        .classes("grow")
+                    )
                 with ui.row().classes("w-full items-end gap-2 no-wrap"):
                     base_url_input = (
                         ui.select(
@@ -2825,11 +3145,23 @@ def build_assistant_ui(  # noqa: C901
                     icon="folder_open",
                     on_click=lambda: open_workspace_browser(target="settings"),
                 ).props("flat round color=primary")
-            with settings_expansion("Appearance"):
+            with (
+                settings_expansion("Display"),
+                ui.column().classes("w-full gap-1 q-pt-sm"),
+            ):
                 dark_mode_switch = ui.switch(
                     "Dark mode",
                     value=controller.preferences.theme_mode == "dark",
-                ).classes("w-full q-pt-sm")
+                ).classes("w-full")
+                show_token_usage_switch = ui.switch("Show token usage").classes(
+                    "w-full"
+                )
+                show_footer_help_switch = ui.switch("Show footer disclaimer").classes(
+                    "w-full"
+                )
+                inspector_open_switch = ui.switch("Auto-open workbench").classes(
+                    "w-full"
+                )
             with (
                 settings_expansion("Persistence"),
                 ui.row().classes("w-full items-end gap-2 no-wrap q-pt-sm"),
@@ -2871,6 +3203,108 @@ def build_assistant_ui(  # noqa: C901
                     .props("use-chips")
                     .classes("w-full")
                 )
+            with (
+                settings_expansion("Chat limits"),
+                ui.column().classes("w-full gap-2 q-pt-sm"),
+            ):
+                with ui.row().classes("w-full items-end gap-2"):
+                    max_context_tokens_input = (
+                        ui.input("Max context tokens")
+                        .props("type=number step=1000 min=1")
+                        .classes("grow")
+                    )
+                    max_tool_round_trips_input = (
+                        ui.input("Max tool rounds")
+                        .props("type=number step=1 min=1")
+                        .classes("grow")
+                    )
+                with ui.row().classes("w-full items-end gap-2"):
+                    max_tool_calls_per_round_input = (
+                        ui.input("Max tool calls per round")
+                        .props("type=number step=1 min=1")
+                        .classes("grow")
+                    )
+                    max_total_tool_calls_per_turn_input = (
+                        ui.input("Max total tool calls per turn")
+                        .props("type=number step=1 min=1")
+                        .classes("grow")
+                    )
+            with (
+                settings_expansion("Tool limits"),
+                ui.column().classes("w-full gap-2 q-pt-sm"),
+            ):
+                with ui.row().classes("w-full items-end gap-2"):
+                    max_entries_per_call_input = (
+                        ui.input("Max entries per call")
+                        .props("type=number step=1 min=1")
+                        .classes("grow")
+                    )
+                    max_recursive_depth_input = (
+                        ui.input("Max recursive depth")
+                        .props("type=number step=1 min=1")
+                        .classes("grow")
+                    )
+                with ui.row().classes("w-full items-end gap-2"):
+                    max_files_scanned_input = (
+                        ui.input("Max files scanned")
+                        .props("type=number step=1 min=1")
+                        .classes("grow")
+                    )
+                    max_search_matches_input = (
+                        ui.input("Max search matches")
+                        .props("type=number step=1 min=1")
+                        .classes("grow")
+                    )
+                with ui.row().classes("w-full items-end gap-2"):
+                    max_read_lines_input = (
+                        ui.input("Max read lines")
+                        .props("type=number step=1 min=1")
+                        .classes("grow")
+                    )
+                    max_read_input_bytes_input = (
+                        ui.input("Max read input bytes")
+                        .props("type=number step=1024 min=1")
+                        .classes("grow")
+                    )
+                with ui.row().classes("w-full items-end gap-2"):
+                    max_file_size_characters_input = (
+                        ui.input("Max file size characters")
+                        .props("type=number step=1024 min=1")
+                        .classes("grow")
+                    )
+                    max_read_file_chars_input = (
+                        ui.input("Max read file chars")
+                        .props("type=number step=1024 min=1 clearable")
+                        .classes("grow")
+                    )
+                max_tool_result_chars_input = (
+                    ui.input("Max tool result chars")
+                    .props("type=number step=1024 min=1")
+                    .classes("w-full")
+                )
+            with (
+                settings_expansion("Deep Task limits"),
+                ui.column().classes("w-full gap-2 q-pt-sm"),
+            ):
+                deep_task_max_turns_input = (
+                    ui.input("Deep Task max turns")
+                    .props("type=number step=1 min=1")
+                    .classes("w-full")
+                )
+                with ui.row().classes("w-full items-end gap-2"):
+                    deep_task_max_tool_invocations_input = (
+                        ui.input("Deep Task max tool invocations")
+                        .props("type=number step=1 min=1 clearable")
+                        .classes("grow")
+                    )
+                    deep_task_max_elapsed_seconds_input = (
+                        ui.input("Deep Task max elapsed seconds")
+                        .props("type=number step=1 min=1 clearable")
+                        .classes("grow")
+                    )
+                deep_task_include_replay_switch = ui.switch(
+                    "Include replay in Deep Task artifacts"
+                ).classes("w-full")
             with (
                 settings_expansion("Tool credentials"),
                 ui.column().classes("w-full gap-0") as tool_credentials_column,

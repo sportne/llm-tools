@@ -136,6 +136,7 @@ class NiceGUIActiveTurnHandle:
     runner: ChatSessionTurnRunner | None = None
     harness_service: HarnessSessionService | None = None
     harness_session_id: str | None = None
+    include_harness_replay: bool = False
 
 
 ProviderFactory = Callable[[NiceGUIRuntimeConfig], ModelTurnProvider]
@@ -752,6 +753,7 @@ class NiceGUIChatController:
             turn_number=turn_state.active_turn_number,
             harness_service=service,
             harness_session_id=created.session_id,
+            include_harness_replay=record.runtime.research.include_replay_by_default,
         )
         handle.thread = threading.Thread(
             target=_worker_run_harness,
@@ -802,6 +804,7 @@ class NiceGUIChatController:
             turn_number=turn_state.active_turn_number,
             harness_service=service,
             harness_session_id=harness_session_id,
+            include_harness_replay=record.runtime.research.include_replay_by_default,
         )
         handle.thread = threading.Thread(
             target=_worker_resume_harness,
@@ -1634,7 +1637,7 @@ def _worker_run_harness(handle: NiceGUIActiveTurnHandle) -> None:
         inspection = handle.harness_service.inspect_session(
             HarnessSessionInspectRequest(
                 session_id=handle.harness_session_id,
-                include_replay=True,
+                include_replay=handle.include_harness_replay,
             )
         )
         handle.event_queue.put(
@@ -1680,7 +1683,7 @@ def _worker_resume_harness(
         inspection = handle.harness_service.inspect_session(
             HarnessSessionInspectRequest(
                 session_id=handle.harness_session_id,
-                include_replay=True,
+                include_replay=handle.include_harness_replay,
             )
         )
         handle.event_queue.put(

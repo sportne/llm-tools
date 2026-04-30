@@ -37,12 +37,17 @@ from llm_tools.apps.assistant_app.app import (
     _is_tool_url_setting,
     _models_endpoint_url,
     _parse_information_security_categories,
+    _parse_optional_positive_int_setting,
+    _parse_positive_float_setting,
+    _parse_positive_int_setting,
+    _parse_temperature_setting,
     _protection_corpus_readiness_text,
     _provider_api_key_env_var,
     _provider_base_url_help_text,
     _provider_endpoint_menu_rows,
     _runtime_summary_parts,
     _runtime_summary_text,
+    _runtime_with_settings_values,
     _selected_tool_groups,
     _session_token_estimate_text,
     _settings_section_default_open,
@@ -61,6 +66,7 @@ from llm_tools.apps.assistant_app.controller import (
     NiceGUIActiveTurnHandle,
     NiceGUIChatController,
     NiceGUIQueuedEvent,
+    _effective_assistant_config,
     _interaction_protocol,
     _nicegui_protection_is_ready,
     _remember_status,
@@ -87,8 +93,10 @@ from llm_tools.apps.chat_config import ProviderPreset
 from llm_tools.harness_api import ApprovalResolution
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import SideEffectClass, ToolInvocationRequest
+from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import (
     ChatMessage,
+    ChatSessionConfig,
     ChatTokenUsage,
     ChatWorkflowInspectorEvent,
     ChatWorkflowResultEvent,
@@ -353,11 +361,90 @@ def test_account_menu_actions_and_settings_section_defaults(tmp_path: Path) -> N
     assert _account_menu_identity_labels(None) == ("Development mode", "no auth")
     assert _settings_section_default_open("Connection") is True
     assert _settings_section_default_open("Workspace") is True
-    assert _settings_section_default_open("Appearance") is False
+    assert _settings_section_default_open("Display") is False
     assert _settings_section_default_open("Persistence") is False
     assert _settings_section_default_open("Session permissions") is False
+    assert _settings_section_default_open("Chat limits") is False
+    assert _settings_section_default_open("Tool limits") is False
+    assert _settings_section_default_open("Deep Task limits") is False
     assert _settings_section_default_open("Tool credentials") is False
     assert _settings_section_default_open("Unknown") is False
+
+
+def test_settings_numeric_parsers_and_runtime_mapping() -> None:
+    assert _parse_positive_int_setting("Count", "3") == 3
+    assert _parse_optional_positive_int_setting("Count", "") is None
+    assert _parse_optional_positive_int_setting("Count", "4") == 4
+    assert _parse_positive_float_setting("Timeout", "2.5") == 2.5
+    assert _parse_temperature_setting("0") == 0.0
+    assert _parse_temperature_setting("1") == 1.0
+
+    for parser, args in (
+        (_parse_positive_int_setting, ("Count", "0")),
+        (_parse_optional_positive_int_setting, ("Count", "-1")),
+        (_parse_positive_float_setting, ("Timeout", "0")),
+        (_parse_temperature_setting, ("1.5",)),
+    ):
+        with pytest.raises(ValueError):
+            parser(*args)
+
+    runtime = NiceGUIRuntimeConfig()
+    values = {
+        "temperature": "0.35",
+        "timeout_seconds": "45.5",
+        "show_token_usage": False,
+        "show_footer_help": False,
+        "inspector_open": True,
+        "max_context_tokens": "12000",
+        "max_tool_round_trips": "3",
+        "max_tool_calls_per_round": "2",
+        "max_total_tool_calls_per_turn": "5",
+        "max_entries_per_call": "20",
+        "max_recursive_depth": "4",
+        "max_files_scanned": "300",
+        "max_search_matches": "8",
+        "max_read_lines": "50",
+        "max_read_input_bytes": "4096",
+        "max_file_size_characters": "8192",
+        "max_read_file_chars": "",
+        "max_tool_result_chars": "6000",
+        "deep_task_max_turns": "7",
+        "deep_task_max_tool_invocations": "",
+        "deep_task_max_elapsed_seconds": "90",
+        "deep_task_include_replay": True,
+    }
+
+    updated = _runtime_with_settings_values(runtime, values)
+
+    assert runtime.temperature == 0.1
+    assert updated.temperature == 0.35
+    assert updated.timeout_seconds == 45.5
+    assert updated.show_token_usage is False
+    assert updated.show_footer_help is False
+    assert updated.inspector_open is True
+    assert updated.session_config.max_context_tokens == 12000
+    assert updated.session_config.max_tool_round_trips == 3
+    assert updated.session_config.max_tool_calls_per_round == 2
+    assert updated.session_config.max_total_tool_calls_per_turn == 5
+    assert updated.tool_limits.max_entries_per_call == 20
+    assert updated.tool_limits.max_recursive_depth == 4
+    assert updated.tool_limits.max_files_scanned == 300
+    assert updated.tool_limits.max_search_matches == 8
+    assert updated.tool_limits.max_read_lines == 50
+    assert updated.tool_limits.max_read_input_bytes == 4096
+    assert updated.tool_limits.max_file_size_characters == 8192
+    assert updated.tool_limits.max_read_file_chars is None
+    assert updated.tool_limits.max_tool_result_chars == 6000
+    assert updated.research.default_max_turns == 7
+    assert updated.research.default_max_tool_invocations is None
+    assert updated.research.default_max_elapsed_seconds == 90
+    assert updated.research.include_replay_by_default is True
+
+    invalid_values = dict(values)
+    invalid_values["max_context_tokens"] = "0"
+    with pytest.raises(ValueError):
+        _runtime_with_settings_values(runtime, invalid_values)
+    assert runtime.session_config.max_context_tokens == 24000
 
 
 def test_hosted_page_routes_first_admin_login_and_chat(
@@ -654,6 +741,54 @@ def test_model_discovery_payload_helpers() -> None:
     assert _extract_model_names_from_models_payload({"data": ["plain-model"]}) == [
         "plain-model"
     ]
+
+
+def test_effective_config_reflects_runtime_advanced_settings() -> None:
+    runtime = NiceGUIRuntimeConfig(
+        temperature=0.55,
+        timeout_seconds=33.5,
+        show_token_usage=False,
+        show_footer_help=False,
+        inspector_open=True,
+        session_config=ChatSessionConfig(
+            max_context_tokens=1000,
+            max_tool_round_trips=2,
+            max_tool_calls_per_round=1,
+            max_total_tool_calls_per_turn=3,
+        ),
+        tool_limits=ToolLimits(
+            max_entries_per_call=10,
+            max_recursive_depth=2,
+            max_files_scanned=30,
+            max_search_matches=4,
+            max_read_lines=5,
+            max_read_input_bytes=600,
+            max_file_size_characters=700,
+            max_read_file_chars=800,
+            max_tool_result_chars=900,
+        ),
+    )
+
+    config = _effective_assistant_config(config=AssistantConfig(), runtime=runtime)
+
+    assert config.llm.temperature == 0.55
+    assert config.llm.timeout_seconds == 33.5
+    assert config.ui.show_token_usage is False
+    assert config.ui.show_footer_help is False
+    assert config.ui.inspector_open_by_default is True
+    assert config.session.max_context_tokens == 1000
+    assert config.session.max_tool_round_trips == 2
+    assert config.session.max_tool_calls_per_round == 1
+    assert config.session.max_total_tool_calls_per_turn == 3
+    assert config.tool_limits.max_entries_per_call == 10
+    assert config.tool_limits.max_recursive_depth == 2
+    assert config.tool_limits.max_files_scanned == 30
+    assert config.tool_limits.max_search_matches == 4
+    assert config.tool_limits.max_read_lines == 5
+    assert config.tool_limits.max_read_input_bytes == 600
+    assert config.tool_limits.max_file_size_characters == 700
+    assert config.tool_limits.max_read_file_chars == 800
+    assert config.tool_limits.max_tool_result_chars == 900
 
 
 def test_common_provider_endpoint_catalog_is_local_and_copyable() -> None:
@@ -1426,6 +1561,68 @@ def test_controller_worker_error_paths_enqueue_error_and_complete() -> None:
         ApprovalResolution.APPROVE,
     )
     assert resume_queue.get_nowait().kind == "error"
+    assert resume_queue.get_nowait().kind == "complete"
+
+
+def test_deep_task_workers_use_runtime_replay_setting() -> None:
+    class _Inspection:
+        def model_dump(self, *, mode: str) -> dict[str, object]:
+            assert mode == "json"
+            return {"summary": {"status": "completed"}}
+
+    class _HarnessService:
+        def __init__(self) -> None:
+            self.run_include_replay: bool | None = None
+            self.resume_include_replay: bool | None = None
+
+        def run_session(self, request: object) -> None:
+            del request
+
+        def resume_session(self, request: object) -> None:
+            del request
+
+        def inspect_session(self, request: object) -> _Inspection:
+            include_replay = bool(request.include_replay)
+            if self.run_include_replay is None:
+                self.run_include_replay = include_replay
+            else:
+                self.resume_include_replay = include_replay
+            return _Inspection()
+
+    service = _HarnessService()
+    run_queue: queue.Queue[NiceGUIQueuedEvent] = queue.Queue()
+    _worker_run_harness(
+        NiceGUIActiveTurnHandle(
+            session_id="session-1",
+            mode="deep_task",
+            event_queue=run_queue,
+            thread=threading.Thread(target=lambda: None),
+            turn_number=1,
+            harness_service=service,  # type: ignore[arg-type]
+            harness_session_id="harness-1",
+            include_harness_replay=False,
+        )
+    )
+    assert service.run_include_replay is False
+    assert run_queue.get_nowait().kind == "harness_result"
+    assert run_queue.get_nowait().kind == "complete"
+
+    resume_queue: queue.Queue[NiceGUIQueuedEvent] = queue.Queue()
+    _worker_resume_harness(
+        NiceGUIActiveTurnHandle(
+            session_id="session-1",
+            mode="deep_task",
+            event_queue=resume_queue,
+            thread=threading.Thread(target=lambda: None),
+            turn_number=2,
+            harness_service=service,  # type: ignore[arg-type]
+            harness_session_id="harness-1",
+            include_harness_replay=True,
+        ),
+        ApprovalResolution.APPROVE,
+    )
+    assert service.resume_include_replay is True
+    assert resume_queue.get_nowait().kind == "harness_result"
     assert resume_queue.get_nowait().kind == "complete"
 
 
