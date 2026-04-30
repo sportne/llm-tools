@@ -16,6 +16,7 @@ from llm_tools.apps.assistant_app.app import (
     NICEGUI_APPROVAL_LABELS,
     NICEGUI_APPROVAL_OPTIONS,
     NICEGUI_PROVIDER_OPTIONS,
+    _account_menu_action_labels,
     _available_windows_drive_roots,
     _branding_favicon_href,
     _branding_favicon_javascript,
@@ -43,6 +44,7 @@ from llm_tools.apps.assistant_app.app import (
     _runtime_summary_text,
     _selected_tool_groups,
     _session_token_estimate_text,
+    _settings_section_default_open,
     _sidebar_container_classes,
     _workbench_container_classes,
     build_assistant_ui,
@@ -332,6 +334,26 @@ def test_admin_user_helpers_prevent_self_disable(tmp_path: Path) -> None:
     assert _can_admin_disable_user(admin, other_admin) is True
     assert _can_admin_disable_user(admin, user) is True
     assert _can_admin_disable_user(user, admin) is False
+
+
+def test_account_menu_actions_and_settings_section_defaults(tmp_path: Path) -> None:
+    store = _chat_store(tmp_path)
+    store.initialize()
+    auth = LocalAuthProvider(store)
+    password = "admin-" + "value"
+    admin = auth.create_user(username="admin", password=password, role="admin")
+    user = auth.create_user(username="user", password=password, role="user")
+
+    assert _account_menu_action_labels(admin) == ["Settings", "Admin", "Log out"]
+    assert _account_menu_action_labels(user) == ["Settings", "Log out"]
+    assert _account_menu_action_labels(None) == ["Settings", "Log out"]
+    assert _settings_section_default_open("Connection") is True
+    assert _settings_section_default_open("Workspace") is True
+    assert _settings_section_default_open("Appearance") is False
+    assert _settings_section_default_open("Persistence") is False
+    assert _settings_section_default_open("Session permissions") is False
+    assert _settings_section_default_open("Tool credentials") is False
+    assert _settings_section_default_open("Unknown") is False
 
 
 def test_hosted_page_routes_first_admin_login_and_chat(

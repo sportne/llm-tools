@@ -244,6 +244,30 @@ def _can_admin_disable_user(
     return current_user.user_id != target_user.user_id
 
 
+_SETTINGS_SECTION_DEFAULT_OPEN = {
+    "Connection": True,
+    "Workspace": True,
+    "Appearance": False,
+    "Persistence": False,
+    "Session permissions": False,
+    "Tool credentials": False,
+}
+
+
+def _account_menu_action_labels(user: NiceGUIUser | None) -> list[str]:
+    """Return account menu action labels in display order."""
+    labels = ["Settings"]
+    if _is_admin_user(user):
+        labels.append("Admin")
+    labels.append("Log out")
+    return labels
+
+
+def _settings_section_default_open(section_name: str) -> bool:
+    """Return whether a settings section should open by default."""
+    return _SETTINGS_SECTION_DEFAULT_OPEN.get(section_name, False)
+
+
 def _format_workbench_duration(seconds: float | None) -> str:
     """Return a compact workbench duration label."""
     if seconds is None:
@@ -1023,11 +1047,6 @@ def build_assistant_ui(  # noqa: C901
         .llmt-sidebar-body {
             flex: 1 1 auto; min-height: 0; width: 100%; overflow: hidden;
         }
-        .llmt-sidebar-footer {
-            flex: 0 0 auto; border-top: 1px solid #d8d6ce;
-            padding: 6px 8px 10px !important;
-        }
-        body.body--dark .llmt-sidebar-footer { border-top-color: #373a34; }
         .llmt-transcript {
             flex: 1 1 auto; min-height: 0; width: 100%; overflow: hidden;
         }
@@ -1098,7 +1117,17 @@ def build_assistant_ui(  # noqa: C901
         }
         body.body--dark .llmt-credential-row { border-top-color: #373a34; }
         .llmt-settings-body {
-            width: 100%; max-height: min(70vh, 560px);
+            width: 100%; flex: 1 1 auto; min-height: 0;
+        }
+        .llmt-settings-card {
+            width: min(760px, calc(100vw - 48px));
+            height: min(820px, calc(100vh - 64px));
+            max-width: calc(100vw - 48px);
+            max-height: calc(100vh - 64px);
+            display: flex; flex-direction: column; overflow: hidden;
+        }
+        .llmt-settings-card .q-card__section {
+            flex: 0 0 auto;
         }
         .llmt-settings-section {
             border-top: 1px solid #dedcd4; padding-top: 10px; margin-top: 4px;
@@ -1330,29 +1359,6 @@ def build_assistant_ui(  # noqa: C901
                 )
             )
             workbench_column.set_visibility(controller.preferences.workbench_open)
-
-    def settings_button_props(*, collapsed: bool) -> str:
-        props = "flat color=primary"
-        if collapsed:
-            props += " round"
-        return props
-
-    def render_settings_footer(*, collapsed: bool) -> None:
-        with ui.row().classes(
-            "llmt-sidebar-footer w-full q-px-sm q-pt-sm items-center "
-            + ("justify-center" if collapsed else "")
-        ):
-            if collapsed:
-                ui.button(
-                    icon="settings",
-                    on_click=open_settings_dialog,
-                ).props(settings_button_props(collapsed=True))
-            else:
-                ui.button(
-                    "Settings",
-                    icon="settings",
-                    on_click=open_settings_dialog,
-                ).props(settings_button_props(collapsed=False))
 
     def set_model_options(values: Sequence[str], *, selected: str) -> None:
         options = [value for value in values if value]
@@ -1835,7 +1841,6 @@ def build_assistant_ui(  # noqa: C901
                     )
             if collapsed:
                 ui.element("div").classes("llmt-sidebar-body")
-                render_settings_footer(collapsed=True)
                 return
             ui.input(
                 "Search chats",
@@ -1878,7 +1883,6 @@ def build_assistant_ui(  # noqa: C901
                                     delete_chat(sid)
                                 ),
                             ).props("flat round dense color=negative")
-            render_settings_footer(collapsed=False)
 
     def render_header() -> None:
         runtime = active_runtime()
@@ -2608,9 +2612,15 @@ def build_assistant_ui(  # noqa: C901
                             ui.label(controller.current_user.role).classes(
                                 "text-xs llmt-muted q-px-sm q-pb-sm"
                             )
-                            if _is_admin_user(controller.current_user):
-                                ui.menu_item("Admin", on_click=open_admin_dialog)
-                            ui.menu_item("Log out", on_click=logout_hosted_user)
+                            for label in _account_menu_action_labels(
+                                controller.current_user
+                            ):
+                                if label == "Settings":
+                                    ui.menu_item(label, on_click=open_settings_dialog)
+                                elif label == "Admin":
+                                    ui.menu_item(label, on_click=open_admin_dialog)
+                                elif label == "Log out":
+                                    ui.menu_item(label, on_click=logout_hosted_user)
                     ui.button(
                         icon="view_sidebar",
                         on_click=toggle_workbench,
@@ -2727,88 +2737,106 @@ def build_assistant_ui(  # noqa: C901
             ):
                 pass
 
-    with ui.dialog() as settings_dialog, ui.card().classes("w-[520px] max-h-[88vh]"):
+    def settings_expansion(title: str) -> Any:
+        return (
+            ui.expansion(title, value=_settings_section_default_open(title))
+            .props("expand-separator")
+            .classes("llmt-settings-expansion w-full")
+        )
+
+    with ui.dialog() as settings_dialog, ui.card().classes("llmt-settings-card"):
         dialogs["settings"] = settings_dialog
-        ui.label("Settings").classes("text-lg")
+        ui.label("Settings").classes("text-lg q-pb-sm")
         with (
             ui.scroll_area().classes("llmt-settings-body"),
-            ui.column().classes("w-full gap-2 q-pr-sm"),
+            ui.column().classes("w-full gap-2 q-pr-sm q-pb-sm"),
         ):
-            dark_mode_switch = ui.switch(
-                "Dark mode",
-                value=controller.preferences.theme_mode == "dark",
-            ).classes("w-full")
-            provider_select = ui.select(
-                NICEGUI_PROVIDER_OPTIONS,
-                label="Provider",
-            ).classes("w-full")
-            with ui.row().classes("w-full items-end gap-2 no-wrap"):
-                model_input = (
-                    ui.select(
-                        [controller.active_record.runtime.model_name],
-                        label="Model",
-                        value=controller.active_record.runtime.model_name,
-                        with_input=True,
-                        new_value_mode="add-unique",
+            with (
+                settings_expansion("Connection"),
+                ui.column().classes("w-full gap-2 q-pt-sm"),
+            ):
+                provider_select = ui.select(
+                    NICEGUI_PROVIDER_OPTIONS,
+                    label="Provider",
+                ).classes("w-full")
+                with ui.row().classes("w-full items-end gap-2 no-wrap"):
+                    model_input = (
+                        ui.select(
+                            [controller.active_record.runtime.model_name],
+                            label="Model",
+                            value=controller.active_record.runtime.model_name,
+                            with_input=True,
+                            new_value_mode="add-unique",
+                        )
+                        .classes("grow")
+                        .props("clearable")
                     )
-                    .classes("grow")
-                    .props("clearable")
-                )
-                ui.button(
-                    icon="refresh",
-                    on_click=lambda: refresh_model_options(notify=True),
-                ).props("flat round color=primary")
-            mode_select = ui.select(
-                [strategy.value for strategy in ProviderModeStrategy],
-                label="Provider mode",
-            ).classes("w-full")
-            with ui.row().classes("w-full items-end gap-2 no-wrap"):
-                base_url_input = (
-                    ui.select(
-                        base_url_options(controller.active_record.runtime),
-                        label="Base URL",
-                        with_input=True,
-                        new_value_mode="add-unique",
+                    ui.button(
+                        icon="refresh",
+                        on_click=lambda: refresh_model_options(notify=True),
+                    ).props("flat round color=primary")
+                mode_select = ui.select(
+                    [strategy.value for strategy in ProviderModeStrategy],
+                    label="Provider mode",
+                ).classes("w-full")
+                with ui.row().classes("w-full items-end gap-2 no-wrap"):
+                    base_url_input = (
+                        ui.select(
+                            base_url_options(controller.active_record.runtime),
+                            label="Base URL",
+                            with_input=True,
+                            new_value_mode="add-unique",
+                        )
+                        .props("clearable")
+                        .classes("grow")
                     )
-                    .props("clearable")
-                    .classes("grow")
-                )
-                with base_url_input:
-                    ui.tooltip(_provider_base_url_help_text()).props("delay=700")
-                render_provider_endpoint_help_button()
-            with ui.row().classes("w-full items-end gap-2 no-wrap"):
-                provider_api_key_input = (
-                    ui.input(
-                        "Provider API key",
-                        placeholder="Paste for this session; leave blank to keep",
+                    with base_url_input:
+                        ui.tooltip(_provider_base_url_help_text()).props("delay=700")
+                    render_provider_endpoint_help_button()
+                with ui.row().classes("w-full items-end gap-2 no-wrap"):
+                    provider_api_key_input = (
+                        ui.input(
+                            "Provider API key",
+                            placeholder="Paste for this session; leave blank to keep",
+                        )
+                        .props("type=password autocomplete=off")
+                        .classes("grow")
                     )
-                    .props("type=password autocomplete=off")
-                    .classes("grow")
-                )
-                if not secret_entry_enabled():
-                    provider_api_key_input.disable()
-                ui.button(
-                    icon="clear",
-                    on_click=clear_provider_api_key,
-                ).props("flat round")
-            with ui.row().classes("w-full items-end gap-2 no-wrap"):
+                    if not secret_entry_enabled():
+                        provider_api_key_input.disable()
+                    ui.button(
+                        icon="clear",
+                        on_click=clear_provider_api_key,
+                    ).props("flat round")
+            with (
+                settings_expansion("Workspace"),
+                ui.row().classes("w-full items-end gap-2 no-wrap q-pt-sm"),
+            ):
                 workspace_input = ui.input("Workspace root").classes("grow")
                 ui.button(
                     icon="folder_open",
                     on_click=lambda: open_workspace_browser(target="settings"),
                 ).props("flat round color=primary")
-            with ui.column().classes("llmt-settings-section w-full gap-1"):
-                ui.label("Persistence").classes("text-base")
-                with ui.row().classes("w-full items-end gap-2 no-wrap"):
-                    database_path_input = ui.input("SQLite database").classes("grow")
-                    if controller.current_user is not None:
-                        database_path_input.disable()
-                    ui.button(
-                        icon="folder_open",
-                        on_click=lambda: open_workspace_browser(target="database"),
-                    ).props("flat round color=primary")
-            with ui.column().classes("llmt-settings-section w-full gap-1"):
-                ui.label("Session permissions").classes("text-base")
+            with settings_expansion("Appearance"):
+                dark_mode_switch = ui.switch(
+                    "Dark mode",
+                    value=controller.preferences.theme_mode == "dark",
+                ).classes("w-full q-pt-sm")
+            with (
+                settings_expansion("Persistence"),
+                ui.row().classes("w-full items-end gap-2 no-wrap q-pt-sm"),
+            ):
+                database_path_input = ui.input("SQLite database").classes("grow")
+                if controller.current_user is not None:
+                    database_path_input.disable()
+                ui.button(
+                    icon="folder_open",
+                    on_click=lambda: open_workspace_browser(target="database"),
+                ).props("flat round color=primary")
+            with (
+                settings_expansion("Session permissions"),
+                ui.column().classes("w-full gap-1 q-pt-sm"),
+            ):
                 allow_network_switch = ui.switch(
                     "Allow network tools",
                     value=controller.active_record.runtime.allow_network,
@@ -2835,10 +2863,11 @@ def build_assistant_ui(  # noqa: C901
                     .props("use-chips")
                     .classes("w-full")
                 )
-            with ui.column().classes("llmt-settings-section w-full gap-1"):
-                ui.label("Tool access").classes("text-base")
-                with ui.column().classes("w-full gap-0") as tool_credentials_column:
-                    pass
+            with (
+                settings_expansion("Tool credentials"),
+                ui.column().classes("w-full gap-0") as tool_credentials_column,
+            ):
+                pass
         with ui.row().classes("justify-end w-full"):
             ui.button("Cancel", on_click=settings_dialog.close).props("flat")
             ui.button("Apply", on_click=apply_settings_and_close)
