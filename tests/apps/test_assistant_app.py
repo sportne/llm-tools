@@ -50,6 +50,7 @@ from llm_tools.apps.assistant_app.app import (
     _runtime_with_settings_values,
     _selected_tool_groups,
     _session_token_estimate_text,
+    _set_composer_draft,
     _settings_section_default_open,
     _sidebar_container_classes,
     _workbench_container_classes,
@@ -82,6 +83,7 @@ from llm_tools.apps.assistant_app.models import (
     NiceGUIHostedConfig,
     NiceGUIPreferences,
     NiceGUIRuntimeConfig,
+    NiceGUITranscriptEntry,
 )
 from llm_tools.apps.assistant_app.provider_endpoints import (
     COMMON_OPENAI_COMPATIBLE_ENDPOINTS,
@@ -95,6 +97,8 @@ from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import SideEffectClass, ToolInvocationRequest
 from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import (
+    ChatCitation,
+    ChatFinalResponse,
     ChatMessage,
     ChatSessionConfig,
     ChatTokenUsage,
@@ -445,6 +449,26 @@ def test_settings_numeric_parsers_and_runtime_mapping() -> None:
     with pytest.raises(ValueError):
         _runtime_with_settings_values(runtime, invalid_values)
     assert runtime.session_config.max_context_tokens == 24000
+
+
+def test_set_composer_draft_updates_input_without_submit() -> None:
+    class _Input:
+        value = ""
+
+        def __init__(self) -> None:
+            self.methods: list[str] = []
+
+        def run_method(self, method: str) -> None:
+            self.methods.append(method)
+
+    composer_state = {"text": ""}
+    input_element = _Input()
+
+    _set_composer_draft("Follow this up", composer_state, input_element)
+
+    assert composer_state["text"] == "Follow this up"
+    assert input_element.value == "Follow this up"
+    assert input_element.methods == ["focus"]
 
 
 def test_hosted_page_routes_first_admin_login_and_chat(
@@ -1029,6 +1053,54 @@ def test_app_builder_renders_with_temporary_sqlite_db(tmp_path: Path) -> None:
     build_assistant_ui(controller)
 
     assert controller.active_record.summary.title == "New chat"
+
+
+def test_app_builder_renders_final_response_metadata(tmp_path: Path) -> None:
+    from nicegui import ui
+
+    controller = _controller(tmp_path, _FakeProvider([]))
+    controller.active_record.transcript.append(
+        NiceGUITranscriptEntry(
+            role="assistant",
+            text="Answer with detail.",
+            final_response=ChatFinalResponse(
+                answer="Answer with detail.",
+                citations=[
+                    ChatCitation(
+                        source_path="README.md",
+                        line_start=4,
+                        line_end=7,
+                        excerpt="Important README excerpt",
+                    )
+                ],
+                confidence=0.7,
+                uncertainty=["Need confirmation"],
+                missing_information=["No workspace root"],
+                follow_up_suggestions=["Select a root"],
+            ),
+        )
+    )
+
+    build_assistant_ui(controller)
+
+    rendered_text: list[str] = []
+    for element in ui.context.client.elements.values():
+        text = getattr(element, "text", None)
+        if text:
+            rendered_text.append(str(text))
+        label = getattr(element, "props", {}).get("label")
+        if label:
+            rendered_text.append(str(label))
+
+    assert "Confidence 70%" in rendered_text
+    assert "README.md:4-7" in rendered_text
+    assert "Important README excerpt" in rendered_text
+    assert "Uncertainty" in rendered_text
+    assert "- Need confirmation" in rendered_text
+    assert "Missing information" in rendered_text
+    assert "- No workspace root" in rendered_text
+    assert "Follow-up suggestions" in rendered_text
+    assert "Select a root" in rendered_text
 
 
 def test_app_builder_applies_initial_layout_preferences(tmp_path: Path) -> None:

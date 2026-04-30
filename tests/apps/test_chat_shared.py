@@ -10,7 +10,9 @@ from pydantic import ValidationError
 from llm_tools.apps.assistant_app.models import NiceGUIPreferences, NiceGUIRuntimeConfig
 from llm_tools.apps.chat_config import ChatLLMConfig, ChatPolicyConfig, ProviderPreset
 from llm_tools.apps.chat_presentation import (
+    final_response_details,
     format_citation,
+    format_confidence_label,
     format_final_response,
     format_final_response_metadata,
     format_transcript_text,
@@ -91,10 +93,16 @@ def test_nicegui_runtime_models_validate_and_normalize() -> None:
 
 
 def test_chat_presentation_formatters() -> None:
-    citation = ChatCitation(source_path="README.md", line_start=4, line_end=7)
+    citation = ChatCitation(
+        source_path="README.md",
+        line_start=4,
+        line_end=7,
+        excerpt="Relevant excerpt",
+    )
     response = ChatFinalResponse(
         answer="Done",
         citations=[citation],
+        confidence=0.7,
         uncertainty=["Need confirmation"],
         missing_information=["No workspace root"],
         follow_up_suggestions=["Select a root"],
@@ -102,6 +110,14 @@ def test_chat_presentation_formatters() -> None:
 
     assert pretty_json({"b": 1, "a": 2}).splitlines()[0] == "{"
     assert format_citation(citation) == "README.md:4-7"
+    assert format_confidence_label(None) is None
+    assert format_confidence_label(0.7) == "Confidence 70%"
+    details = final_response_details(response)
+    assert details.has_content is True
+    assert details.citations[0].label == "README.md:4-7"
+    assert details.citations[0].excerpt == "Relevant excerpt"
+    assert details.confidence_label == "Confidence 70%"
+    assert details.follow_up_suggestions == ("Select a root",)
     assert "Citations:" in format_final_response(response)
     assert "Missing Information:" in format_final_response_metadata(response)
     assert format_transcript_text("assistant", "Answer") == "Assistant:\nAnswer"
@@ -243,6 +259,7 @@ def test_chat_presentation_empty_and_single_line_branches() -> None:
     bare_response = ChatFinalResponse(answer="Only answer")
     assert format_final_response(bare_response) == "Only answer"
     assert format_final_response_metadata(bare_response) == ""
+    assert final_response_details(bare_response).has_content is False
     assert pretty_json(None) == ""
 
     path_only = ChatCitation(source_path="README.md")

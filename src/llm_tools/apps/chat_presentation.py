@@ -3,8 +3,39 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
 from llm_tools.workflow_api import ChatCitation, ChatFinalResponse
+
+
+@dataclass(frozen=True)
+class CitationDisplay:
+    """UI-ready citation label and optional excerpt."""
+
+    label: str
+    excerpt: str | None = None
+
+
+@dataclass(frozen=True)
+class FinalResponseDetails:
+    """UI-ready supplemental final-response metadata."""
+
+    citations: tuple[CitationDisplay, ...] = ()
+    confidence_label: str | None = None
+    uncertainty: tuple[str, ...] = ()
+    missing_information: tuple[str, ...] = ()
+    follow_up_suggestions: tuple[str, ...] = ()
+
+    @property
+    def has_content(self) -> bool:
+        """Return whether there is any supplemental metadata to render."""
+        return bool(
+            self.citations
+            or self.confidence_label
+            or self.uncertainty
+            or self.missing_information
+            or self.follow_up_suggestions
+        )
 
 
 def pretty_json(value: object) -> str:
@@ -21,6 +52,30 @@ def format_citation(citation: ChatCitation) -> str:
     if citation.line_end is None or citation.line_end == citation.line_start:
         return f"{citation.source_path}:{citation.line_start}"
     return f"{citation.source_path}:{citation.line_start}-{citation.line_end}"
+
+
+def format_confidence_label(confidence: float | None) -> str | None:
+    """Return a compact confidence label for UI display."""
+    if confidence is None:
+        return None
+    return f"Confidence {round(confidence * 100):.0f}%"
+
+
+def final_response_details(response: ChatFinalResponse) -> FinalResponseDetails:
+    """Return supplemental final-response metadata shaped for UI rendering."""
+    return FinalResponseDetails(
+        citations=tuple(
+            CitationDisplay(
+                label=format_citation(citation),
+                excerpt=citation.excerpt,
+            )
+            for citation in response.citations
+        ),
+        confidence_label=format_confidence_label(response.confidence),
+        uncertainty=tuple(response.uncertainty),
+        missing_information=tuple(response.missing_information),
+        follow_up_suggestions=tuple(response.follow_up_suggestions),
+    )
 
 
 def format_final_response(response: ChatFinalResponse) -> str:

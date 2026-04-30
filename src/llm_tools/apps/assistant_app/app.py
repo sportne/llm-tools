@@ -46,6 +46,7 @@ from llm_tools.apps.assistant_tool_capabilities import (
 )
 from llm_tools.apps.assistant_tool_registry import build_assistant_available_tool_specs
 from llm_tools.apps.chat_config import ProviderPreset
+from llm_tools.apps.chat_presentation import final_response_details
 from llm_tools.llm_providers import ProviderModeStrategy
 from llm_tools.tool_api import SideEffectClass
 from llm_tools.tools.filesystem import ToolLimits
@@ -226,6 +227,21 @@ def _runtime_summary_text(
 def _composer_action_icon(*, busy: bool) -> str:
     """Return the icon for the primary composer action."""
     return "stop" if busy else "send"
+
+
+def _set_composer_draft(
+    text: str,
+    composer_state: dict[str, str],
+    composer_input: Any | None,
+) -> None:
+    """Set composer draft text without submitting it."""
+    composer_state["text"] = text
+    if composer_input is None:
+        return
+    composer_input.value = text
+    run_method = getattr(composer_input, "run_method", None)
+    if callable(run_method):
+        run_method("focus")
 
 
 def _is_admin_user(user: NiceGUIUser | None) -> bool:
@@ -1322,6 +1338,18 @@ def build_assistant_ui(  # noqa: C901
         }
         .llmt-message li { margin: 0.15rem 0; }
         .llmt-message pre { white-space: pre-wrap; overflow-x: auto; }
+        .llmt-response-details {
+            border-top: 1px solid #e5e3dc; margin-top: 10px; padding-top: 8px;
+        }
+        body.body--dark .llmt-response-details { border-top-color: #383b35; }
+        .llmt-response-chip {
+            border: 1px solid #cfccc1; border-radius: 999px;
+            padding: 2px 8px; font-size: 0.76rem;
+        }
+        body.body--dark .llmt-response-chip { border-color: #4a4d46; }
+        .llmt-follow-up-button .q-btn__content {
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
         .llmt-user { background: #e8f2ef; margin-left: auto; }
         .llmt-assistant { background: #ffffff; border: 1px solid #e0ded7; }
         .llmt-system { background: #fff7df; border: 1px solid #ead797; }
@@ -2166,6 +2194,63 @@ def build_assistant_ui(  # noqa: C901
         sync_settings_inputs()
         render_admin_user_list()
 
+    def set_follow_up_suggestion(text: str) -> None:
+        _set_composer_draft(text, composer_state, composer_input)
+        ui.notify("Suggestion added to composer")
+
+    def render_response_details(entry: Any) -> None:
+        if entry.final_response is None:
+            return
+        details = final_response_details(entry.final_response)
+        if not details.has_content:
+            return
+        with ui.column().classes("llmt-response-details w-full gap-2"):
+            if details.confidence_label or details.citations:
+                with ui.row().classes("w-full items-center gap-1"):
+                    if details.confidence_label:
+                        ui.label(details.confidence_label).classes(
+                            "llmt-response-chip llmt-muted"
+                        )
+                    for citation in details.citations:
+                        citation_label = ui.label(citation.label).classes(
+                            "llmt-response-chip llmt-muted"
+                        )
+                        if citation.excerpt:
+                            with citation_label:
+                                ui.tooltip(citation.excerpt).props("delay=700")
+            if details.uncertainty:
+                with (
+                    ui.expansion("Uncertainty", value=False)
+                    .props("dense expand-separator")
+                    .classes("w-full text-xs"),
+                    ui.column().classes("w-full gap-1 q-pt-xs"),
+                ):
+                    for item in details.uncertainty:
+                        ui.label(f"- {item}").classes("text-xs llmt-muted")
+            if details.missing_information:
+                with (
+                    ui.expansion("Missing information", value=False)
+                    .props("dense expand-separator")
+                    .classes("w-full text-xs"),
+                    ui.column().classes("w-full gap-1 q-pt-xs"),
+                ):
+                    for item in details.missing_information:
+                        ui.label(f"- {item}").classes("text-xs llmt-muted")
+            if details.follow_up_suggestions:
+                ui.label("Follow-up suggestions").classes("text-xs llmt-muted")
+                with ui.row().classes("w-full items-center gap-1"):
+                    for suggestion in details.follow_up_suggestions:
+                        ui.button(
+                            suggestion,
+                            on_click=(
+                                lambda _event, text=suggestion: (
+                                    set_follow_up_suggestion(text)
+                                )
+                            ),
+                        ).props("outline dense no-caps").classes(
+                            "llmt-follow-up-button"
+                        )
+
     def render_transcript() -> None:
         transcript_column.clear()
         record = controller.active_record
@@ -2198,14 +2283,7 @@ def build_assistant_ui(  # noqa: C901
                         if posted_at:
                             ui.label(posted_at).classes("text-xs llmt-muted")
                     ui.markdown(entry.text)
-                    if entry.final_response and entry.final_response.citations:
-                        citations = ", ".join(
-                            citation.source_path
-                            for citation in entry.final_response.citations
-                        )
-                        ui.label(f"Citations: {citations}").classes(
-                            "text-xs llmt-muted"
-                        )
+                    render_response_details(entry)
                 if entry.role == "assistant":
                     with ui.row().classes("q-px-xl q-pb-xs gap-1"):
                         ui.button(
