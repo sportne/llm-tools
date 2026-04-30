@@ -81,6 +81,9 @@ def test_assistant_store_paths_expand_user(
     home = tmp_path / "home"
     pointer_path = tmp_path / "pointer.txt"
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("HOMEDRIVE", raising=False)
+    monkeypatch.delenv("HOMEPATH", raising=False)
     monkeypatch.setattr(store_module, "_DB_POINTER_PATH", pointer_path)
     monkeypatch.delenv(NICEGUI_DB_ENV_VAR, raising=False)
 
