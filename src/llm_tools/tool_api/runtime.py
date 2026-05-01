@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import queue
 import signal
 import threading
 from contextlib import contextmanager
@@ -571,6 +572,14 @@ class ToolRuntime:
         *,
         timeout_seconds: int | None,
     ) -> Any:
+        if self._requires_thread_timeout(timeout_seconds):
+            return self._invoke_sync_tool_with_thread_timeout(
+                tool,
+                context,
+                validated_input,
+                permit,
+                timeout_seconds=timeout_seconds,
+            )
         with self._sync_timeout_guard(timeout_seconds):
             return tool.invoke(context, validated_input, _permit=permit)
 
@@ -593,20 +602,20 @@ class ToolRuntime:
                     "Tool execution exceeded the configured timeout."
                 ) from exc
         if tool.__class__._has_sync_implementation():
-            if timeout_seconds is None:
-                return await asyncio.to_thread(
-                    tool.invoke,
-                    context,
-                    validated_input,
-                    _permit=permit,
-                )
-            return self._invoke_sync_tool(
-                tool,
+            coroutine = asyncio.to_thread(
+                tool.invoke,
                 context,
                 validated_input,
-                permit,
-                timeout_seconds=timeout_seconds,
+                _permit=permit,
             )
+            try:
+                if timeout_seconds is None:
+                    return await coroutine
+                return await asyncio.wait_for(coroutine, timeout=timeout_seconds)
+            except TimeoutError as exc:
+                raise _ToolTimeoutError(
+                    "Tool execution exceeded the configured timeout."
+                ) from exc
         raise RuntimeError(
             f"Tool '{tool.spec.name}' has no synchronous or asynchronous implementation."
         )
@@ -809,6 +818,43 @@ class ToolRuntime:
         finally:
             signal.setitimer(signal.ITIMER_REAL, *previous_timer)
             signal.signal(signal.SIGALRM, previous_handler)
+
+    @staticmethod
+    def _requires_thread_timeout(timeout_seconds: int | None) -> bool:
+        return timeout_seconds is not None and (
+            os.name != "posix"
+            or threading.current_thread() is not threading.main_thread()
+        )
+
+    @staticmethod
+    def _invoke_sync_tool_with_thread_timeout(
+        tool: Tool[Any, Any],
+        context: ToolExecutionContext,
+        validated_input: BaseModel,
+        permit: _ExecutionPermit,
+        *,
+        timeout_seconds: int | None,
+    ) -> Any:
+        result_queue: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+        def _run() -> None:
+            try:
+                result_queue.put(
+                    (True, tool.invoke(context, validated_input, _permit=permit))
+                )
+            except BaseException as exc:  # noqa: BLE001 - replay tool failures.
+                result_queue.put((False, exc))
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout_seconds)
+        if thread.is_alive():
+            raise _ToolTimeoutError("Tool execution exceeded the configured timeout.")
+
+        ok, value = result_queue.get_nowait()
+        if ok:
+            return value
+        raise value
 
     def _new_redactor(self, tool_name: str) -> Redactor:
         return Redactor(self._policy.redaction, tool_name=tool_name)

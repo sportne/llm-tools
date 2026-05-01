@@ -18,6 +18,13 @@ from llm_tools.apps.harness_cli import (
 )
 
 
+def _patch_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("HOMEDRIVE", raising=False)
+    monkeypatch.delenv("HOMEPATH", raising=False)
+
+
 def test_harness_cli_start_list_and_inspect_json(tmp_path: Path, capsys) -> None:
     store_dir = tmp_path / "store"
 
@@ -232,7 +239,7 @@ def test_harness_cli_load_script_and_resolution_helpers(tmp_path: Path) -> None:
 def test_harness_cli_default_store_dir_is_user_scoped(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _patch_home(monkeypatch, tmp_path)
 
     args = build_parser().parse_args(["list"])
 
@@ -242,7 +249,7 @@ def test_harness_cli_default_store_dir_is_user_scoped(
 
 def test_harness_cli_module_entrypoint(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _patch_home(monkeypatch, tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
