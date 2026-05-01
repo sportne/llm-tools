@@ -283,6 +283,7 @@ def _build_probe_controller(
     config: Any,
     runtime: Any,
     provider: Any | None,
+    beta_feature_flags: dict[str, bool] | None = None,
 ) -> NiceGUIChatController:
     """Build a NiceGUI controller with isolated encrypted probe persistence."""
     store_dir = Path(gettempdir()) / "llm-tools-e2e-nicegui" / session_id
@@ -310,6 +311,8 @@ def _build_probe_controller(
         root_path=Path(runtime.root_path) if runtime.root_path else None,
         provider_factory=_factory,
     )
+    if beta_feature_flags:
+        controller.set_beta_feature_flags(**beta_feature_flags)
     record = controller.active_record
     record.runtime = runtime.model_copy(deep=True)
     controller.save_active_session()
@@ -365,6 +368,7 @@ def _run_chat_turn(
     session_state: ChatSessionState,
     provider: Any | None = None,
     protection_controller_factory: Any | None = None,
+    enable_information_protection: bool = False,
 ) -> dict[str, Any]:
     turn_provider = provider
     if turn_provider is None:
@@ -386,6 +390,11 @@ def _run_chat_turn(
         config=config,
         runtime=runtime,
         provider=turn_provider,
+        beta_feature_flags=(
+            {"information_protection_enabled": True}
+            if enable_information_protection
+            else None
+        ),
     )
     controller.active_record.workflow_session_state = session_state
     controller.save_active_session()
@@ -848,6 +857,7 @@ def _run_chat_protection_demo(
         session_state=session_state,
         provider=_UnexpectedProvider(),
         protection_controller_factory=_build_demo_controller,
+        enable_information_protection=True,
     )
     challenge_session_state = ChatSessionState.model_validate(
         challenge_turn["session_state"]
@@ -861,6 +871,7 @@ def _run_chat_protection_demo(
         session_state=challenge_session_state,
         provider=_UnexpectedProvider(),
         protection_controller_factory=_build_demo_controller,
+        enable_information_protection=True,
     )
     feedback_session_state = ChatSessionState.model_validate(
         feedback_turn["session_state"]
@@ -895,6 +906,7 @@ def _run_chat_protection_demo(
             ]
         ),
         protection_controller_factory=_build_demo_controller,
+        enable_information_protection=True,
     )
     correction_entries = []
     if corrections_path.exists():
@@ -1142,8 +1154,11 @@ def _run_research_approval_flow(
         config=config,
         runtime=deep_runtime,
         provider=provider,
+        beta_feature_flags={
+            "deep_task_mode_enabled": True,
+            "write_file_tool_enabled": True,
+        },
     )
-    controller.set_deep_task_mode_enabled(True)
     error = controller.submit_prompt(
         "List the scratch workspace, then write an approval-gated note and "
         "confirm completion."

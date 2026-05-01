@@ -81,8 +81,12 @@ from llm_tools.apps.assistant_app.controller import (
     _worker_run_harness,
     _worker_run_turn,
 )
+from llm_tools.apps.assistant_app.features import (
+    filter_assistant_tool_specs_for_features,
+)
 from llm_tools.apps.assistant_app.models import (
     AssistantBranding,
+    NiceGUIAdminSettings,
     NiceGUIHostedConfig,
     NiceGUIPreferences,
     NiceGUIRuntimeConfig,
@@ -94,6 +98,7 @@ from llm_tools.apps.assistant_app.provider_endpoints import (
 from llm_tools.apps.assistant_app.store import SQLiteNiceGUIChatStore
 from llm_tools.apps.assistant_config import AssistantConfig
 from llm_tools.apps.assistant_tool_capabilities import AssistantToolCapability
+from llm_tools.apps.assistant_tool_registry import build_assistant_available_tool_specs
 from llm_tools.apps.chat_config import ProviderPreset
 from llm_tools.harness_api import ApprovalResolution
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
@@ -1204,6 +1209,121 @@ def test_controller_interaction_mode_locks_after_first_message(
     _drain_until_idle(controller)
 
 
+def test_admin_beta_feature_flags_default_to_hidden_tools() -> None:
+    settings = NiceGUIAdminSettings()
+    tool_specs = build_assistant_available_tool_specs()
+
+    visible = filter_assistant_tool_specs_for_features(tool_specs, settings)
+
+    assert settings.deep_task_mode_enabled is False
+    assert settings.information_protection_enabled is False
+    assert settings.write_file_tool_enabled is False
+    assert settings.atlassian_tools_enabled is False
+    assert settings.gitlab_tools_enabled is False
+    assert "write_file" not in visible
+    assert "search_gitlab_code" not in visible
+    assert "search_jira" not in visible
+    assert "read_confluence_page" not in visible
+    assert "search_bitbucket_code" not in visible
+    assert "read_file" in visible
+
+
+def test_admin_beta_feature_flags_reveal_tool_families() -> None:
+    settings = NiceGUIAdminSettings(
+        write_file_tool_enabled=True,
+        atlassian_tools_enabled=True,
+        gitlab_tools_enabled=True,
+    )
+    tool_specs = build_assistant_available_tool_specs()
+
+    visible = filter_assistant_tool_specs_for_features(tool_specs, settings)
+
+    assert "write_file" in visible
+    assert "search_gitlab_code" in visible
+    assert "search_jira" in visible
+    assert "read_confluence_page" in visible
+    assert "search_bitbucket_code" in visible
+
+
+def test_controller_filters_persisted_hidden_tools_from_exposure(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(tmp_path, _FakeProvider([]))
+    controller.active_record.runtime.enabled_tools = [
+        "read_file",
+        "search_gitlab_code",
+        "search_jira",
+        "write_file",
+    ]
+
+    controller.save_active_session()
+
+    assert controller.active_record.runtime.enabled_tools == ["read_file"]
+    assert set(controller.visible_tool_specs()) >= {"read_file"}
+    assert "write_file" not in controller.visible_tool_specs()
+    assert "search_gitlab_code" not in controller.visible_tool_specs()
+
+
+def test_controller_persists_beta_feature_flags(tmp_path: Path) -> None:
+    controller = _controller(tmp_path, _FakeProvider([]))
+
+    controller.set_beta_feature_flags(
+        deep_task_mode_enabled=True,
+        information_protection_enabled=True,
+        write_file_tool_enabled=True,
+        atlassian_tools_enabled=True,
+        gitlab_tools_enabled=True,
+    )
+
+    store = _chat_store(tmp_path)
+    store.initialize()
+    settings = store.load_admin_settings()
+    assert settings.deep_task_mode_enabled is True
+    assert settings.information_protection_enabled is True
+    assert settings.write_file_tool_enabled is True
+    assert settings.atlassian_tools_enabled is True
+    assert settings.gitlab_tools_enabled is True
+
+
+def test_controller_skips_protection_when_admin_flag_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "policy.txt").write_text("public material", encoding="utf-8")
+    provider = _FakeProvider(
+        [
+            ParsedModelResponse(
+                final_response={
+                    "answer": "Plain answer",
+                    "citations": [],
+                    "confidence": 0.7,
+                    "uncertainty": [],
+                    "missing_information": [],
+                    "follow_up_suggestions": [],
+                }
+            )
+        ]
+    )
+    controller = _controller(tmp_path, provider)
+    controller.active_record.runtime.protection = ProtectionConfig(
+        enabled=True,
+        allowed_sensitivity_labels=["public"],
+        document_paths=[str(tmp_path / "policy.txt")],
+    )
+
+    def fail_build_protection_controller(*args: object, **kwargs: object) -> object:
+        raise AssertionError("protection should be hidden by the admin flag")
+
+    monkeypatch.setattr(
+        "llm_tools.apps.assistant_app.controller.build_protection_controller",
+        fail_build_protection_controller,
+    )
+
+    assert controller.submit_prompt("hello") is None
+    _drain_until_idle(controller)
+    assert controller.active_record.transcript[-1].role == "assistant"
+
+
 def test_controller_persists_admin_branding(tmp_path: Path) -> None:
     controller = _controller(tmp_path, _FakeProvider([]))
 
@@ -2096,7 +2216,28 @@ def test_controller_approval_pauses_resumes_and_records_resolution(
 
 
 def test_controller_cancellation_records_interrupted_state(tmp_path: Path) -> None:
-    provider = _FakeProvider(
+    provider_started = threading.Event()
+    provider_release = threading.Event()
+
+    class _BlockingProvider(_FakeProvider):
+        def run(
+            self,
+            *,
+            adapter: ActionEnvelopeAdapter,
+            messages: list[dict[str, Any]],
+            response_model: type[BaseModel],
+            request_params: dict[str, Any] | None = None,
+        ) -> ParsedModelResponse:
+            provider_started.set()
+            assert provider_release.wait(timeout=3.0)
+            return super().run(
+                adapter=adapter,
+                messages=messages,
+                response_model=response_model,
+                request_params=request_params,
+            )
+
+    provider = _BlockingProvider(
         [
             ParsedModelResponse(
                 invocations=[
@@ -2105,16 +2246,6 @@ def test_controller_cancellation_records_interrupted_state(tmp_path: Path) -> No
                         arguments={"path": "missing.md"},
                     )
                 ]
-            ),
-            ParsedModelResponse(
-                final_response={
-                    "answer": "This should not be reached.",
-                    "citations": [],
-                    "confidence": 0.1,
-                    "uncertainty": [],
-                    "missing_information": [],
-                    "follow_up_suggestions": [],
-                }
             ),
         ]
     )
@@ -2127,7 +2258,9 @@ def test_controller_cancellation_records_interrupted_state(tmp_path: Path) -> No
     controller.save_active_session()
 
     assert controller.submit_prompt("try to read") is None
+    assert provider_started.wait(timeout=3.0)
     assert controller.cancel_active_turn() is True
+    provider_release.set()
     _drain_until_idle(controller)
 
     assert any(

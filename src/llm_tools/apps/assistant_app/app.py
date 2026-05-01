@@ -44,7 +44,6 @@ from llm_tools.apps.assistant_tool_capabilities import (
     build_tool_capabilities,
     build_tool_group_capability_summaries,
 )
-from llm_tools.apps.assistant_tool_registry import build_assistant_available_tool_specs
 from llm_tools.apps.chat_config import ProviderPreset
 from llm_tools.apps.chat_presentation import final_response_details
 from llm_tools.llm_providers import ProviderModeStrategy
@@ -1521,6 +1520,10 @@ def build_assistant_ui(  # noqa: C901
     admin_create_password_input: Any = None
     admin_create_role_select: Any = None
     admin_deep_task_switch: Any = None
+    admin_information_protection_switch: Any = None
+    admin_write_file_switch: Any = None
+    admin_atlassian_switch: Any = None
+    admin_gitlab_switch: Any = None
     admin_branding_app_name_input: Any = None
     admin_branding_short_name_input: Any = None
     admin_branding_icon_name_input: Any = None
@@ -1812,6 +1815,12 @@ def build_assistant_ui(  # noqa: C901
         render_information_security_readiness(config)
 
     def open_information_security_dialog() -> None:
+        if not controller.information_protection_enabled():
+            ui.notify(
+                "Information Protection is disabled by the administrator.",
+                type="warning",
+            )
+            return
         sync_information_security_inputs()
         dialogs["information_security"].open()
 
@@ -1894,7 +1903,7 @@ def build_assistant_ui(  # noqa: C901
     def current_tool_capability_groups() -> dict[str, list[AssistantToolCapability]]:
         runtime = active_runtime()
         return build_tool_capabilities(
-            tool_specs=build_assistant_available_tool_specs(),
+            tool_specs=controller.visible_tool_specs(),
             enabled_tools=set(runtime.enabled_tools),
             root_path=runtime.root_path,
             env=controller.effective_tool_env(
@@ -1916,7 +1925,7 @@ def build_assistant_ui(  # noqa: C901
 
     def tool_required_value_entries() -> list[tuple[str, list[str], bool, bool]]:
         entries: dict[str, set[str]] = {}
-        for tool_name, spec in build_assistant_available_tool_specs().items():
+        for tool_name, spec in controller.visible_tool_specs().items():
             for secret_name in spec.required_secrets:
                 entries.setdefault(secret_name, set()).add(tool_name)
         effective_env = controller.effective_tool_env(
@@ -2272,6 +2281,9 @@ def build_assistant_ui(  # noqa: C901
         information_security_button.set_text(
             _format_information_security_label(runtime.protection)
         )
+        information_security_button.set_visibility(
+            controller.information_protection_enabled()
+        )
         status_chip.set_text(turn_state.status_text or "ready")
         if composer_disclaimer_label is not None:
             composer_disclaimer_label.set_visibility(runtime.show_footer_help)
@@ -2430,7 +2442,7 @@ def build_assistant_ui(  # noqa: C901
 
     def render_protection_challenge() -> None:
         prompt = controller.pending_protection_prompt()
-        if prompt is None:
+        if prompt is None or not controller.information_protection_enabled():
             protection_dialog_state["challenge_key"] = None
             dialogs["protection_challenge"].close()
             return
@@ -2572,10 +2584,24 @@ def build_assistant_ui(  # noqa: C901
             ui.notify("Admin access is required.", type="negative")
             return
         populate_admin_branding_inputs()
-        if admin_deep_task_switch is not None:
-            admin_deep_task_switch.value = controller.deep_task_mode_enabled()
+        populate_admin_feature_flags()
         render_admin_user_list()
         dialogs["admin"].open()
+
+    def populate_admin_feature_flags() -> None:
+        settings = controller.admin_settings
+        if admin_deep_task_switch is not None:
+            admin_deep_task_switch.value = settings.deep_task_mode_enabled
+        if admin_information_protection_switch is not None:
+            admin_information_protection_switch.value = (
+                settings.information_protection_enabled
+            )
+        if admin_write_file_switch is not None:
+            admin_write_file_switch.value = settings.write_file_tool_enabled
+        if admin_atlassian_switch is not None:
+            admin_atlassian_switch.value = settings.atlassian_tools_enabled
+        if admin_gitlab_switch is not None:
+            admin_gitlab_switch.value = settings.gitlab_tools_enabled
 
     def populate_admin_branding_inputs() -> None:
         branding = controller.admin_settings.branding
@@ -2627,6 +2653,23 @@ def build_assistant_ui(  # noqa: C901
         render_selected_tools()
         render_tool_menu()
         ui.notify("Deep Task mode updated.")
+
+    def set_admin_beta_feature_flag(name: str, value: bool) -> None:
+        if not _is_admin_user(controller.current_user):
+            ui.notify("Admin access is required.", type="negative")
+            return
+        if name == "information_protection_enabled":
+            controller.set_beta_feature_flags(information_protection_enabled=value)
+        elif name == "write_file_tool_enabled":
+            controller.set_beta_feature_flags(write_file_tool_enabled=value)
+        elif name == "atlassian_tools_enabled":
+            controller.set_beta_feature_flags(atlassian_tools_enabled=value)
+        elif name == "gitlab_tools_enabled":
+            controller.set_beta_feature_flags(gitlab_tools_enabled=value)
+        else:
+            raise ValueError(f"Unknown beta feature flag: {name}")
+        render_header()
+        ui.notify("Feature flag updated.")
 
     def render_admin_user_list() -> None:
         if admin_user_list_column is None:
@@ -3094,6 +3137,9 @@ def build_assistant_ui(  # noqa: C901
                         .props("flat no-caps")
                         .classes("llmt-info-security-button")
                     )
+                    information_security_button.set_visibility(
+                        controller.information_protection_enabled()
+                    )
                 with ui.row().classes("llmt-header-actions items-center gap-2"):
                     status_chip = ui.badge("ready").props("outline")
                     with (
@@ -3186,8 +3232,12 @@ def build_assistant_ui(  # noqa: C901
             ui.label("Admin").classes("text-lg")
             ui.button(icon="close", on_click=admin_dialog.close).props("flat round")
         ui.label("Manage local assistant users.").classes("text-sm llmt-muted")
-        with ui.column().classes("llmt-settings-section w-full gap-2"):
-            ui.label("Features").classes("text-base")
+        with ui.expansion("Feature Flags (Beta)", icon="science", value=False).classes(
+            "llmt-settings-section w-full"
+        ):
+            ui.label(
+                "These capabilities are experimental, incomplete, or not fully validated."
+            ).classes("text-xs llmt-muted")
             admin_deep_task_switch = ui.switch(
                 "Deep Task mode",
                 value=controller.deep_task_mode_enabled(),
@@ -3197,6 +3247,48 @@ def build_assistant_ui(  # noqa: C901
                 ui.tooltip(
                     "Shows Deep Task as a selectable chat mode before the first message."
                 ).props("delay=700")
+            admin_information_protection_switch = ui.switch(
+                "Information Protection",
+                value=controller.admin_settings.information_protection_enabled,
+                on_change=lambda event: set_admin_beta_feature_flag(
+                    "information_protection_enabled", bool(event.value)
+                ),
+            ).classes("w-full")
+            with admin_information_protection_switch:
+                ui.tooltip(
+                    "Shows Information Security settings and enables protection checks."
+                ).props("delay=700")
+            admin_write_file_switch = ui.switch(
+                "File write tool",
+                value=controller.admin_settings.write_file_tool_enabled,
+                on_change=lambda event: set_admin_beta_feature_flag(
+                    "write_file_tool_enabled", bool(event.value)
+                ),
+            ).classes("w-full")
+            with admin_write_file_switch:
+                ui.tooltip(
+                    "Shows write_file and permits it to be selected subject to normal approvals."
+                ).props("delay=700")
+            admin_atlassian_switch = ui.switch(
+                "Atlassian tools",
+                value=controller.admin_settings.atlassian_tools_enabled,
+                on_change=lambda event: set_admin_beta_feature_flag(
+                    "atlassian_tools_enabled", bool(event.value)
+                ),
+            ).classes("w-full")
+            with admin_atlassian_switch:
+                ui.tooltip("Shows Jira, Confluence, and Bitbucket tools.").props(
+                    "delay=700"
+                )
+            admin_gitlab_switch = ui.switch(
+                "GitLab tools",
+                value=controller.admin_settings.gitlab_tools_enabled,
+                on_change=lambda event: set_admin_beta_feature_flag(
+                    "gitlab_tools_enabled", bool(event.value)
+                ),
+            ).classes("w-full")
+            with admin_gitlab_switch:
+                ui.tooltip("Shows GitLab tools.").props("delay=700")
         with ui.column().classes("llmt-settings-section w-full gap-2"):
             ui.label("Branding").classes("text-base")
             admin_branding_app_name_input = ui.input("App name").classes("w-full")

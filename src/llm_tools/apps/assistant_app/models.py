@@ -98,6 +98,10 @@ class NiceGUIAdminSettings(BaseModel):
     """Global administrator-controlled assistant app settings."""
 
     deep_task_mode_enabled: bool = False
+    information_protection_enabled: bool = False
+    write_file_tool_enabled: bool = False
+    atlassian_tools_enabled: bool = False
+    gitlab_tools_enabled: bool = False
     branding: AssistantBranding = Field(default_factory=AssistantBranding)
 
 

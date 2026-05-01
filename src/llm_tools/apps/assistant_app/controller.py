@@ -12,6 +12,10 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from llm_tools.apps.assistant_app.auth import LocalAuthProvider
+from llm_tools.apps.assistant_app.features import (
+    filter_assistant_tool_specs_for_features,
+    visible_enabled_tool_names,
+)
 from llm_tools.apps.assistant_app.models import (
     AssistantBranding,
     NiceGUIAdminSettings,
@@ -424,6 +428,7 @@ class NiceGUIChatController:
     def create_session(self, *, temporary: bool = False) -> NiceGUISessionRecord:
         """Create and activate a new session."""
         runtime = default_runtime_config(self.config, root_path=self.root_path)
+        self._filter_hidden_runtime_tools(runtime)
         record = self.store.create_session(
             runtime, temporary=temporary, owner_user_id=self.owner_user_id
         )
@@ -588,22 +593,70 @@ class NiceGUIChatController:
         """Return whether the administrator has enabled deep task mode."""
         return self.admin_settings.deep_task_mode_enabled
 
+    def information_protection_enabled(self) -> bool:
+        """Return whether the administrator has enabled Information Protection."""
+        return self.admin_settings.information_protection_enabled
+
     def set_deep_task_mode_enabled(self, enabled: bool) -> None:
         """Persist the administrator-controlled deep task feature flag."""
-        self.admin_settings = self.admin_settings.model_copy(
-            update={"deep_task_mode_enabled": bool(enabled)}
-        )
+        self.set_beta_feature_flags(deep_task_mode_enabled=enabled)
+
+    def set_beta_feature_flags(
+        self,
+        *,
+        deep_task_mode_enabled: bool | None = None,
+        information_protection_enabled: bool | None = None,
+        write_file_tool_enabled: bool | None = None,
+        atlassian_tools_enabled: bool | None = None,
+        gitlab_tools_enabled: bool | None = None,
+    ) -> None:
+        """Persist administrator-controlled beta feature flags."""
+        update: dict[str, bool] = {}
+        if deep_task_mode_enabled is not None:
+            update["deep_task_mode_enabled"] = bool(deep_task_mode_enabled)
+        if information_protection_enabled is not None:
+            update["information_protection_enabled"] = bool(
+                information_protection_enabled
+            )
+        if write_file_tool_enabled is not None:
+            update["write_file_tool_enabled"] = bool(write_file_tool_enabled)
+        if atlassian_tools_enabled is not None:
+            update["atlassian_tools_enabled"] = bool(atlassian_tools_enabled)
+        if gitlab_tools_enabled is not None:
+            update["gitlab_tools_enabled"] = bool(gitlab_tools_enabled)
+        if not update:
+            return
+        self.admin_settings = self.admin_settings.model_copy(update=update)
         self.store.save_admin_settings(self.admin_settings)
-        if not enabled:
-            for record in self.sessions.values():
-                if (
-                    record.runtime.interaction_mode == "deep_task"
-                    and not self.interaction_mode_locked(
-                        session_id=record.summary.session_id
-                    )
-                ):
-                    record.runtime.interaction_mode = "chat"
-                    self._persist_record(record)
+        self._coerce_sessions_for_feature_flags()
+
+    def visible_tool_specs(self) -> dict[str, ToolSpec]:
+        """Return Assistant tool specs visible under current admin feature flags."""
+        return filter_assistant_tool_specs_for_features(
+            build_assistant_available_tool_specs(), self.admin_settings
+        )
+
+    def _coerce_sessions_for_feature_flags(self) -> None:
+        """Drop now-hidden beta features from unlocked/current session runtime state."""
+        visible_specs = self.visible_tool_specs()
+        changed_records: set[str] = set()
+        for record in self.sessions.values():
+            session_id = record.summary.session_id
+            if (
+                record.runtime.interaction_mode == "deep_task"
+                and not self.deep_task_mode_enabled()
+                and not self.interaction_mode_locked(session_id=session_id)
+            ):
+                record.runtime.interaction_mode = "chat"
+                changed_records.add(session_id)
+            visible_tools = sorted(
+                set(record.runtime.enabled_tools).intersection(visible_specs)
+            )
+            if visible_tools != record.runtime.enabled_tools:
+                record.runtime.enabled_tools = visible_tools
+                changed_records.add(session_id)
+        for session_id in changed_records:
+            self._persist_record(self.sessions[session_id])
 
     def set_branding(self, branding: AssistantBranding) -> None:
         """Persist administrator-controlled app branding."""
@@ -948,6 +1001,7 @@ class NiceGUIChatController:
 
     def save_active_session(self) -> None:
         """Persist the active record and preferences."""
+        self._filter_hidden_runtime_tools(self.active_record.runtime)
         self._persist_record(self.active_record)
         self.save_preferences()
 
@@ -995,6 +1049,7 @@ class NiceGUIChatController:
                 self.sessions[summary.session_id] = loaded
                 self.turn_states[summary.session_id] = NiceGUITurnState()
                 self.session_secrets.setdefault(summary.session_id, {})
+                self._filter_hidden_runtime_tools(loaded.runtime)
                 self._restore_pending_harness_approval(loaded)
         active_id = self.preferences.active_session_id
         if active_id not in self.sessions:
@@ -1031,6 +1086,7 @@ class NiceGUIChatController:
             return
 
     def _persist_record(self, record: NiceGUISessionRecord) -> None:
+        self._filter_hidden_runtime_tools(record.runtime)
         record.summary.root_path = record.runtime.root_path
         record.summary.owner_user_id = self.owner_user_id
         record.summary.provider = record.runtime.provider
@@ -1044,6 +1100,13 @@ class NiceGUIChatController:
         self.store.save_session(record)
         if record.summary.session_id not in self.session_order:
             self.session_order.insert(0, record.summary.session_id)
+
+    def _filter_hidden_runtime_tools(self, runtime: NiceGUIRuntimeConfig) -> None:
+        """Remove tool selections hidden by current admin feature flags."""
+        visible_specs = self.visible_tool_specs()
+        runtime.enabled_tools = sorted(
+            set(runtime.enabled_tools).intersection(visible_specs)
+        )
 
     def _create_provider(
         self, runtime: NiceGUIRuntimeConfig, *, session_id: str
@@ -1074,9 +1137,13 @@ class NiceGUIChatController:
         effective_config = _effective_assistant_config(
             config=self.config, runtime=runtime
         )
-        tool_specs = build_assistant_available_tool_specs()
+        tool_specs = self.visible_tool_specs()
         root = Path(runtime.root_path) if runtime.root_path is not None else None
-        enabled_tools = set(runtime.enabled_tools)
+        enabled_tools = visible_enabled_tool_names(
+            runtime.enabled_tools,
+            tool_specs,
+            self.admin_settings,
+        )
         policy = build_assistant_policy(
             enabled_tools=enabled_tools,
             tool_specs=tool_specs,
@@ -1094,9 +1161,13 @@ class NiceGUIChatController:
             env=self.effective_tool_env(runtime=runtime, session_id=session_id),
         )
         protection_controller = None
-        protection_is_ready = _nicegui_protection_is_ready(runtime.protection)
+        protection_is_ready = (
+            self.information_protection_enabled()
+            and _nicegui_protection_is_ready(runtime.protection)
+        )
         has_pending_protection_prompt = (
-            session_state.pending_protection_prompt is not None
+            self.information_protection_enabled()
+            and session_state.pending_protection_prompt is not None
         )
         if protection_is_ready or has_pending_protection_prompt:
             protection_config = (
@@ -1165,9 +1236,13 @@ class NiceGUIChatController:
             config=self.config, runtime=runtime
         )
         provider = self._create_provider(runtime, session_id=session_id)
-        tool_specs = build_assistant_available_tool_specs()
+        tool_specs = self.visible_tool_specs()
         root = Path(runtime.root_path) if runtime.root_path is not None else None
-        enabled_tools = set(runtime.enabled_tools)
+        enabled_tools = visible_enabled_tool_names(
+            runtime.enabled_tools,
+            tool_specs,
+            self.admin_settings,
+        )
         policy = build_assistant_policy(
             enabled_tools=enabled_tools,
             tool_specs=tool_specs,
@@ -1189,7 +1264,9 @@ class NiceGUIChatController:
             env=env_overrides,
         )
         protection_controller = None
-        if _nicegui_protection_is_ready(runtime.protection):
+        if self.information_protection_enabled() and _nicegui_protection_is_ready(
+            runtime.protection
+        ):
             protection_environment = build_protection_environment(
                 app_name="assistant_app_deep_task",
                 model_name=runtime.model_name,
