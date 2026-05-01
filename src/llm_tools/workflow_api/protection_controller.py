@@ -13,6 +13,7 @@ from llm_tools.workflow_api.protection_models import (
     PromptProtectionDecision,
     ProtectionAction,
     ProtectionAssessment,
+    ProtectionCategory,
     ProtectionConfig,
     ProtectionCorpus,
     ProtectionEnvironment,
@@ -67,36 +68,28 @@ class DefaultEnvironmentComparator:
     ) -> ProtectionAction:
         if assessment.recommended_action is not None:
             return assessment.recommended_action
-        sensitivity_label = assessment.sensitivity_label
+        sensitivity_label = _canonical_sensitivity_label(
+            assessment.sensitivity_label,
+            environment=environment,
+        )
         if sensitivity_label is None:
             return ProtectionAction.ALLOW
-        blocked_labels = {
-            str(label).strip()
-            for label in environment.get("blocked_sensitivity_labels", [])
-            if str(label).strip()
-        }
-        allowed_labels = {
-            str(label).strip()
-            for label in environment.get("allowed_sensitivity_labels", [])
-            if str(label).strip()
-        }
-        constrained_labels = {
-            str(label).strip()
-            for label in environment.get("constrained_sensitivity_labels", [])
-            if str(label).strip()
-        }
-        sanitized_labels = {
-            str(label).strip()
-            for label in environment.get("sanitized_sensitivity_labels", [])
-            if str(label).strip()
-        }
-        if sensitivity_label in blocked_labels:
+        sensitivity_key = sensitivity_label.casefold()
+        blocked_labels = _canonical_label_set("blocked_sensitivity_labels", environment)
+        allowed_labels = _canonical_label_set("allowed_sensitivity_labels", environment)
+        constrained_labels = _canonical_label_set(
+            "constrained_sensitivity_labels", environment
+        )
+        sanitized_labels = _canonical_label_set(
+            "sanitized_sensitivity_labels", environment
+        )
+        if sensitivity_key in blocked_labels:
             return challenge_default
-        if allowed_labels and sensitivity_label not in allowed_labels:
+        if allowed_labels and sensitivity_key not in allowed_labels:
             return challenge_default
-        if sensitivity_label in constrained_labels:
+        if sensitivity_key in constrained_labels:
             return ProtectionAction.CONSTRAIN
-        if sensitivity_label in sanitized_labels:
+        if sensitivity_key in sanitized_labels:
             return ProtectionAction.SANITIZE
         return ProtectionAction.ALLOW
 
@@ -471,11 +464,9 @@ class ProtectionController:
             return False
         if assessment.requires_inference_beyond_source is not False:
             return False
-        allowed_labels = {
-            str(label).strip().casefold()
-            for label in self._environment.get("allowed_sensitivity_labels", [])
-            if str(label).strip()
-        }
+        allowed_labels = _canonical_label_set(
+            "allowed_sensitivity_labels", self._environment
+        )
         if not allowed_labels:
             return False
         source_id = next(iter(source_ids))
@@ -494,7 +485,11 @@ class ProtectionController:
         )
         if document is None or not document.sensitivity_label:
             return False
-        return document.sensitivity_label.casefold() in allowed_labels
+        source_label = _canonical_sensitivity_label(
+            document.sensitivity_label,
+            environment=self._environment,
+        )
+        return source_label is not None and source_label.casefold() in allowed_labels
 
 
 def _parse_bool(value: str) -> bool:
@@ -518,6 +513,54 @@ def _sanitize_payload(payload: Any, sanitized_text: str | None) -> Any:
         sanitized["content"] = replacement
         return sanitized
     return replacement
+
+
+def _canonical_label_set(
+    environment_key: str,
+    environment: ProtectionEnvironment,
+) -> set[str]:
+    return {
+        canonical.casefold()
+        for label in environment.get(environment_key, [])
+        if (canonical := _canonical_sensitivity_label(label, environment=environment))
+    }
+
+
+def _canonical_sensitivity_label(
+    label: object,
+    *,
+    environment: ProtectionEnvironment,
+) -> str | None:
+    if label is None:
+        return None
+    cleaned = str(label).strip()
+    if not cleaned:
+        return None
+    alias_map = _category_alias_map(environment)
+    return alias_map.get(cleaned.casefold(), cleaned)
+
+
+def _category_alias_map(environment: ProtectionEnvironment) -> dict[str, str]:
+    alias_map: dict[str, str] = {}
+    for raw_category in environment.get("sensitivity_categories", []):
+        category = _category_from_environment(raw_category)
+        if category is None:
+            continue
+        alias_map[category.label.casefold()] = category.label
+        for alias in category.aliases:
+            alias_map[alias.casefold()] = category.label
+    return alias_map
+
+
+def _category_from_environment(raw_category: object) -> ProtectionCategory | None:
+    if isinstance(raw_category, ProtectionCategory):
+        return raw_category
+    if isinstance(raw_category, dict):
+        try:
+            return ProtectionCategory.model_validate(raw_category)
+        except ValidationError:
+            return None
+    return None
 
 
 __all__ = ["DefaultEnvironmentComparator", "ProtectionController"]

@@ -53,6 +53,7 @@ from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import (
     ChatSessionConfig,
     ChatTokenUsage,
+    ProtectionCategory,
     ProtectionConfig,
     ProtectionPendingPrompt,
     inspect_protection_corpus,
@@ -457,6 +458,88 @@ def _parse_information_security_categories(value: str) -> list[str]:
             labels.append(label)
             seen.add(label)
     return labels
+
+
+def _format_information_security_category_catalog(
+    categories: Sequence[ProtectionCategory],
+) -> str:
+    """Return compact editable category catalog text."""
+    lines: list[str] = []
+    for category in categories:
+        line = category.label
+        if category.aliases:
+            line += ": " + ", ".join(category.aliases)
+        if category.description:
+            line += " | " + category.description
+        if category.examples:
+            line += " | " + "; ".join(category.examples)
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _parse_information_security_category_catalog(
+    value: str,
+) -> list[ProtectionCategory]:
+    """Parse compact category catalog text.
+
+    Each non-empty line is:
+    LABEL: alias 1, alias 2 | optional description | example 1; example 2
+    """
+    categories: list[ProtectionCategory] = []
+    seen: set[str] = set()
+    for raw_line in value.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        label_and_aliases, *optional_parts = [part.strip() for part in line.split("|")]
+        label, separator, raw_aliases = label_and_aliases.partition(":")
+        label = label.strip()
+        if not label:
+            continue
+        key = label.casefold()
+        if key in seen:
+            continue
+        aliases = (
+            [alias.strip() for alias in raw_aliases.split(",") if alias.strip()]
+            if separator
+            else []
+        )
+        description = optional_parts[0] if optional_parts else None
+        examples = (
+            [
+                example.strip()
+                for example in optional_parts[1].replace(",", ";").split(";")
+                if example.strip()
+            ]
+            if len(optional_parts) > 1
+            else []
+        )
+        categories.append(
+            ProtectionCategory(
+                label=label,
+                aliases=aliases,
+                description=description,
+                examples=examples,
+            )
+        )
+        seen.add(key)
+    return categories
+
+
+def _ensure_information_security_category_catalog(
+    *,
+    categories: list[ProtectionCategory],
+    allowed_labels: list[str],
+) -> list[ProtectionCategory]:
+    """Ensure every allowed label has a canonical category entry."""
+    existing = {category.label.casefold() for category in categories}
+    normalized = list(categories)
+    for label in allowed_labels:
+        key = label.casefold()
+        if key not in existing:
+            normalized.append(ProtectionCategory(label=label))
+            existing.add(key)
+    return normalized
 
 
 def _format_information_security_level(config: ProtectionConfig) -> str:
@@ -1451,6 +1534,7 @@ def build_assistant_ui(  # noqa: C901
     tool_url_inputs: dict[str, Any] = {}
     protection_enabled_switch: Any = None
     protection_categories_input: Any = None
+    protection_category_catalog_input: Any = None
     protection_corpus_input: Any = None
     protection_corrections_input: Any = None
     protection_readiness_label: Any = None
@@ -1710,6 +1794,12 @@ def build_assistant_ui(  # noqa: C901
         if protection_categories_input is not None:
             protection_categories_input.value = "\n".join(
                 config.allowed_sensitivity_labels
+            )
+        if protection_category_catalog_input is not None:
+            protection_category_catalog_input.value = (
+                _format_information_security_category_catalog(
+                    config.sensitivity_categories
+                )
             )
         corpus_directory = config.document_paths[0] if config.document_paths else ""
         if protection_corpus_input is not None:
@@ -2736,8 +2826,18 @@ def build_assistant_ui(  # noqa: C901
             expanded_path_text(raw_corrections_path) if raw_corrections_path else ""
         )
         protection.enabled = bool(protection_enabled_switch.value)
-        protection.allowed_sensitivity_labels = _parse_information_security_categories(
+        allowed_categories = _parse_information_security_categories(
             str(protection_categories_input.value or "")
+        )
+        category_catalog = _parse_information_security_category_catalog(
+            str(protection_category_catalog_input.value or "")
+        )
+        protection.allowed_sensitivity_labels = allowed_categories
+        protection.sensitivity_categories = (
+            _ensure_information_security_category_catalog(
+                categories=category_catalog,
+                allowed_labels=allowed_categories,
+            )
         )
         protection.document_paths = [corpus_directory] if corpus_directory else []
         protection.corrections_path = (
@@ -3415,6 +3515,20 @@ def build_assistant_ui(  # noqa: C901
                     placeholder="TRIVIAL\nMINOR",
                     value="\n".join(
                         controller.active_record.runtime.protection.allowed_sensitivity_labels
+                    ),
+                )
+                .props("autogrow outlined")
+                .classes("w-full")
+            )
+            protection_category_catalog_input = (
+                ui.textarea(
+                    "Category catalog",
+                    placeholder=(
+                        "TRIVIAL: public, routine | Freely discussable information\n"
+                        "MINOR: low, limited | Low-sensitivity source wording"
+                    ),
+                    value=_format_information_security_category_catalog(
+                        controller.active_record.runtime.protection.sensitivity_categories
                     ),
                 )
                 .props("autogrow outlined")

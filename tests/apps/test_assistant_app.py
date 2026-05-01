@@ -26,9 +26,11 @@ from llm_tools.apps.assistant_app.app import (
     _composer_action_icon,
     _default_protection_corrections_path,
     _discover_model_names,
+    _ensure_information_security_category_catalog,
     _event_payload_text,
     _extract_model_names_from_models_payload,
     _first_nonempty_text,
+    _format_information_security_category_catalog,
     _format_information_security_label,
     _format_information_security_level,
     _format_transcript_time,
@@ -37,6 +39,7 @@ from llm_tools.apps.assistant_app.app import (
     _is_tool_url_setting,
     _models_endpoint_url,
     _parse_information_security_categories,
+    _parse_information_security_category_catalog,
     _parse_optional_positive_int_setting,
     _parse_positive_float_setting,
     _parse_positive_int_setting,
@@ -106,6 +109,7 @@ from llm_tools.workflow_api import (
     ChatWorkflowResultEvent,
     ChatWorkflowStatusEvent,
     ChatWorkflowTurnResult,
+    ProtectionCategory,
     ProtectionConfig,
     ProtectionPendingPrompt,
 )
@@ -626,6 +630,22 @@ def test_information_security_helpers(tmp_path: Path) -> None:
     guidance = tmp_path / "guidance.md"
     guidance.write_text("TRIVIAL information may be discussed.", encoding="utf-8")
     assert _format_information_security_level(configured) == "TRIVIAL/MINOR"
+    catalog = [
+        ProtectionCategory(
+            label="MINOR",
+            aliases=["low", "limited"],
+            description="Low sensitivity wording in source documents",
+            examples=["routine project notes"],
+        )
+    ]
+    formatted_catalog = _format_information_security_category_catalog(catalog)
+    parsed_catalog = _parse_information_security_category_catalog(formatted_catalog)
+    assert parsed_catalog == catalog
+    ensured_catalog = _ensure_information_security_category_catalog(
+        categories=parsed_catalog,
+        allowed_labels=["MINOR", "MAJOR"],
+    )
+    assert [category.label for category in ensured_catalog] == ["MINOR", "MAJOR"]
 
 
 def test_protection_readiness_requires_labels_and_corpus(tmp_path: Path) -> None:

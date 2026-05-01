@@ -11,6 +11,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 import llm_tools.workflow_api.protection as protection_module
+import llm_tools.workflow_api.protection_controller as protection_controller_module
 import llm_tools.workflow_api.protection_store as protection_store_module
 from llm_tools.tool_api import SourceProvenanceRef, ToolResult
 from llm_tools.workflow_api import (
@@ -126,7 +127,14 @@ def test_controller_sanitizes_dict_answer_payload() -> None:
 def test_controller_allows_single_allowed_extractively_used_source() -> None:
     controller = ProtectionController(
         config=ProtectionConfig(enabled=True),
-        environment={"allowed_sensitivity_labels": ["MINOR"]},
+        environment={
+            "allowed_sensitivity_labels": ["MINOR"],
+            "sensitivity_categories": [
+                ProtectionCategory(label="MINOR", aliases=["low"]).model_dump(
+                    mode="json"
+                )
+            ],
+        },
         corpus=protection_module.ProtectionCorpus(
             documents=[
                 protection_module.ProtectionDocument(
@@ -134,7 +142,7 @@ def test_controller_allows_single_allowed_extractively_used_source() -> None:
                     path="/corpus/policy.pdf",
                     content="allowed source",
                     display_name="policy.pdf",
-                    sensitivity_label="MINOR",
+                    sensitivity_label="low",
                 )
             ]
         ),
@@ -259,6 +267,82 @@ def test_default_environment_comparator_uses_environment_label_sets() -> None:
         )
         is ProtectionAction.SANITIZE
     )
+
+
+def test_default_environment_comparator_canonicalizes_category_aliases() -> None:
+    comparator = DefaultEnvironmentComparator()
+    category_catalog = [
+        ProtectionCategory(label="MINOR", aliases=["low", "limited"]).model_dump(
+            mode="json"
+        )
+    ]
+
+    assert (
+        comparator.resolve_response_action(
+            assessment=ProtectionAssessment(sensitivity_label="low"),
+            environment={
+                "allowed_sensitivity_labels": ["MINOR"],
+                "sensitivity_categories": category_catalog,
+            },
+        )
+        is ProtectionAction.ALLOW
+    )
+    assert (
+        comparator.resolve_prompt_action(
+            assessment=ProtectionAssessment(sensitivity_label="MINOR"),
+            environment={
+                "blocked_sensitivity_labels": ["limited"],
+                "sensitivity_categories": category_catalog,
+            },
+        )
+        is ProtectionAction.CHALLENGE
+    )
+
+
+def test_protection_category_canonicalization_helper_edges() -> None:
+    environment = {
+        "allowed_sensitivity_labels": ["low", "", None],
+        "sensitivity_categories": [
+            ProtectionCategory(label="MINOR", aliases=["low"]),
+            {"label": "MAJOR", "aliases": ["high"]},
+            {"aliases": ["invalid"]},
+            "not-a-category",
+        ],
+    }
+
+    assert (
+        protection_controller_module._canonical_sensitivity_label(
+            " low ", environment=environment
+        )
+        == "MINOR"
+    )
+    assert (
+        protection_controller_module._canonical_sensitivity_label(
+            "high", environment=environment
+        )
+        == "MAJOR"
+    )
+    assert (
+        protection_controller_module._canonical_sensitivity_label(
+            "unknown", environment=environment
+        )
+        == "unknown"
+    )
+    assert (
+        protection_controller_module._canonical_sensitivity_label(
+            "", environment=environment
+        )
+        is None
+    )
+    assert (
+        protection_controller_module._canonical_sensitivity_label(
+            None, environment=environment
+        )
+        is None
+    )
+    assert protection_controller_module._canonical_label_set(
+        "allowed_sensitivity_labels", environment
+    ) == {"minor"}
 
 
 def test_feedback_store_path_and_load_rejects_unsupported_existing_extension(
