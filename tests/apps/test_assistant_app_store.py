@@ -35,7 +35,12 @@ from llm_tools.harness_api.models import BudgetPolicy
 from llm_tools.harness_api.replay import build_stored_artifacts
 from llm_tools.harness_api.store import CURRENT_HARNESS_STATE_SCHEMA_VERSION
 from llm_tools.harness_api.tasks import create_root_task
-from llm_tools.workflow_api import ChatFinalResponse
+from llm_tools.workflow_api import (
+    ChatContextSummary,
+    ChatFinalResponse,
+    ChatMessage,
+    ChatSessionTurnRecord,
+)
 
 
 def _store(tmp_path: Path) -> SQLiteNiceGUIChatStore:
@@ -149,6 +154,23 @@ def test_store_initializes_and_round_trips_session(tmp_path: Path) -> None:
             updated_at="2",
         )
     )
+    record.workflow_session_state.context_summary = ChatContextSummary(
+        content="Earlier context summary.",
+        covered_turn_count=1,
+        created_at="1",
+        updated_at="2",
+        compaction_count=1,
+    )
+    record.workflow_session_state.turns.append(
+        ChatSessionTurnRecord(
+            status="completed",
+            new_messages=[
+                ChatMessage(role="user", content="What is here?"),
+                ChatMessage(role="assistant", content="A repo."),
+            ],
+            final_response=ChatFinalResponse(answer="A repo."),
+        )
+    )
     store.save_session(record)
 
     loaded = store.load_session(record.summary.session_id)
@@ -164,6 +186,10 @@ def test_store_initializes_and_round_trips_session(tmp_path: Path) -> None:
     assert loaded.workbench_items[0].version == 2
     assert loaded.workbench_items[0].active is True
     assert loaded.workbench_items[0].duration_seconds == 1.25
+    assert loaded.workflow_session_state.context_summary is not None
+    assert loaded.workflow_session_state.context_summary.content == (
+        "Earlier context summary."
+    )
 
 
 def test_harness_store_round_trips_encrypted_state(tmp_path: Path) -> None:

@@ -2,10 +2,12 @@
 
 from llm_tools.workflow_api.chat_models import (
     ChatCitation,
+    ChatContextSummary,
     ChatFinalResponse,
     ChatMessage,
     ChatSessionConfig,
     ChatSessionState,
+    ChatSessionTurnRecord,
     ChatTokenUsage,
     ChatWorkflowApprovalEvent,
     ChatWorkflowApprovalResolvedEvent,
@@ -75,6 +77,7 @@ __all__ = [
     "load_protection_corpus",
     "ApprovalRequest",
     "ChatCitation",
+    "ChatContextSummary",
     "ChatFinalResponse",
     "ChatMessage",
     "ChatWorkflowApprovalEvent",
@@ -83,6 +86,7 @@ __all__ = [
     "ChatWorkflowInspectorEvent",
     "ChatSessionConfig",
     "ChatSessionState",
+    "ChatSessionTurnRecord",
     "ChatSessionTurnRunner",
     "ModelTurnProvider",
     "ChatTokenUsage",

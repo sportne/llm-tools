@@ -194,11 +194,30 @@ class ChatSessionTurnRecord(BaseModel):
         return self
 
 
+class ChatContextSummary(BaseModel):
+    """Durable compact memory for older chat turns outside active context."""
+
+    content: str
+    covered_turn_count: int = Field(default=0, ge=0)
+    created_at: str
+    updated_at: str
+    compaction_count: int = Field(default=0, ge=0)
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("context summary content must not be empty")
+        return cleaned
+
+
 class ChatSessionState(BaseModel):
     """In-memory visible chat history plus active-context window metadata."""
 
     turns: list[ChatSessionTurnRecord] = Field(default_factory=list)
     active_context_start_turn: int = Field(default=0, ge=0)
+    context_summary: ChatContextSummary | None = None
     pending_protection_prompt: ProtectionPendingPrompt | None = None
 
     @model_validator(mode="after")
@@ -206,6 +225,13 @@ class ChatSessionState(BaseModel):
         if self.active_context_start_turn > len(self.turns):
             raise ValueError(
                 "active_context_start_turn cannot be greater than the number of turns"
+            )
+        if (
+            self.context_summary is not None
+            and self.context_summary.covered_turn_count > len(self.turns)
+        ):
+            raise ValueError(
+                "context_summary covered_turn_count cannot be greater than the number of turns"
             )
         return self
 

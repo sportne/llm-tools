@@ -38,10 +38,12 @@ from llm_tools.workflow_api.chat_inspector import (
 )
 from llm_tools.workflow_api.chat_models import (
     ChatApprovalResolution,
+    ChatContextSummary,
     ChatFinalResponse,
     ChatMessage,
     ChatSessionConfig,
     ChatSessionState,
+    ChatSessionTurnRecord,
     ChatWorkflowApprovalEvent,
     ChatWorkflowApprovalResolvedEvent,
     ChatWorkflowApprovalState,
@@ -147,6 +149,19 @@ _JSON_AGENT_STRATEGY_ENV = "LLM_TOOLS_JSON_AGENT_STRATEGY"
 _DEFAULT_PROMPT_TOOL_CATEGORY_THRESHOLD = 7
 _PROMPT_TOOL_SINGLE_ACTION_STRATEGIES = {"single_action", "single-action", "single"}
 _PROMPT_TOOL_SPLIT_STRATEGIES = {"split", "decision", "decision_tool"}
+_CONTEXT_LIMIT_ERROR_MARKERS = (
+    "context_length_exceeded",
+    "maximum context length",
+    "max context length",
+    "context length",
+    "too many tokens",
+    "prompt is too long",
+    "prompt too long",
+    "token limit",
+    "tokens exceeds",
+    "input is too long",
+    "request too large",
+)
 
 
 class ModelTurnProvider(Protocol):
@@ -215,6 +230,7 @@ class ChatSessionTurnRunner:
             session_config=session_config,
         )
         self._session_state = session_state
+        self._context_summary = session_state.context_summary
         self._executor = executor
         self._provider = provider
         self._base_context = base_context
@@ -235,6 +251,7 @@ class ChatSessionTurnRunner:
         self._pending_approval: ChatWorkflowApprovalState | None = None
         self._pending_approval_decision: bool | None = None
         self._grounding_retry_used = False
+        self._context_limit_retry_used = False
 
     def cancel(self) -> None:
         """Request cooperative cancellation at the next safe boundary."""
@@ -264,6 +281,7 @@ class ChatSessionTurnRunner:
                 turn_result=result,
                 session_state=self._session_state,
                 active_context_start_turn=self._active_context_start_turn,
+                context_summary=self._context_summary,
                 context_warning=self._context_warning,
                 system_message=self._system_message,
             )
@@ -278,16 +296,14 @@ class ChatSessionTurnRunner:
         | ChatWorkflowInspectorEvent
         | ChatWorkflowResultEvent
     ]:
-        messages = [
-            self._system_message,
-            *self._prior_messages,
-            self._user_chat_message,
-        ]
         new_messages = [self._user_chat_message]
         tool_results: list[ToolResult] = []
         round_count = 0
         executed_tool_call_count = 0
         yield ChatWorkflowStatusEvent(status="thinking")
+        if self._compact_context_if_needed(force_all_prior=False):
+            yield ChatWorkflowStatusEvent(status="compacting context")
+        messages = self._messages_with_current_turn(new_messages)
 
         pending_prompt_event = self._maybe_handle_pending_protection_prompt(
             new_messages=new_messages,
@@ -332,58 +348,69 @@ class ChatSessionTurnRunner:
                 executed_tool_call_count=executed_tool_call_count,
                 tool_results=tool_results,
             )
-            if self._uses_prompt_tool_protocol():
-                parsed = yield from self._run_prompt_tool_round(
-                    round_index=round_index,
-                    messages=serialized_messages,
-                    prepared=prepared,
-                    decision_context=decision_context,
-                )
-            elif self._uses_staged_schema_protocol():
-                try:
-                    parsed = yield from self._run_staged_round(
-                        round_index=round_index,
-                        messages=serialized_messages,
-                        prepared=prepared,
-                        decision_context=decision_context,
-                    )
-                except Exception as exc:
-                    if not self._can_fallback_to_prompt_tools(exc):
-                        raise
-                    yield ChatWorkflowStatusEvent(status="using prompt tools")
+            try:
+                if self._uses_prompt_tool_protocol():
                     parsed = yield from self._run_prompt_tool_round(
                         round_index=round_index,
                         messages=serialized_messages,
                         prepared=prepared,
                         decision_context=decision_context,
                     )
-            else:
-                native_messages = self._native_tool_round_messages(
-                    messages=serialized_messages,
-                    decision_context=decision_context,
-                )
-                yield ChatWorkflowInspectorEvent(
-                    round_index=round_index,
-                    kind="provider_messages",
-                    payload=native_messages,
-                )
-                try:
-                    parsed = self._provider.run(
-                        adapter=self._adapter,
-                        messages=native_messages,
-                        response_model=prepared.response_model,
-                        request_params={"temperature": self._temperature},
-                    )
-                except Exception as exc:
-                    if not self._can_fallback_to_prompt_tools(exc):
-                        raise
-                    yield ChatWorkflowStatusEvent(status="using prompt tools")
-                    parsed = yield from self._run_prompt_tool_round(
-                        round_index=round_index,
-                        messages=self._prompt_tool_base_messages(serialized_messages),
-                        prepared=prepared,
+                elif self._uses_staged_schema_protocol():
+                    try:
+                        parsed = yield from self._run_staged_round(
+                            round_index=round_index,
+                            messages=serialized_messages,
+                            prepared=prepared,
+                            decision_context=decision_context,
+                        )
+                    except Exception as exc:
+                        if not self._can_fallback_to_prompt_tools(exc):
+                            raise
+                        yield ChatWorkflowStatusEvent(status="using prompt tools")
+                        parsed = yield from self._run_prompt_tool_round(
+                            round_index=round_index,
+                            messages=serialized_messages,
+                            prepared=prepared,
+                            decision_context=decision_context,
+                        )
+                else:
+                    native_messages = self._native_tool_round_messages(
+                        messages=serialized_messages,
                         decision_context=decision_context,
                     )
+                    yield ChatWorkflowInspectorEvent(
+                        round_index=round_index,
+                        kind="provider_messages",
+                        payload=native_messages,
+                    )
+                    try:
+                        parsed = self._provider.run(
+                            adapter=self._adapter,
+                            messages=native_messages,
+                            response_model=prepared.response_model,
+                            request_params={"temperature": self._temperature},
+                        )
+                    except Exception as exc:
+                        if not self._can_fallback_to_prompt_tools(exc):
+                            raise
+                        yield ChatWorkflowStatusEvent(status="using prompt tools")
+                        parsed = yield from self._run_prompt_tool_round(
+                            round_index=round_index,
+                            messages=self._prompt_tool_base_messages(
+                                serialized_messages
+                            ),
+                            prepared=prepared,
+                            decision_context=decision_context,
+                        )
+            except Exception as exc:
+                if not self._should_retry_after_context_limit(exc):
+                    raise
+                yield ChatWorkflowStatusEvent(status="compacting context")
+                if not self._compact_context_if_needed(force_all_prior=True):
+                    raise
+                messages = self._messages_with_current_turn(new_messages)
+                continue
             parsed = self._apply_response_protection(
                 parsed=parsed,
                 provenance=provenance,
@@ -527,6 +554,226 @@ class ChatSessionTurnRunner:
             serialized_messages,
             provenance,
         )
+
+    def _messages_with_current_turn(
+        self, new_messages: list[ChatMessage]
+    ) -> list[ChatMessage]:
+        return [self._system_message, *self._prior_messages, *new_messages]
+
+    def _refresh_prepared_context(self) -> None:
+        (
+            self._system_message,
+            self._user_chat_message,
+            self._prior_messages,
+            self._active_context_start_turn,
+            context_warning,
+        ) = _prepare_session_context(
+            user_message=self._user_chat_message.content,
+            session_state=self._session_state.model_copy(
+                update={
+                    "active_context_start_turn": self._active_context_start_turn,
+                    "context_summary": self._context_summary,
+                }
+            ),
+            system_prompt=self._system_message.content,
+            session_config=self._session_config,
+        )
+        if context_warning is not None and self._context_warning is None:
+            self._context_warning = context_warning
+
+    def _compact_context_if_needed(self, *, force_all_prior: bool) -> bool:
+        target_turn_count = (
+            len(self._session_state.turns)
+            if force_all_prior
+            else self._active_context_start_turn
+        )
+        covered_turn_count = (
+            self._context_summary.covered_turn_count
+            if self._context_summary is not None
+            else 0
+        )
+        if target_turn_count <= covered_turn_count:
+            return False
+        turns_to_compact = self._session_state.turns[
+            covered_turn_count:target_turn_count
+        ]
+        if not turns_to_compact:
+            return False
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        summary = self._build_context_summary(
+            previous_summary=self._context_summary,
+            turns=turns_to_compact,
+            starting_turn_number=covered_turn_count + 1,
+        )
+        self._context_summary = ChatContextSummary(
+            content=summary,
+            covered_turn_count=target_turn_count,
+            created_at=(
+                self._context_summary.created_at
+                if self._context_summary is not None
+                else now
+            ),
+            updated_at=now,
+            compaction_count=(
+                (self._context_summary.compaction_count if self._context_summary else 0)
+                + 1
+            ),
+        )
+        self._active_context_start_turn = max(
+            self._active_context_start_turn,
+            target_turn_count,
+        )
+        self._context_warning = (
+            "Older turns were compacted into a summary to stay within the "
+            "configured context limit."
+        )
+        self._refresh_prepared_context()
+        return True
+
+    def _build_context_summary(
+        self,
+        *,
+        previous_summary: ChatContextSummary | None,
+        turns: list[ChatSessionTurnRecord],
+        starting_turn_number: int,
+    ) -> str:
+        fallback_summary = self._fallback_context_summary(
+            previous_summary=previous_summary,
+            turns=turns,
+            starting_turn_number=starting_turn_number,
+        )
+        run_text = getattr(self._provider, "run_text", None)
+        if callable(run_text):
+            try:
+                summary = str(
+                    run_text(
+                        messages=self._context_summary_prompt_messages(
+                            previous_summary=previous_summary,
+                            turns=turns,
+                            starting_turn_number=starting_turn_number,
+                        ),
+                        request_params={"temperature": 0.0},
+                    )
+                ).strip()
+                if summary:
+                    return self._protect_context_summary(summary)
+            except Exception:
+                fallback_summary = fallback_summary.strip()
+        return self._protect_context_summary(fallback_summary)
+
+    @staticmethod
+    def _context_summary_prompt_messages(
+        *,
+        previous_summary: ChatContextSummary | None,
+        turns: list[ChatSessionTurnRecord],
+        starting_turn_number: int,
+    ) -> list[dict[str, str]]:
+        previous = (
+            previous_summary.content
+            if previous_summary is not None
+            else "No previous summary."
+        )
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "Summarize older conversation turns for future chat context. "
+                    "Keep durable user preferences, unresolved questions, important "
+                    "facts, tool evidence, file paths, decisions, and caveats. "
+                    "Do not add facts not present in the supplied transcript. "
+                    "Return only the compact summary text."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Previous summary:\n{previous}\n\n"
+                    "New turns to merge:\n"
+                    f"{ChatSessionTurnRunner._render_turns_for_summary(turns, starting_turn_number)}"
+                ),
+            },
+        ]
+
+    @classmethod
+    def _fallback_context_summary(
+        cls,
+        *,
+        previous_summary: ChatContextSummary | None,
+        turns: list[ChatSessionTurnRecord],
+        starting_turn_number: int,
+    ) -> str:
+        sections: list[str] = []
+        if previous_summary is not None:
+            sections.append(f"Previous summary:\n{previous_summary.content}")
+        sections.append(cls._render_turns_for_summary(turns, starting_turn_number))
+        return cls._truncate_summary("\n\n".join(sections))
+
+    @classmethod
+    def _render_turns_for_summary(
+        cls,
+        turns: list[ChatSessionTurnRecord],
+        starting_turn_number: int,
+    ) -> str:
+        lines: list[str] = []
+        for offset, turn in enumerate(turns):
+            turn_number = starting_turn_number + offset
+            lines.append(f"Turn {turn_number} ({turn.status}):")
+            for message in turn.new_messages:
+                if message.role == "user":
+                    lines.append(f"- User: {cls._compact_text(message.content)}")
+                elif message.role == "assistant":
+                    summary = cls._assistant_message_summary(message.content)
+                    lines.append(
+                        f"- Assistant: {cls._compact_text(summary or message.content)}"
+                    )
+                elif message.role == "tool":
+                    lines.append(f"- Tool result: {cls._compact_text(message.content)}")
+            if turn.final_response is not None:
+                lines.append(
+                    f"- Final answer: {cls._compact_text(turn.final_response.answer)}"
+                )
+            for tool_result in turn.tool_results:
+                lines.append(f"- Tool call: {cls._tool_call_summary(tool_result)}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _compact_text(text: str, *, max_chars: int = 700) -> str:
+        compacted = " ".join(text.split())
+        if len(compacted) <= max_chars:
+            return compacted
+        return f"{compacted[:max_chars]}...(truncated)"
+
+    @staticmethod
+    def _truncate_summary(summary: str, *, max_chars: int = 12000) -> str:
+        stripped = summary.strip()
+        if len(stripped) <= max_chars:
+            return stripped
+        return f"{stripped[:max_chars]}...(truncated)"
+
+    def _protect_context_summary(self, summary: str) -> str:
+        cleaned = self._truncate_summary(summary)
+        if self._protection_controller is None:
+            return cleaned
+        decision = self._protection_controller.review_response(
+            response_payload=ChatFinalResponse(answer=cleaned).model_dump(mode="json"),
+            provenance=_collect_chat_provenance(
+                session_state=self._session_state,
+                current_tool_results=[],
+            ),
+        )
+        if (
+            decision.action is ProtectionAction.SANITIZE
+            and decision.sanitized_payload is not None
+        ):
+            sanitized = decision.sanitized_payload.get("answer")
+            if isinstance(sanitized, str) and sanitized.strip():
+                return self._truncate_summary(sanitized)
+        if decision.action is ProtectionAction.BLOCK:
+            return (
+                decision.safe_message
+                or "Earlier context summary was withheld for this environment."
+            )
+        return cleaned
 
     def _serialize_messages_for_model(
         self,
@@ -761,6 +1008,8 @@ class ChatSessionTurnRunner:
         return strategy.strip().lower() not in {"staged", "split", "decision"}
 
     def _can_fallback_to_prompt_tools(self, exc: Exception) -> bool:
+        if self._is_context_limit_error(exc):
+            return False
         run_text = getattr(self._provider, "run_text", None)
         if not callable(run_text):
             return False
@@ -768,6 +1017,27 @@ class ChatSessionTurnRunner:
         if not callable(can_fallback):
             return False
         return bool(can_fallback(exc))
+
+    def _should_retry_after_context_limit(self, exc: Exception) -> bool:
+        if self._context_limit_retry_used:
+            return False
+        if not self._is_context_limit_error(exc):
+            return False
+        self._context_limit_retry_used = True
+        return True
+
+    @staticmethod
+    def _is_context_limit_error(exc: Exception) -> bool:
+        for candidate in _iter_exception_chain(exc):
+            message = str(candidate).lower()
+            if any(marker in message for marker in _CONTEXT_LIMIT_ERROR_MARKERS):
+                return True
+            status_code = getattr(candidate, "status_code", None)
+            if status_code == 400 and any(
+                marker in message for marker in ("token", "context", "prompt")
+            ):
+                return True
+        return False
 
     def _structured_provider(self) -> ModelTurnProvider:
         run_structured = getattr(self._provider, "run_structured", None)
@@ -1942,6 +2212,26 @@ class ChatSessionTurnRunner:
     @staticmethod
     def _executed_tool_call_count(*, tool_results: list[ToolResult]) -> int:
         return len(tool_results)
+
+
+def _iter_exception_chain(exc: Exception) -> list[BaseException]:
+    seen: set[int] = set()
+    pending: list[BaseException] = [exc]
+    chain: list[BaseException] = []
+    while pending:
+        current = pending.pop()
+        current_id = id(current)
+        if current_id in seen:
+            continue
+        seen.add(current_id)
+        chain.append(current)
+        cause = getattr(current, "__cause__", None)
+        if isinstance(cause, BaseException):
+            pending.append(cause)
+        context = getattr(current, "__context__", None)
+        if isinstance(context, BaseException):
+            pending.append(context)
+    return chain
 
 
 def run_interactive_chat_session_turn(

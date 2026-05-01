@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,10 +24,12 @@ from llm_tools.tool_api.redaction import RedactionConfig
 from llm_tools.tools import register_filesystem_tools, register_text_tools
 from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import (
+    ChatContextSummary,
     ChatFinalResponse,
     ChatMessage,
     ChatSessionConfig,
     ChatSessionState,
+    ChatSessionTurnRecord,
     ChatWorkflowApprovalEvent,
     ChatWorkflowApprovalResolvedEvent,
     ChatWorkflowInspectorEvent,
@@ -318,6 +321,280 @@ def test_chat_session_runner_summarizes_model_visible_assistant_history(
             '{"final_response": "Plain final."}'
         )
         == "Assistant final answer: Plain final."
+    )
+
+
+def test_chat_session_runner_compacts_old_context_before_provider_call(
+    tmp_path: Path,
+) -> None:
+    old_turn = ChatSessionTurnRecord(
+        status="completed",
+        new_messages=[
+            ChatMessage(role="user", content="old question " * 30),
+            ChatMessage(role="assistant", content="old answer " * 30),
+        ],
+        final_response=ChatFinalResponse(answer="old answer"),
+    )
+    provider = _FakePromptToolProvider(
+        ["durable summary of old context", "```final\nANSWER:\nDone.\n```"]
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(turns=[old_turn]),
+        executor=_empty_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(max_context_tokens=40),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    events = list(runner)
+    result = next(
+        event for event in events if isinstance(event, ChatWorkflowResultEvent)
+    )
+
+    assert result.result.context_warning is not None
+    assert result.result.session_state is not None
+    assert result.result.session_state.context_summary is not None
+    assert result.result.session_state.context_summary.content == (
+        "durable summary of old context"
+    )
+    assert result.result.session_state.context_summary.covered_turn_count == 1
+    final_call_messages = provider.calls[-1]
+    assert any(
+        "Earlier conversation summary:\ndurable summary of old context"
+        in str(message["content"])
+        for message in final_call_messages
+    )
+
+
+def test_chat_session_runner_retries_context_limit_after_compaction(
+    tmp_path: Path,
+) -> None:
+    old_turn = ChatSessionTurnRecord(
+        status="completed",
+        new_messages=[
+            ChatMessage(role="user", content="remember alpha"),
+            ChatMessage(role="assistant", content="alpha is remembered"),
+        ],
+        final_response=ChatFinalResponse(answer="alpha is remembered"),
+    )
+    provider = _FakePromptToolProvider(
+        [
+            RuntimeError("maximum context length exceeded"),
+            "summary after context error",
+            "```final\nANSWER:\nDone after retry.\n```",
+        ]
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(turns=[old_turn]),
+        executor=_empty_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(max_context_tokens=1000),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    events = list(runner)
+    result = next(
+        event for event in events if isinstance(event, ChatWorkflowResultEvent)
+    )
+
+    assert len(provider.calls) == 3
+    assert result.result.final_response is not None
+    assert result.result.final_response.answer == "Done after retry."
+    assert result.result.session_state is not None
+    assert result.result.session_state.context_summary is not None
+    assert result.result.session_state.context_summary.content == (
+        "summary after context error"
+    )
+
+
+def test_chat_session_runner_does_not_retry_repeated_context_limit(
+    tmp_path: Path,
+) -> None:
+    old_turn = ChatSessionTurnRecord(
+        status="completed",
+        new_messages=[
+            ChatMessage(role="user", content="remember alpha"),
+            ChatMessage(role="assistant", content="alpha is remembered"),
+        ],
+        final_response=ChatFinalResponse(answer="alpha is remembered"),
+    )
+    provider = _FakePromptToolProvider(
+        [
+            RuntimeError("maximum context length exceeded"),
+            "summary after context error",
+            RuntimeError("maximum context length exceeded"),
+        ]
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(turns=[old_turn]),
+        executor=_empty_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(max_context_tokens=1000),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    with pytest.raises(RuntimeError, match="maximum context length"):
+        list(runner)
+
+
+def test_chat_session_runner_uses_deterministic_context_summary_fallback(
+    tmp_path: Path,
+) -> None:
+    old_turn = ChatSessionTurnRecord(
+        status="completed",
+        new_messages=[
+            ChatMessage(role="user", content="old question"),
+            ChatMessage(
+                role="assistant",
+                content=(
+                    '{"actions": [{"tool_name": "read_file", '
+                    '"arguments": {"path": "README.md"}}]}'
+                ),
+            ),
+            ChatMessage(role="tool", content='{"content": "tool evidence"}'),
+        ],
+        final_response=ChatFinalResponse(answer="old answer"),
+        tool_results=[
+            ToolResult(
+                ok=True,
+                tool_name="read_file",
+                tool_version="0.1.0",
+                output={"content": "tool evidence"},
+                metadata={
+                    "execution_record": {
+                        "request": {
+                            "tool_name": "read_file",
+                            "arguments": {"path": "README.md"},
+                        }
+                    }
+                },
+            )
+        ],
+    )
+    provider = _FakePromptToolProvider(
+        [RuntimeError("summary failed"), "```final\nANSWER:\nDone.\n```"]
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(turns=[old_turn]),
+        executor=_empty_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(max_context_tokens=20),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    result = next(
+        event for event in list(runner) if isinstance(event, ChatWorkflowResultEvent)
+    )
+
+    assert result.result.session_state is not None
+    summary = result.result.session_state.context_summary
+    assert summary is not None
+    assert "Turn 1 (completed):" in summary.content
+    assert "Tool result:" in summary.content
+    assert 'read_file({"path":"README.md"}) -> success' in summary.content
+
+
+def test_chat_session_runner_context_summary_helpers_cover_edges(
+    tmp_path: Path,
+) -> None:
+    previous = ChatContextSummary(
+        content="prior compact memory",
+        covered_turn_count=2,
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        compaction_count=1,
+    )
+    turn = ChatSessionTurnRecord(
+        status="completed",
+        new_messages=[ChatMessage(role="assistant", content='{"actions": [3]}')],
+        final_response=ChatFinalResponse(answer="new answer"),
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(),
+        executor=_empty_executor(),
+        provider=_FakePromptToolProvider(["```final\nANSWER:\nDone.\n```"]),
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    prompt_messages = runner._context_summary_prompt_messages(
+        previous_summary=previous,
+        turns=[turn],
+        starting_turn_number=3,
+    )
+    fallback = runner._fallback_context_summary(
+        previous_summary=previous,
+        turns=[turn],
+        starting_turn_number=3,
+    )
+
+    assert "prior compact memory" in prompt_messages[1]["content"]
+    assert "Previous summary:" in fallback
+    assert "new answer" in fallback
+    assert runner._compact_text("x" * 705).endswith("...(truncated)")
+    assert runner._truncate_summary("x" * 12005).endswith("...(truncated)")
+    assert runner._is_context_limit_error(
+        RuntimeError("Request failed: too many tokens")
+    )
+    assert not runner._is_context_limit_error(RuntimeError("auth failed"))
+
+
+def test_chat_session_runner_protects_context_summary(tmp_path: Path) -> None:
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(),
+        executor=_empty_executor(),
+        provider=_FakePromptToolProvider(["```final\nANSWER:\nDone.\n```"]),
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    runner._protection_controller = SimpleNamespace(
+        review_response=lambda **_kwargs: SimpleNamespace(
+            action=ProtectionAction.SANITIZE,
+            sanitized_payload={"answer": "sanitized summary"},
+        )
+    )
+    assert runner._protect_context_summary("raw summary") == "sanitized summary"
+
+    runner._protection_controller = SimpleNamespace(
+        review_response=lambda **_kwargs: SimpleNamespace(
+            action=ProtectionAction.BLOCK,
+            safe_message=None,
+            sanitized_payload=None,
+        )
+    )
+    assert runner._protect_context_summary("raw summary") == (
+        "Earlier context summary was withheld for this environment."
     )
 
 

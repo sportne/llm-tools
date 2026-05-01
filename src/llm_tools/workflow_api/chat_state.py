@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime
 
 from llm_tools.tool_api import ProtectionProvenanceSnapshot, ToolResult
 from llm_tools.workflow_api.chat_models import (
+    ChatContextSummary,
     ChatFinalResponse,
     ChatMessage,
     ChatSessionConfig,
@@ -73,25 +75,40 @@ def _prepare_session_context(
 ) -> tuple[ChatMessage, ChatMessage, list[ChatMessage], int, str | None]:
     system_message = ChatMessage(role="system", content=system_prompt)
     user_chat_message = ChatMessage(role="user", content=user_message)
-    active_context_start_turn = session_state.active_context_start_turn
+    summary_message = _context_summary_message(session_state.context_summary)
+    active_context_start_turn = max(
+        session_state.active_context_start_turn,
+        (
+            session_state.context_summary.covered_turn_count
+            if session_state.context_summary is not None
+            else 0
+        ),
+    )
     context_warning: str | None = None
     while active_context_start_turn < len(session_state.turns):
         prior_messages = _flatten_turn_messages(
             session_state.turns[active_context_start_turn:]
         )
         candidate_context_tokens = _estimate_messages_tokens(
-            [system_message, *prior_messages, user_chat_message]
+            [
+                system_message,
+                *([summary_message] if summary_message is not None else []),
+                *prior_messages,
+                user_chat_message,
+            ]
         )
         if candidate_context_tokens <= session_config.max_context_tokens:
             break
         active_context_start_turn += 1
         context_warning = (
-            "Older turns were removed from active context to stay within the "
-            "configured token limit."
+            "Older turns will be compacted into a summary to stay within the "
+            "configured context limit."
         )
     prior_messages = _flatten_turn_messages(
         session_state.turns[active_context_start_turn:]
     )
+    if summary_message is not None:
+        prior_messages = [summary_message, *prior_messages]
     return (
         system_message,
         user_chat_message,
@@ -113,7 +130,20 @@ def _estimate_messages_tokens(messages: list[ChatMessage]) -> int:
 
 
 def _estimate_message_tokens(message: ChatMessage) -> int:
-    return len(_tokenize(message.content))
+    word_count = len(_tokenize(message.content))
+    character_estimate = math.ceil(len(message.content) / 4)
+    return max(word_count, character_estimate) + 4
+
+
+def _context_summary_message(
+    context_summary: ChatContextSummary | None,
+) -> ChatMessage | None:
+    if context_summary is None:
+        return None
+    return ChatMessage(
+        role="system",
+        content=f"Earlier conversation summary:\n{context_summary.content}",
+    )
 
 
 def _estimate_turn_total_tokens(turn: ChatSessionTurnRecord) -> int:
@@ -156,6 +186,7 @@ def _finalize_session_turn_result(
     turn_result: ChatWorkflowTurnResult,
     session_state: ChatSessionState,
     active_context_start_turn: int,
+    context_summary: ChatContextSummary | None,
     context_warning: str | None,
     system_message: ChatMessage,
 ) -> ChatWorkflowTurnResult:
@@ -163,10 +194,13 @@ def _finalize_session_turn_result(
     updated_session_state = ChatSessionState(
         turns=updated_turns,
         active_context_start_turn=active_context_start_turn,
+        context_summary=context_summary,
         pending_protection_prompt=turn_result.pending_protection_prompt,
     )
+    summary_message = _context_summary_message(updated_session_state.context_summary)
     active_context_messages = [
         system_message,
+        *([summary_message] if summary_message is not None else []),
         *_flatten_turn_messages(
             updated_session_state.turns[
                 updated_session_state.active_context_start_turn :
@@ -227,6 +261,7 @@ __all__ = [
     "_assistant_message_for_final_response",
     "_build_continuation_result",
     "_build_interrupted_result",
+    "_context_summary_message",
     "_estimate_messages_tokens",
     "_finalize_session_turn_result",
     "_parse_timestamp",

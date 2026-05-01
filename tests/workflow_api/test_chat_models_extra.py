@@ -146,7 +146,10 @@ def test_chat_session_internal_helpers_cover_branches() -> None:
     )
     assert prepared[4] is not None
     assert prepared[3] == 1
-    assert _estimate_messages_tokens([ChatMessage(role="user", content="one two")]) == 2
+    assert _estimate_messages_tokens([ChatMessage(role="user", content="one two")]) == 6
+    assert (
+        _estimate_messages_tokens([ChatMessage(role="user", content="x" * 100)]) == 29
+    )
 
     finalized = _finalize_session_turn_result(
         turn_result=ChatWorkflowTurnResult(
@@ -157,6 +160,7 @@ def test_chat_session_internal_helpers_cover_branches() -> None:
         ),
         session_state=session_state,
         active_context_start_turn=0,
+        context_summary=None,
         context_warning="trimmed",
         system_message=ChatMessage(role="system", content="sys"),
     )
