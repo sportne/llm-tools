@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
 import llm_tools.workflow_api.protection as protection_module
+import llm_tools.workflow_api.protection_store as protection_store_module
 from llm_tools.tool_api import SourceProvenanceRef, ToolResult
 from llm_tools.workflow_api import (
     DefaultEnvironmentComparator,
     ProtectionAction,
     ProtectionAssessment,
+    ProtectionCategory,
     ProtectionConfig,
     ProtectionController,
     ProtectionFeedbackEntry,
@@ -117,6 +121,100 @@ def test_controller_sanitizes_dict_answer_payload() -> None:
 
     assert decision.action is ProtectionAction.SANITIZE
     assert decision.sanitized_payload == {"answer": "Safe answer"}
+
+
+def test_controller_allows_single_allowed_extractively_used_source() -> None:
+    controller = ProtectionController(
+        config=ProtectionConfig(enabled=True),
+        environment={"allowed_sensitivity_labels": ["MINOR"]},
+        corpus=protection_module.ProtectionCorpus(
+            documents=[
+                protection_module.ProtectionDocument(
+                    document_id="policy.pdf",
+                    path="/corpus/policy.pdf",
+                    content="allowed source",
+                    display_name="policy.pdf",
+                    sensitivity_label="MINOR",
+                )
+            ]
+        ),
+        classifier=_Classifier(
+            prompt=ProtectionAssessment(reasoning="ok"),
+            response=ProtectionAssessment(
+                reasoning="Classifier would otherwise block.",
+                recommended_action=ProtectionAction.BLOCK,
+                source_document_ids_used=["policy.pdf"],
+                requires_cross_source_synthesis=False,
+                requires_inference_beyond_source=False,
+            ),
+        ),
+    )
+
+    decision = controller.review_response(response_payload={"answer": "summary"})
+
+    assert decision.action is ProtectionAction.ALLOW
+    assert decision.metadata["source_policy"] == "single_allowed_source"
+
+
+def test_controller_does_not_single_source_allow_inferential_answers() -> None:
+    controller = ProtectionController(
+        config=ProtectionConfig(enabled=True),
+        environment={"allowed_sensitivity_labels": ["MINOR"]},
+        corpus=protection_module.ProtectionCorpus(
+            documents=[
+                protection_module.ProtectionDocument(
+                    document_id="policy.pdf",
+                    path="/corpus/policy.pdf",
+                    content="allowed source",
+                    sensitivity_label="MINOR",
+                )
+            ]
+        ),
+        classifier=_Classifier(
+            prompt=ProtectionAssessment(reasoning="ok"),
+            response=ProtectionAssessment(
+                reasoning="Needs inference.",
+                recommended_action=ProtectionAction.BLOCK,
+                source_document_ids_used=["policy.pdf"],
+                requires_cross_source_synthesis=False,
+                requires_inference_beyond_source=True,
+            ),
+        ),
+    )
+
+    decision = controller.review_response(response_payload={"answer": "analysis"})
+
+    assert decision.action is ProtectionAction.BLOCK
+
+
+def test_controller_does_not_single_source_allow_uncategorized_sources() -> None:
+    controller = ProtectionController(
+        config=ProtectionConfig(enabled=True),
+        environment={"allowed_sensitivity_labels": ["MINOR"]},
+        corpus=protection_module.ProtectionCorpus(
+            documents=[
+                protection_module.ProtectionDocument(
+                    document_id="policy.pdf",
+                    path="/corpus/policy.pdf",
+                    content="uncategorized source",
+                )
+            ]
+        ),
+        classifier=_Classifier(
+            prompt=ProtectionAssessment(reasoning="ok"),
+            response=ProtectionAssessment(
+                reasoning="Source lacks category.",
+                recommended_action=ProtectionAction.BLOCK,
+                source_document_ids_used=["policy.pdf"],
+                requires_cross_source_synthesis=False,
+                requires_inference_beyond_source=False,
+            ),
+        ),
+    )
+
+    decision = controller.review_response(response_payload={"answer": "summary"})
+
+    assert decision.action is ProtectionAction.BLOCK
 
 
 class _AsyncClassifier(_Classifier):
@@ -393,6 +491,290 @@ def test_inspect_protection_corpus_accepts_directory_entries(
     ]
     assert any(issue.path == str(tmp_path / "missing.txt") for issue in report.issues)
     assert any(issue.path == str(corpus_dir / "skip.png") for issue in report.issues)
+
+
+def test_inspect_protection_corpus_converts_markitdown_documents_and_reuses_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    corpus_dir = tmp_path / "policies"
+    corpus_dir.mkdir()
+    source = corpus_dir / "report.pdf"
+    source.write_bytes(b"%PDF")
+    fake_module = ModuleType("markitdown")
+    convert_calls: list[str] = []
+
+    class FakeMarkItDown:
+        def convert(self, path: str) -> SimpleNamespace:
+            convert_calls.append(path)
+            return SimpleNamespace(text_content=f"converted:{path}")
+
+    fake_module.MarkItDown = FakeMarkItDown
+    monkeypatch.setitem(sys.modules, "markitdown", fake_module)
+
+    config = ProtectionConfig(enabled=True, document_paths=[str(corpus_dir)])
+    first = inspect_protection_corpus(config)
+    second = inspect_protection_corpus(config)
+
+    assert first.converted_document_count == 1
+    assert first.corpus.documents[0].read_kind == "markitdown"
+    assert first.corpus.documents[0].display_name == "report.pdf"
+    assert first.corpus.documents[0].content == f"converted:{source}"
+    assert first.corpus.documents[0].content_hash
+    assert second.corpus.documents[0].content == f"converted:{source}"
+    assert convert_calls == [str(source)]
+
+
+def test_inspect_protection_corpus_reports_conversion_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    corpus_dir = tmp_path / "policies"
+    corpus_dir.mkdir()
+    source = corpus_dir / "report.docx"
+    source.write_bytes(b"docx")
+    fake_module = ModuleType("markitdown")
+
+    class FakeMarkItDown:
+        def convert(self, path: str) -> SimpleNamespace:
+            del path
+            raise RuntimeError("conversion failed")
+
+    fake_module.MarkItDown = FakeMarkItDown
+    monkeypatch.setitem(sys.modules, "markitdown", fake_module)
+
+    report = inspect_protection_corpus(
+        ProtectionConfig(enabled=True, document_paths=[str(corpus_dir)])
+    )
+
+    assert report.usable_document_count == 0
+    assert any(
+        issue.path == str(source) and "Unable to convert" in issue.message
+        for issue in report.issues
+    )
+
+
+def test_inspect_protection_corpus_reads_category_metadata_conventions(
+    tmp_path: Path,
+) -> None:
+    corpus_dir = tmp_path / "policies"
+    minor_dir = corpus_dir / "minor"
+    minor_dir.mkdir(parents=True)
+    front_matter_file = corpus_dir / "front.md"
+    manifest_file = corpus_dir / ".llm-tools-protection-sources.yaml"
+    folder_file = minor_dir / "folder.txt"
+    manifest_target = corpus_dir / "manifest.txt"
+    front_matter_file.write_text(
+        "---\nsensitivity: low\n---\nGuidance text.",
+        encoding="utf-8",
+    )
+    manifest_file.write_text(
+        "sources:\n  - path: manifest.txt\n    category: MAJOR\n",
+        encoding="utf-8",
+    )
+    manifest_target.write_text("Manifest categorized.", encoding="utf-8")
+    folder_file.write_text("Folder categorized.", encoding="utf-8")
+
+    report = inspect_protection_corpus(
+        ProtectionConfig(
+            enabled=True,
+            document_paths=[str(corpus_dir)],
+            allowed_sensitivity_labels=["MINOR", "MAJOR"],
+            sensitivity_categories=[
+                ProtectionCategory(label="MINOR", aliases=["low"]),
+                ProtectionCategory(label="MAJOR"),
+            ],
+        )
+    )
+    by_id = {document.document_id: document for document in report.corpus.documents}
+
+    assert by_id["front.md"].sensitivity_label == "MINOR"
+    assert by_id["front.md"].sensitivity_label_source == "front_matter"
+    assert by_id["manifest.txt"].sensitivity_label == "MAJOR"
+    assert by_id["manifest.txt"].sensitivity_label_source == (
+        "manifest:.llm-tools-protection-sources.yaml"
+    )
+    assert by_id["minor/folder.txt"].sensitivity_label == "MINOR"
+    assert by_id["minor/folder.txt"].sensitivity_label_source == "folder"
+    assert ".llm-tools-protection-sources.yaml" not in by_id
+
+
+def test_inspect_protection_corpus_uses_unique_relative_document_ids(
+    tmp_path: Path,
+) -> None:
+    corpus_dir = tmp_path / "policies"
+    left = corpus_dir / "left"
+    right = corpus_dir / "right"
+    left.mkdir(parents=True)
+    right.mkdir()
+    (left / "policy.txt").write_text("left", encoding="utf-8")
+    (right / "policy.txt").write_text("right", encoding="utf-8")
+
+    report = inspect_protection_corpus(
+        ProtectionConfig(enabled=True, document_paths=[str(corpus_dir)])
+    )
+
+    assert sorted(document.document_id for document in report.corpus.documents) == [
+        "left/policy.txt",
+        "right/policy.txt",
+    ]
+
+
+def test_inspect_protection_corpus_handles_source_manifest_variants(
+    tmp_path: Path,
+) -> None:
+    corpus_dir = tmp_path / "policies"
+    corpus_dir.mkdir()
+    manifest = corpus_dir / ".llm-tools-protection-sources.json"
+    alpha = corpus_dir / "alpha.txt"
+    beta = corpus_dir / "beta.md"
+    alpha.write_text("alpha", encoding="utf-8")
+    beta.write_text("beta", encoding="utf-8")
+    manifest.write_text(
+        json.dumps(
+            {
+                "sources": {
+                    "alpha.txt": "MINOR",
+                    "*.md": {"sensitivity_label": "MAJOR"},
+                    "missing-category.txt": {},
+                    "": "MINOR",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = inspect_protection_corpus(
+        ProtectionConfig(
+            enabled=True,
+            document_paths=[str(corpus_dir)],
+            allowed_sensitivity_labels=["MINOR", "MAJOR"],
+        )
+    )
+    by_id = {document.document_id: document for document in report.corpus.documents}
+
+    assert by_id["alpha.txt"].sensitivity_label == "MINOR"
+    assert by_id["beta.md"].sensitivity_label == "MAJOR"
+    assert any(
+        "invalid protection source metadata" in issue.message for issue in report.issues
+    )
+
+
+def test_inspect_protection_corpus_reports_bad_source_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    corpus_dir = tmp_path / "policies"
+    corpus_dir.mkdir()
+    manifest = corpus_dir / ".llm-tools-protection-sources.yaml"
+    manifest.write_text("sources: []", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def fake_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self == manifest:
+            raise OSError("boom")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+
+    report = inspect_protection_corpus(
+        ProtectionConfig(enabled=True, document_paths=[str(corpus_dir)])
+    )
+
+    assert any(
+        issue.path == str(manifest)
+        and "Unable to read protection source metadata" in issue.message
+        for issue in report.issues
+    )
+
+
+def test_inspect_protection_corpus_skips_internal_metadata_files(
+    tmp_path: Path,
+) -> None:
+    corpus_dir = tmp_path / "policies"
+    cache_dir = corpus_dir / ".llm_tools" / "cache"
+    cache_dir.mkdir(parents=True)
+    corrections = corpus_dir / ".llm-tools-protection-corrections.json"
+    source_metadata = corpus_dir / ".llm-tools-protection-sources.yaml"
+    cache_file = cache_dir / "content.md"
+    normal = corpus_dir / "policy.txt"
+    corrections.write_text('{"entries": []}', encoding="utf-8")
+    source_metadata.write_text("sources: []", encoding="utf-8")
+    cache_file.write_text("cached conversion", encoding="utf-8")
+    normal.write_text("real policy", encoding="utf-8")
+
+    report = inspect_protection_corpus(
+        ProtectionConfig(
+            enabled=True,
+            document_paths=[str(corpus_dir)],
+            corrections_path=str(corrections),
+        )
+    )
+
+    assert [document.document_id for document in report.corpus.documents] == [
+        "policy.txt"
+    ]
+
+
+def test_protection_store_helper_branches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    outside_rule = protection_store_module._SourceCategoryRule(
+        base_dir=tmp_path / "root",
+        pattern="*.txt",
+        category="MINOR",
+        source="test",
+    )
+    assert outside_rule.matches(tmp_path / "other" / "file.txt") is False
+    assert protection_store_module._document_id_for_path("").startswith("document-")
+    assert (
+        protection_store_module._document_id_for_path_with_root(
+            tmp_path / "file.txt", corpus_root=tmp_path / "root"
+        )
+        == "file.txt"
+    )
+    assert protection_store_module._front_matter_category("---\n-\n---\nbody") is None
+    assert (
+        protection_store_module._front_matter_category(
+            "---\ncategory: [not-a-string]\n---\nbody"
+        )
+        is None
+    )
+    assert (
+        protection_store_module._front_matter_category("---\ncategory: [\n---\nbody")
+        is None
+    )
+
+    source = tmp_path / "plain.pdf"
+    source.write_text("plain utf8", encoding="utf-8")
+    monkeypatch.setattr(
+        protection_store_module, "get_conversion_backend", lambda path: None
+    )
+    loaded = protection_store_module._load_protection_readable_content(
+        source,
+        suffix=".pdf",
+        cache_root=None,
+    )
+
+    assert loaded.read_kind == "text"
+    assert loaded.content == "plain utf8"
+
+
+def test_inspect_protection_corpus_reports_too_large_converted_documents(
+    tmp_path: Path,
+) -> None:
+    corpus_dir = tmp_path / "policies"
+    corpus_dir.mkdir()
+    source = corpus_dir / "large.pdf"
+    source.write_bytes(b"x" * (1024 * 1024 + 1))
+
+    report = inspect_protection_corpus(
+        ProtectionConfig(enabled=True, document_paths=[str(corpus_dir)])
+    )
+
+    assert report.usable_document_count == 0
+    assert any("readable byte limit" in issue.message for issue in report.issues)
 
 
 def test_feedback_prompt_validators_trim_and_require_label() -> None:

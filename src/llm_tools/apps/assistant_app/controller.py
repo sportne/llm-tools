@@ -1116,6 +1116,10 @@ class NiceGUIChatController:
             protection_environment["allowed_sensitivity_labels"] = list(
                 runtime.protection.allowed_sensitivity_labels
             )
+            protection_environment["sensitivity_categories"] = [
+                category.model_dump(mode="json")
+                for category in runtime.protection.sensitivity_categories
+            ]
             protection_controller = build_protection_controller(
                 config=protection_config,
                 provider=provider,
@@ -1198,6 +1202,10 @@ class NiceGUIChatController:
             protection_environment["allowed_sensitivity_labels"] = list(
                 runtime.protection.allowed_sensitivity_labels
             )
+            protection_environment["sensitivity_categories"] = [
+                category.model_dump(mode="json")
+                for category in runtime.protection.sensitivity_categories
+            ]
             protection_controller = build_protection_controller(
                 config=runtime.protection,
                 provider=provider,

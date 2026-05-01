@@ -27,6 +27,9 @@ class _LLMProtectionAssessmentModel(BaseModel):
     reasoning: str
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     referenced_document_ids: list[str] = Field(default_factory=list)
+    source_document_ids_used: list[str] = Field(default_factory=list)
+    requires_cross_source_synthesis: bool | None = None
+    requires_inference_beyond_source: bool | None = None
     recommended_action: ProtectionAction | None = None
     guard_text: str | None = None
     sanitized_text: str | None = None
@@ -192,9 +195,20 @@ def _build_classifier_messages(
         {
             "document_id": document.document_id,
             "path": document.path,
+            "display_name": document.display_name,
+            "read_kind": document.read_kind,
+            "content_hash": document.content_hash,
+            "sensitivity_label": document.sensitivity_label,
+            "sensitivity_label_source": document.sensitivity_label_source,
             "content": document.content[:12000],
         }
         for document in corpus.documents
+    ]
+    category_catalog = [
+        _model_payload(category)
+        if hasattr(category, "model_dump") or isinstance(category, dict)
+        else category
+        for category in environment.get("sensitivity_categories", [])
     ]
     feedback_entries = [
         entry.model_dump(mode="json") for entry in corpus.feedback_entries[-50:]
@@ -205,8 +219,12 @@ def _build_classifier_messages(
             "content": (
                 "You classify sensitivity for either a model-bound prompt or a candidate response. "
                 "Use the provided proprietary sensitivity corpus and confirmed feedback entries. "
+                "Treat the category catalog, category aliases, and the current allowed environment "
+                "labels as first-class policy inputs. Prefer canonical category labels in your output. "
                 "Return a structured assessment with reasoning, a sensitivity label when you can infer one, "
-                "and a recommended action. Use CHALLENGE for prompts that should be reviewed with the user, "
+                "source_document_ids_used, whether the answer requires cross-source synthesis, whether it "
+                "requires inference beyond source text, and a recommended action. Use CHALLENGE for prompts "
+                "that should be reviewed with the user, "
                 "CONSTRAIN when a safer lower-sensitivity answer appears possible, SANITIZE when the response "
                 "can be safely rewritten, and BLOCK when it should be withheld."
             ),
@@ -217,6 +235,7 @@ def _build_classifier_messages(
                 {
                     "task": task,
                     "environment": environment,
+                    "category_catalog": category_catalog,
                     "documents": documents,
                     "feedback_entries": feedback_entries,
                     "payload": payload,

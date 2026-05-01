@@ -24,12 +24,51 @@ class ProtectionAction(str, Enum):  # noqa: UP042
     BLOCK = "block"
 
 
+class ProtectionCategory(BaseModel):
+    """One canonical sensitivity category and its user-facing aliases."""
+
+    label: str = Field(min_length=1)
+    aliases: list[str] = Field(default_factory=list)
+    description: str | None = None
+    examples: list[str] = Field(default_factory=list)
+
+    @field_validator("label")
+    @classmethod
+    def validate_label(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("category label must not be empty")
+        return cleaned
+
+    @field_validator("aliases", "examples")
+    @classmethod
+    def validate_string_lists(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for entry in value:
+            item = entry.strip()
+            key = item.casefold()
+            if item and key not in seen:
+                cleaned.append(item)
+                seen.add(key)
+        return cleaned
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+
 class ProtectionConfig(BaseModel):
     """Config used to enable and load workflow protection state."""
 
     enabled: bool = False
     document_paths: list[str] = Field(default_factory=list)
     allowed_sensitivity_labels: list[str] = Field(default_factory=list)
+    sensitivity_categories: list[ProtectionCategory] = Field(default_factory=list)
     corrections_path: str | None = None
     challenge_interactively: bool = True
     review_final_answers: bool = True
@@ -54,6 +93,21 @@ class ProtectionConfig(BaseModel):
                 seen.add(label)
         return cleaned
 
+    @field_validator("sensitivity_categories")
+    @classmethod
+    def validate_sensitivity_categories(
+        cls, value: list[ProtectionCategory]
+    ) -> list[ProtectionCategory]:
+        cleaned: list[ProtectionCategory] = []
+        seen: set[str] = set()
+        for category in value:
+            key = category.label.casefold()
+            if key in seen:
+                continue
+            cleaned.append(category)
+            seen.add(key)
+        return cleaned
+
     @field_validator("corrections_path")
     @classmethod
     def validate_corrections_path(cls, value: str | None) -> str | None:
@@ -69,6 +123,11 @@ class ProtectionDocument(BaseModel):
     document_id: str = Field(min_length=1)
     path: str = Field(min_length=1)
     content: str
+    display_name: str | None = None
+    read_kind: str = "text"
+    content_hash: str | None = None
+    sensitivity_label: str | None = None
+    sensitivity_label_source: str | None = None
 
 
 class ProtectionFeedbackEntry(BaseModel):
@@ -126,6 +185,9 @@ class ProtectionAssessment(BaseModel):
     reasoning: str = ""
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     referenced_document_ids: list[str] = Field(default_factory=list)
+    source_document_ids_used: list[str] = Field(default_factory=list)
+    requires_cross_source_synthesis: bool | None = None
+    requires_inference_beyond_source: bool | None = None
     recommended_action: ProtectionAction | None = None
     guard_text: str | None = None
     sanitized_text: str | None = None
@@ -258,6 +320,7 @@ __all__ = [
     "PromptProtectionDecision",
     "ProtectionAction",
     "ProtectionAssessment",
+    "ProtectionCategory",
     "ProtectionConfig",
     "ProtectionCorpus",
     "ProtectionDocument",

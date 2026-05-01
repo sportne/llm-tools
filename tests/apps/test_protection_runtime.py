@@ -52,6 +52,11 @@ def test_llm_protection_classifier_sync_and_async_paths() -> None:
                 document_id="doc-1",
                 path="/policy.txt",
                 content="keep this protected",
+                display_name="policy.txt",
+                read_kind="text",
+                content_hash="abc123",
+                sensitivity_label="internal",
+                sensitivity_label_source="front_matter",
             )
         ],
         feedback_entries=[
@@ -61,7 +66,11 @@ def test_llm_protection_classifier_sync_and_async_paths() -> None:
             )
         ],
     )
-    environment = {"app_name": "assistant", "allowed_sensitivity_labels": ["public"]}
+    environment = {
+        "app_name": "assistant",
+        "allowed_sensitivity_labels": ["public"],
+        "sensitivity_categories": [{"label": "internal", "aliases": ["secret"]}],
+    }
 
     prompt_assessment = classifier.assess_prompt(
         corpus=corpus,
@@ -87,6 +96,9 @@ def test_llm_protection_classifier_sync_and_async_paths() -> None:
     assert sync_payload["task"] == "prompt"
     assert async_payload["task"] == "response"
     assert sync_payload["documents"][0]["document_id"] == "doc-1"
+    assert sync_payload["documents"][0]["display_name"] == "policy.txt"
+    assert sync_payload["documents"][0]["sensitivity_label"] == "internal"
+    assert sync_payload["category_catalog"][0]["label"] == "internal"
     assert (
         async_payload["feedback_entries"][0]["expected_sensitivity_label"] == "internal"
     )

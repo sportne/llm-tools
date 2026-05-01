@@ -208,9 +208,14 @@ class ProtectionController:
             response_payload=response_payload,
             provenance=provenance or ProtectionProvenanceSnapshot(),
         )
-        action = self._comparator.resolve_response_action(
-            assessment=assessment,
-            environment=dict(self._environment),
+        source_policy_allow = self._single_allowed_source_extractively_used(assessment)
+        action = (
+            ProtectionAction.ALLOW
+            if source_policy_allow
+            else self._comparator.resolve_response_action(
+                assessment=assessment,
+                environment=dict(self._environment),
+            )
         )
         sanitized_payload = None
         if action is ProtectionAction.SANITIZE:
@@ -230,7 +235,14 @@ class ProtectionController:
                 action in {ProtectionAction.SANITIZE, ProtectionAction.BLOCK}
                 and self._config.purge_library_state_on_violation
             ),
-            metadata=dict(assessment.metadata),
+            metadata={
+                **dict(assessment.metadata),
+                **(
+                    {"source_policy": "single_allowed_source"}
+                    if source_policy_allow
+                    else {}
+                ),
+            },
         )
 
     async def review_response_async(
@@ -247,9 +259,16 @@ class ProtectionController:
                 response_payload=response_payload,
                 provenance=provenance or ProtectionProvenanceSnapshot(),
             )
-            action = self._comparator.resolve_response_action(
-                assessment=assessment,
-                environment=dict(self._environment),
+            source_policy_allow = self._single_allowed_source_extractively_used(
+                assessment
+            )
+            action = (
+                ProtectionAction.ALLOW
+                if source_policy_allow
+                else self._comparator.resolve_response_action(
+                    assessment=assessment,
+                    environment=dict(self._environment),
+                )
             )
             sanitized_payload = None
             if action is ProtectionAction.SANITIZE:
@@ -269,7 +288,14 @@ class ProtectionController:
                     action in {ProtectionAction.SANITIZE, ProtectionAction.BLOCK}
                     and self._config.purge_library_state_on_violation
                 ),
-                metadata=dict(assessment.metadata),
+                metadata={
+                    **dict(assessment.metadata),
+                    **(
+                        {"source_policy": "single_allowed_source"}
+                        if source_policy_allow
+                        else {}
+                    ),
+                },
             )
         return self.review_response(
             response_payload=response_payload,
@@ -431,6 +457,44 @@ class ProtectionController:
             "Answer only within the lowest sensitivity that is acceptable for the current environment. "
             "Do not reveal or synthesize more sensitive information."
         )
+
+    def _single_allowed_source_extractively_used(
+        self,
+        assessment: ProtectionAssessment,
+    ) -> bool:
+        source_ids = set(
+            assessment.source_document_ids_used or assessment.referenced_document_ids
+        )
+        if len(source_ids) != 1:
+            return False
+        if assessment.requires_cross_source_synthesis is not False:
+            return False
+        if assessment.requires_inference_beyond_source is not False:
+            return False
+        allowed_labels = {
+            str(label).strip().casefold()
+            for label in self._environment.get("allowed_sensitivity_labels", [])
+            if str(label).strip()
+        }
+        if not allowed_labels:
+            return False
+        source_id = next(iter(source_ids))
+        document = next(
+            (
+                item
+                for item in self._corpus.documents
+                if source_id
+                in {
+                    item.document_id,
+                    item.path,
+                    item.display_name or "",
+                }
+            ),
+            None,
+        )
+        if document is None or not document.sensitivity_label:
+            return False
+        return document.sensitivity_label.casefold() in allowed_labels
 
 
 def _parse_bool(value: str) -> bool:

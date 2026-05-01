@@ -511,10 +511,13 @@ def _protection_corpus_readiness_text(config: ProtectionConfig) -> str:
         return "Add at least one allowed category before protection can engage."
     report = inspect_protection_corpus(config)
     if report.usable_document_count:
-        return (
-            f"Ready: {report.usable_document_count} document(s), "
-            f"{len(report.corpus.feedback_entries)} correction(s)."
-        )
+        parts = [f"Ready: {report.usable_document_count} document(s)"]
+        if report.converted_document_count:
+            parts.append(f"{report.converted_document_count} converted")
+        if report.uncategorized_document_count:
+            parts.append(f"{report.uncategorized_document_count} uncategorized")
+        parts.append(f"{len(report.corpus.feedback_entries)} correction(s)")
+        return ", ".join(parts) + "."
     return "Not ready: no readable protection documents were found."
 
 
@@ -3430,6 +3433,10 @@ def build_assistant_ui(  # noqa: C901
                 placeholder="<corpus>/.llm-tools-protection-corrections.json",
             ).classes("w-full")
             protection_readiness_label = ui.label("").classes("text-sm")
+            ui.label(
+                "Corpus documents may be Markdown, text, PDF, Word, PowerPoint, or spreadsheets. "
+                "Optional categories can come from front matter, category-named folders, or a local source metadata sidecar."
+            ).classes("text-xs llmt-muted")
             with ui.column().classes("w-full gap-1") as protection_issues_column:
                 pass
         with ui.row().classes("justify-end w-full"):
