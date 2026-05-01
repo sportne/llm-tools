@@ -26,7 +26,6 @@ from llm_tools.harness_api import (
     HarnessSessionInspection,
     HarnessStopReason,
     ResumeDisposition,
-    ScriptedParsedResponseProvider,
     resume_session,
 )
 from llm_tools.harness_api.replay import replay_session
@@ -38,9 +37,11 @@ from llm_tools.workflow_api import (
     DefaultEnvironmentComparator,
     ProtectionAction,
     ProtectionAssessment,
+    ProtectionCategory,
     ProtectionConfig,
     ProtectionController,
     ProtectionFeedbackStore,
+    inspect_protection_corpus,
     load_protection_corpus,
 )
 
@@ -764,10 +765,24 @@ def _run_chat_protection_demo(
             "protection": ProtectionConfig(
                 enabled=True,
                 document_paths=[str(guidance_path)],
+                allowed_sensitivity_labels=["public"],
+                sensitivity_categories=[
+                    ProtectionCategory(
+                        label="public",
+                        aliases=["external-safe", "approved"],
+                        description="Information approved for this demo environment.",
+                    ),
+                    ProtectionCategory(
+                        label="restricted",
+                        aliases=["proprietary", "secret"],
+                        description="Proprietary material that must be challenged or sanitized.",
+                    ),
+                ],
                 corrections_path=str(corrections_path),
             )
         }
     )
+    readiness_report = inspect_protection_corpus(runtime_with_protection.protection)
 
     def _build_demo_controller(**kwargs: object) -> ProtectionController:
         config_arg = kwargs["config"]
@@ -801,6 +816,25 @@ def _run_chat_protection_demo(
         "prompts": prompts,
         "protection_document_path": str(guidance_path),
         "corrections_path": str(corrections_path),
+        "protection_debug": {
+            "configured_allowed_labels": list(
+                runtime_with_protection.protection.allowed_sensitivity_labels
+            ),
+            "configured_category_labels": [
+                category.label
+                for category in runtime_with_protection.protection.sensitivity_categories
+            ],
+            "usable_document_count": readiness_report.usable_document_count,
+            "protection_ready": (
+                readiness_report.usable_document_count > 0
+                and bool(
+                    runtime_with_protection.protection.allowed_sensitivity_labels
+                )
+            ),
+            "readiness_issues": [
+                issue.model_dump(mode="json") for issue in readiness_report.issues
+            ],
+        },
     }
 
     session_id = f"e2e-chat-protection-{uuid4().hex[:8]}"
@@ -1083,7 +1117,7 @@ def _run_research_approval_flow(
 ) -> dict[str, Any]:
     workspace_root.mkdir(parents=True, exist_ok=True)
     output_path = workspace_root / output_relpath
-    provider = ScriptedParsedResponseProvider(
+    provider = _FakeProvider(
         [
             ParsedModelResponse(
                 invocations=[
