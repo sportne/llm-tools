@@ -7,7 +7,7 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 
-class ProviderModeStrategy(str, Enum):  # noqa: UP042
+class ResponseModeStrategy(str, Enum):  # noqa: UP042
     """Instructor mode strategy for provider calls."""
 
     AUTO = "auto"
@@ -25,7 +25,7 @@ class ProviderPreflightResult(BaseModel):
     selected_mode_supported: bool = False
     model_listing_supported: bool = False
     available_models: list[str] = Field(default_factory=list)
-    resolved_mode: ProviderModeStrategy | None = None
+    resolved_mode: ResponseModeStrategy | None = None
     actionable_message: str
     error_message: str | None = None
 
@@ -35,7 +35,7 @@ class _ProviderPreflightResponse(BaseModel):
 
 
 __all__ = [
-    "ProviderModeStrategy",
+    "ResponseModeStrategy",
     "ProviderPreflightResult",
     "_ProviderPreflightResponse",
 ]

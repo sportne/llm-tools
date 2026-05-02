@@ -15,7 +15,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
-class _FakeProviderModeStrategy(StrEnum):
+class _FakeResponseModeStrategy(StrEnum):
     AUTO = "auto"
     TOOLS = "tools"
     JSON = "json"
@@ -29,7 +29,7 @@ class _FakeProviderPreflightResult(BaseModel):
     selected_mode_supported: bool = False
     model_listing_supported: bool = False
     available_models: list[str] = Field(default_factory=list)
-    resolved_mode: _FakeProviderModeStrategy | None = None
+    resolved_mode: _FakeResponseModeStrategy | None = None
     actionable_message: str
     error_message: str | None = None
 
@@ -43,7 +43,8 @@ class _FakeOpenAICompatibleProvider:
         model: str,
         api_key: str | None = None,
         base_url: str | None = None,
-        mode_strategy: _FakeProviderModeStrategy | str = _FakeProviderModeStrategy.AUTO,
+        response_mode_strategy: _FakeResponseModeStrategy
+        | str = _FakeResponseModeStrategy.AUTO,
         default_request_params: dict[str, Any] | None = None,
         client: Any | None = None,
         async_client: Any | None = None,
@@ -51,7 +52,7 @@ class _FakeOpenAICompatibleProvider:
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
-        self.mode_strategy = _FakeProviderModeStrategy(mode_strategy)
+        self.response_mode_strategy = _FakeResponseModeStrategy(response_mode_strategy)
         self.default_request_params = dict(default_request_params or {})
         self._client = client
         self._async_client = async_client
@@ -84,8 +85,8 @@ class _FakeOpenAICompatibleProvider:
             available_models=self.list_available_models(),
             resolved_mode=(
                 None
-                if self.mode_strategy is _FakeProviderModeStrategy.AUTO
-                else self.mode_strategy
+                if self.response_mode_strategy is _FakeResponseModeStrategy.AUTO
+                else self.response_mode_strategy
             ),
             actionable_message="Model connection is ready for this session.",
         )
@@ -159,12 +160,12 @@ class _FakeOpenAICompatibleProvider:
         )
 
     def uses_staged_schema_protocol(self) -> bool:
-        return self.mode_strategy in {
-            _FakeProviderModeStrategy.JSON,
+        return self.response_mode_strategy in {
+            _FakeResponseModeStrategy.JSON,
         }
 
     def uses_prompt_tool_protocol(self) -> bool:
-        return self.mode_strategy is _FakeProviderModeStrategy.PROMPT_TOOLS
+        return self.response_mode_strategy is _FakeResponseModeStrategy.PROMPT_TOOLS
 
     def _merged_request_params(
         self, request_params: dict[str, Any] | None
@@ -178,11 +179,11 @@ class _FakeOpenAICompatibleProvider:
 def _fake_provider_module() -> ModuleType:
     module = ModuleType("llm_tools.llm_providers")
     module.OpenAICompatibleProvider = _FakeOpenAICompatibleProvider
-    module.ProviderModeStrategy = _FakeProviderModeStrategy
+    module.ResponseModeStrategy = _FakeResponseModeStrategy
     module.ProviderPreflightResult = _FakeProviderPreflightResult
     module.__all__ = [
         "OpenAICompatibleProvider",
-        "ProviderModeStrategy",
+        "ResponseModeStrategy",
         "ProviderPreflightResult",
     ]
     return module

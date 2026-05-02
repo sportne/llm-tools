@@ -2,13 +2,14 @@
 # Requires the remote service env vars used by those tools, and network access
 # still must be enabled per session in the assistant settings.
 llm:
-  provider: custom_openai_compatible
-  provider_mode_strategy: json
-  model_name: assistant-model
+  provider_protocol: openai_api
+  response_mode_strategy: json
+  selected_model: assistant-model
   temperature: 0.1
-  api_base_url: https://llm.example.internal/v1
+  provider_connection:
+    api_base_url: https://llm.example.internal/v1
+    requires_bearer_token: true
   timeout_seconds: 60.0
-  api_key_env_var: ENTERPRISE_LLM_API_KEY
   prompt_for_api_key_if_missing: true
 
 session:

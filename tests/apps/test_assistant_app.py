@@ -47,7 +47,6 @@ from llm_tools.apps.assistant_app.app import (
     _parse_positive_int_setting,
     _parse_temperature_setting,
     _protection_corpus_readiness_text,
-    _provider_api_key_env_var,
     _provider_base_url_help_text,
     _provider_endpoint_menu_rows,
     _referenced_document_text,
@@ -105,7 +104,7 @@ from llm_tools.apps.assistant_app.store import SQLiteNiceGUIChatStore
 from llm_tools.apps.assistant_config import AssistantConfig
 from llm_tools.apps.assistant_tool_capabilities import AssistantToolCapability
 from llm_tools.apps.assistant_tool_registry import build_assistant_available_tool_specs
-from llm_tools.apps.chat_config import ProviderPreset
+from llm_tools.apps.chat_config import ProviderProtocol
 from llm_tools.harness_api import ApprovalResolution
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import SideEffectClass, ToolInvocationRequest
@@ -193,12 +192,19 @@ def _controller(
 ) -> NiceGUIChatController:
     store = _chat_store(tmp_path)
     store.initialize()
-    return NiceGUIChatController(
+    controller = NiceGUIChatController(
         store=store,
         config=AssistantConfig(),
         root_path=tmp_path,
         provider_factory=lambda _runtime: provider,
     )
+    controller.active_record.runtime.provider_connection.api_base_url = (
+        "http://127.0.0.1:11434/v1"
+    )
+    controller.active_record.runtime.provider_connection.requires_bearer_token = False
+    controller.active_record.runtime.selected_model = "test-model"
+    controller.save_active_session()
+    return controller
 
 
 def _chat_store(tmp_path: Path) -> SQLiteNiceGUIChatStore:
@@ -226,11 +232,11 @@ def test_package_import_and_cli_parser() -> None:
     parser = build_parser()
     args = parser.parse_args(
         [
-            "--provider",
-            "ollama",
+            "--provider-protocol",
+            "openai_api",
             "--model",
             "qwen3:8b",
-            "--provider-mode-strategy",
+            "--response-mode-strategy",
             "json",
             "--api-base-url",
             "http://127.0.0.1:11434/v1",
@@ -241,8 +247,8 @@ def test_package_import_and_cli_parser() -> None:
     config = resolve_assistant_config(args)
 
     assert assistant_app.main is not None
-    assert config.llm.model_name == "qwen3:8b"
-    assert config.llm.provider_mode_strategy.value == "json"
+    assert config.llm.selected_model == "qwen3:8b"
+    assert config.llm.response_mode_strategy.value == "json"
     assert args.db_path == Path("chat.sqlite3")
     assert args.auth_mode == "local"
 
@@ -576,9 +582,11 @@ def test_layout_container_class_helpers() -> None:
 
 
 def test_composer_runtime_helpers() -> None:
-    runtime = NiceGUIRuntimeConfig(model_name="model-a", root_path="/repo")
+    runtime = NiceGUIRuntimeConfig(selected_model="model-a", root_path="/repo")
     assert _runtime_summary_parts(runtime) == [
-        ("provider", "ollama"),
+        ("provider_protocol", "openai_api"),
+        ("endpoint", "No endpoint"),
+        ("credential", "credential needed"),
         ("model", "model-a"),
         ("mode", "auto"),
         ("workspace", "/repo"),
@@ -592,11 +600,13 @@ def test_composer_runtime_helpers() -> None:
     )
     assert (
         _runtime_summary_text(runtime, token_usage)
-        == "ollama | model-a | auto | /repo | ~1,234 tokens"
+        == "openai_api | No endpoint | credential needed | model-a | auto | /repo | ~1,234 tokens"
     )
     hidden_token_runtime = runtime.model_copy(update={"show_token_usage": False})
     assert _runtime_summary_parts(hidden_token_runtime, token_usage) == [
-        ("provider", "ollama"),
+        ("provider_protocol", "openai_api"),
+        ("endpoint", "No endpoint"),
+        ("credential", "credential needed"),
         ("model", "model-a"),
         ("mode", "auto"),
         ("workspace", "/repo"),
@@ -607,7 +617,7 @@ def test_composer_runtime_helpers() -> None:
     assert _format_workbench_duration(0.25) == "250 ms"
     assert _format_workbench_duration(1.25) == "1.2 s"
     assert _format_workbench_duration(61.0) == "1m 1s"
-    assert NICEGUI_PROVIDER_OPTIONS == ["ollama", "custom_openai_compatible"]
+    assert NICEGUI_PROVIDER_OPTIONS == ["openai_api"]
     assert NICEGUI_APPROVAL_OPTIONS == [
         SideEffectClass.LOCAL_READ,
         SideEffectClass.LOCAL_WRITE,
@@ -829,14 +839,6 @@ def test_workbench_inspector_titles_are_directional() -> None:
         == "T2R1: Tool To LLM"
     )
     assert NICEGUI_APPROVAL_LABELS["local_write"] == "Local write"
-    assert (
-        _provider_api_key_env_var(
-            ProviderPreset.CUSTOM_OPENAI_COMPATIBLE,
-            None,
-        )
-        == "OPENAI_API_KEY"
-    )
-    assert _provider_api_key_env_var(ProviderPreset.OLLAMA, None) == ""
     assert _is_tool_url_setting("BITBUCKET_BASE_URL") is True
     assert _is_tool_url_setting("GITLAB_API_TOKEN") is False
     assert _format_transcript_time(None) == ""
@@ -982,13 +984,14 @@ def test_common_provider_endpoint_catalog_is_local_and_copyable() -> None:
     names = {name for name, _url in rows}
     urls = {url for _name, url in rows}
 
-    assert {"OpenAI", "xAI", "Gemini", "Claude"}.issubset(names)
+    assert {"Local Ollama", "OpenAI", "xAI", "Gemini", "Claude"}.issubset(names)
+    assert "http://127.0.0.1:11434/v1" in urls
     assert "https://api.openai.com/v1" in urls
     assert "https://api.x.ai/v1" in urls
     assert "https://generativelanguage.googleapis.com/v1beta/openai/" in urls
     assert "https://api.anthropic.com/v1/" in urls
     assert all(name.strip() for name, _url in rows)
-    assert all(url.startswith("https://") for _name, url in rows)
+    assert all(url.startswith(("http://", "https://")) for _name, url in rows)
     assert len(rows) == len(COMMON_OPENAI_COMPATIBLE_ENDPOINTS)
     assert "OpenAI-compatible base URL" in _provider_base_url_help_text()
 
@@ -1028,14 +1031,13 @@ def test_model_discovery_fetches_openai_compatible_models(
         )
         return _Response()
 
-    monkeypatch.setenv("CUSTOM_OPENAI_KEY", "test-key")
     monkeypatch.setattr(app_module, "urlopen", fake_urlopen)
 
     assert _discover_model_names(
-        provider=ProviderPreset.CUSTOM_OPENAI_COMPATIBLE,
+        provider_protocol=ProviderProtocol.OPENAI_API,
         base_url="https://example.test/v1",
         api_key="typed-key",
-        api_key_env_var="CUSTOM_OPENAI_KEY",
+        requires_bearer_token=True,
         timeout=1.5,
     ) == ["model-a", "model-b"]
     assert calls == [
@@ -1054,15 +1056,27 @@ def test_model_discovery_rejects_invalid_or_failed_endpoints(
 
     monkeypatch.setattr(app_module, "urlopen", failing_urlopen)
 
-    assert _discover_model_names(provider=ProviderPreset.OLLAMA, base_url=None) == []
-    assert _discover_model_names(provider=ProviderPreset.OLLAMA, base_url="  ") == []
     assert (
-        _discover_model_names(provider=ProviderPreset.OLLAMA, base_url="file:///tmp")
+        _discover_model_names(
+            provider_protocol=ProviderProtocol.OPENAI_API, base_url=None
+        )
         == []
     )
     assert (
         _discover_model_names(
-            provider=ProviderPreset.OLLAMA,
+            provider_protocol=ProviderProtocol.OPENAI_API, base_url="  "
+        )
+        == []
+    )
+    assert (
+        _discover_model_names(
+            provider_protocol=ProviderProtocol.OPENAI_API, base_url="file:///tmp"
+        )
+        == []
+    )
+    assert (
+        _discover_model_names(
+            provider_protocol=ProviderProtocol.OPENAI_API,
             base_url="http://127.0.0.1:11434/v1",
         )
         == []
@@ -1083,18 +1097,17 @@ def test_cli_config_resolution_covers_runtime_overrides(tmp_path: Path) -> None:
             str(tmp_path),
             "--directory",
             str(tmp_path / "override"),
-            "--provider",
-            "ollama",
+            "--provider-protocol",
+            "openai_api",
             "--model",
             "model-b",
-            "--provider-mode-strategy",
+            "--response-mode-strategy",
             "prompt_tools",
             "--temperature",
             "0.2",
             "--api-base-url",
             "http://127.0.0.1:11434/v1",
-            "--api-key-env-var",
-            "OLLAMA_API_KEY",
+            "--no-bearer-token",
             "--max-context-tokens",
             "1000",
             "--max-tool-round-trips",
@@ -1121,8 +1134,8 @@ def test_cli_config_resolution_covers_runtime_overrides(tmp_path: Path) -> None:
     config = resolve_assistant_config(args)
     root = resolve_root_argument(args, config)
 
-    assert config.llm.model_name == "model-b"
-    assert config.llm.api_key_env_var == "OLLAMA_API_KEY"
+    assert config.llm.selected_model == "model-b"
+    assert config.llm.provider_connection.requires_bearer_token is False
     assert config.llm.temperature == 0.2
     assert config.session.max_context_tokens == 1000
     assert config.tool_limits.max_tool_result_chars == 900
@@ -1829,6 +1842,11 @@ def test_controller_provider_creation_failure_persists_error(tmp_path: Path) -> 
         root_path=tmp_path,
         provider_factory=lambda _runtime: (_ for _ in ()).throw(RuntimeError("boom")),
     )
+    controller.active_record.runtime.provider_connection.api_base_url = (
+        "http://127.0.0.1:11434/v1"
+    )
+    controller.active_record.runtime.provider_connection.requires_bearer_token = False
+    controller.active_record.runtime.selected_model = "test-model"
 
     error = controller.submit_prompt("hello")
 
@@ -2256,7 +2274,7 @@ def test_controller_manual_events_cover_non_completed_paths(tmp_path: Path) -> N
     controller._apply_queued_event(
         NiceGUIQueuedEvent(
             kind="error",
-            payload="All provider mode attempts failed.",
+            payload="All response mode attempts failed.",
             turn_number=1,
             session_id=session_id,
         )
@@ -2353,11 +2371,13 @@ def test_controller_approval_pauses_resumes_and_records_resolution(
         ]
     )
     controller = _controller(tmp_path, provider)
-    controller.active_record.runtime = NiceGUIRuntimeConfig(
-        root_path=str(tmp_path),
-        enabled_tools=["read_file"],
-        allow_filesystem=True,
-        require_approval_for={SideEffectClass.LOCAL_READ},
+    controller.active_record.runtime = controller.active_record.runtime.model_copy(
+        update={
+            "root_path": str(tmp_path),
+            "enabled_tools": ["read_file"],
+            "allow_filesystem": True,
+            "require_approval_for": {SideEffectClass.LOCAL_READ},
+        }
     )
     controller.save_active_session()
 
@@ -2414,10 +2434,12 @@ def test_controller_cancellation_records_interrupted_state(tmp_path: Path) -> No
         ]
     )
     controller = _controller(tmp_path, provider)
-    controller.active_record.runtime = NiceGUIRuntimeConfig(
-        root_path=str(tmp_path),
-        enabled_tools=["read_file"],
-        allow_filesystem=True,
+    controller.active_record.runtime = controller.active_record.runtime.model_copy(
+        update={
+            "root_path": str(tmp_path),
+            "enabled_tools": ["read_file"],
+            "allow_filesystem": True,
+        }
     )
     controller.save_active_session()
 

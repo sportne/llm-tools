@@ -543,9 +543,9 @@ def test_build_live_harness_provider_wraps_created_provider_and_wires_protection
             )
         ),
         provider_config=AssistantConfig().llm,
-        model_name="demo-model",
+        selected_model="demo-model",
         api_key=None,
-        mode_strategy="auto",
+        response_mode_strategy="auto",
         tool_registry=build_assistant_registry(),
         enabled_tool_names={"read_file"},
         workspace_enabled=tmp_path.exists(),
@@ -722,9 +722,9 @@ def test_direct_research_provider_builder_module_is_wired(
     harness_provider = provider_module.build_live_harness_provider(
         config=AssistantConfig(),
         provider_config=AssistantConfig().llm,
-        model_name="demo-model",
+        selected_model="demo-model",
         api_key=None,
-        mode_strategy="auto",
+        response_mode_strategy="auto",
         tool_registry=build_assistant_registry(),
         enabled_tool_names={"read_file"},
         workspace_enabled=True,

@@ -210,11 +210,10 @@ def default_runtime_config(
         else None
     )
     return NiceGUIRuntimeConfig(
-        provider=config.llm.provider,
-        provider_mode_strategy=config.llm.provider_mode_strategy,
-        model_name=config.llm.model_name,
-        api_base_url=config.llm.api_base_url,
-        api_key_env_var=config.llm.api_key_env_var,
+        provider_protocol=config.llm.provider_protocol,
+        provider_connection=config.llm.provider_connection.model_copy(deep=True),
+        response_mode_strategy=config.llm.response_mode_strategy,
+        selected_model=config.llm.selected_model,
         temperature=config.llm.temperature,
         timeout_seconds=config.llm.timeout_seconds,
         root_path=str(effective_root) if effective_root is not None else None,
@@ -300,7 +299,10 @@ class NiceGUIChatController:
             summary
             for summary in summaries
             if cleaned in summary.title.lower()
-            or cleaned in summary.model_name.lower()
+            or (
+                summary.selected_model is not None
+                and cleaned in summary.selected_model.lower()
+            )
             or cleaned in (summary.root_path or "").lower()
         ]
 
@@ -557,6 +559,12 @@ class NiceGUIChatController:
             turn_state.queued_follow_up_prompt = cleaned
             return None
         record = self.sessions[session_id]
+        provider_error = self._provider_readiness_error(
+            runtime=record.runtime,
+            session_id=session_id,
+        )
+        if provider_error is not None:
+            return provider_error
         user_entry = NiceGUITranscriptEntry(
             role="user",
             text=cleaned,
@@ -963,8 +971,8 @@ class NiceGUIChatController:
         self._filter_hidden_runtime_tools(record.runtime)
         record.summary.root_path = record.runtime.root_path
         record.summary.owner_user_id = self.owner_user_id
-        record.summary.provider = record.runtime.provider
-        record.summary.model_name = record.runtime.model_name
+        record.summary.provider_protocol = record.runtime.provider_protocol
+        record.summary.selected_model = record.runtime.selected_model
         record.summary.message_count = len(
             [entry for entry in record.transcript if entry.show_in_transcript]
         )
@@ -1011,6 +1019,24 @@ class NiceGUIChatController:
             session_state=session_state,
             user_message=user_message,
         )
+
+    def _provider_readiness_error(
+        self,
+        *,
+        runtime: NiceGUIRuntimeConfig,
+        session_id: str,
+    ) -> str | None:
+        """Return a transient provider setup error before a model turn starts."""
+        if not runtime.provider_connection.api_base_url:
+            return "Enter an API base URL before running a model turn."
+        if runtime.selected_model is None:
+            return "Choose a model before running a model turn."
+        if (
+            runtime.provider_connection.requires_bearer_token
+            and not self.provider_api_key(session_id=session_id)
+        ):
+            return "Enter provider credentials before running a model turn."
+        return None
 
     def _build_harness_service(
         self, *, session_id: str, record: NiceGUISessionRecord
@@ -1506,7 +1532,7 @@ def _approval_resolution_copy(resolution: str) -> str:
 
 
 def _user_facing_turn_error_message(error_message: str) -> str:
-    if "All provider mode attempts failed." in error_message:
+    if "All response mode attempts failed." in error_message:
         return (
             "Provider compatibility error. The endpoint did not return a usable "
             f"structured response in any fallback mode. {error_message}"

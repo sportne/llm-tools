@@ -13,7 +13,7 @@ import pytest
 from pydantic import BaseModel
 
 import llm_tools.llm_providers.openai_compatible as provider_module
-from llm_tools.llm_providers import OpenAICompatibleProvider, ProviderModeStrategy
+from llm_tools.llm_providers import OpenAICompatibleProvider, ResponseModeStrategy
 
 
 class _FakeMode(str, Enum):  # noqa: UP042
@@ -172,36 +172,40 @@ def test_provider_helper_methods_cover_listing_and_parameter_merging() -> None:
     )
     assert provider.list_available_models() == ["alpha", "zed"]
     assert provider._candidate_modes() == [
-        ProviderModeStrategy.TOOLS,
-        ProviderModeStrategy.JSON,
-        ProviderModeStrategy.PROMPT_TOOLS,
+        ResponseModeStrategy.TOOLS,
+        ResponseModeStrategy.JSON,
+        ResponseModeStrategy.PROMPT_TOOLS,
     ]
     assert OpenAICompatibleProvider.for_ollama(
         model="demo-model",
-        mode_strategy=ProviderModeStrategy.AUTO,
+        response_mode_strategy=ResponseModeStrategy.AUTO,
     )._candidate_modes() == [
-        ProviderModeStrategy.JSON,
-        ProviderModeStrategy.PROMPT_TOOLS,
+        ResponseModeStrategy.TOOLS,
+        ResponseModeStrategy.JSON,
+        ResponseModeStrategy.PROMPT_TOOLS,
     ]
-    assert OpenAICompatibleProvider.for_ollama(
-        model="demo-model",
-        mode_strategy=ProviderModeStrategy.AUTO,
-    ).uses_staged_schema_protocol()
+    assert (
+        OpenAICompatibleProvider.for_ollama(
+            model="demo-model",
+            response_mode_strategy=ResponseModeStrategy.AUTO,
+        ).uses_staged_schema_protocol()
+        is False
+    )
     assert not OpenAICompatibleProvider.for_openai(
         model="demo-model",
-        mode_strategy=ProviderModeStrategy.AUTO,
+        response_mode_strategy=ResponseModeStrategy.AUTO,
     ).uses_staged_schema_protocol()
     assert OpenAICompatibleProvider(
         model="demo-model",
-        mode_strategy=ProviderModeStrategy.JSON,
-    )._candidate_modes() == [ProviderModeStrategy.JSON]
+        response_mode_strategy=ResponseModeStrategy.JSON,
+    )._candidate_modes() == [ResponseModeStrategy.JSON]
     assert OpenAICompatibleProvider(
         model="demo-model",
-        mode_strategy=ProviderModeStrategy.PROMPT_TOOLS,
-    )._candidate_modes() == [ProviderModeStrategy.PROMPT_TOOLS]
+        response_mode_strategy=ResponseModeStrategy.PROMPT_TOOLS,
+    )._candidate_modes() == [ResponseModeStrategy.PROMPT_TOOLS]
     assert OpenAICompatibleProvider(
         model="demo-model",
-        mode_strategy=ProviderModeStrategy.PROMPT_TOOLS,
+        response_mode_strategy=ResponseModeStrategy.PROMPT_TOOLS,
     ).uses_prompt_tool_protocol()
     assert provider._merged_request_params(None) == {
         "temperature": 0.2,
@@ -212,7 +216,7 @@ def test_provider_helper_methods_cover_listing_and_parameter_merging() -> None:
         "top_p": 1.0,
     }
     message = provider._fallback_error_message(
-        [(ProviderModeStrategy.TOOLS, RuntimeError("boom"))]
+        [(ResponseModeStrategy.TOOLS, RuntimeError("boom"))]
     )
     assert "Overall failure type: transport-related" in message
     assert "tools: transport-related (RuntimeError: boom)" in message
@@ -256,10 +260,10 @@ def test_provider_helper_methods_cover_listing_and_parameter_merging() -> None:
     ]
 
 
-def test_ollama_json_mode_uses_native_json_schema_payload(monkeypatch: Any) -> None:
+def test_openai_api_json_mode_uses_instructor_json_payload(monkeypatch: Any) -> None:
     monkeypatch.setattr(provider_module, "_instructor", _RealNamedInstructor())
     completions = _NativeSyncCompletions(
-        _native_response('{"status":"ok","count":3,"items":["alpha","beta","gamma"]}')
+        SimpleNamespace(status="ok", count=3, items=["alpha", "beta", "gamma"])
     )
     provider = OpenAICompatibleProvider.for_ollama(
         model="gemma4:e4b",
@@ -267,7 +271,7 @@ def test_ollama_json_mode_uses_native_json_schema_payload(monkeypatch: Any) -> N
             chat=SimpleNamespace(completions=completions),
             models=SimpleNamespace(list=lambda: [SimpleNamespace(id="gemma4:e4b")]),
         ),
-        mode_strategy=ProviderModeStrategy.JSON,
+        response_mode_strategy=ResponseModeStrategy.JSON,
     )
 
     payload = provider.run_structured(
@@ -276,38 +280,28 @@ def test_ollama_json_mode_uses_native_json_schema_payload(monkeypatch: Any) -> N
         request_params={"temperature": 0},
     )
 
-    assert payload.model_dump() == {
-        "status": "ok",
-        "count": 3,
-        "items": ["alpha", "beta", "gamma"],
-    }
+    assert payload.status == "ok"
+    assert payload.count == 3
+    assert payload.items == ["alpha", "beta", "gamma"]
     assert len(completions.calls) == 1
     call = completions.calls[0]
     assert call["model"] == "gemma4:e4b"
     assert call["temperature"] == 0
-    assert call["response_format"] == {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "_ProbeModel",
-            "strict": True,
-            "schema": _ProbeModel.model_json_schema(),
-        },
-    }
-    _assert_schema_prompt_was_appended(call)
-    assert "response_model" not in call
+    assert call["response_model"] is _ProbeModel
+    assert "response_format" not in call
 
 
-def test_ollama_json_mode_uses_native_json_schema_payload_async(
+def test_openai_api_json_mode_uses_instructor_json_payload_async(
     monkeypatch: Any,
 ) -> None:
     monkeypatch.setattr(provider_module, "_instructor", _RealNamedInstructor())
     completions = _NativeAsyncCompletions(
-        _native_response('{"status":"ok","count":3,"items":["alpha","beta","gamma"]}')
+        SimpleNamespace(status="ok", count=3, items=["alpha", "beta", "gamma"])
     )
     provider = OpenAICompatibleProvider.for_ollama(
         model="gemma4:e4b",
         async_client=_BareClient(chat=SimpleNamespace(completions=completions)),
-        mode_strategy=ProviderModeStrategy.JSON,
+        response_mode_strategy=ResponseModeStrategy.JSON,
     )
 
     payload = asyncio.run(
@@ -318,14 +312,12 @@ def test_ollama_json_mode_uses_native_json_schema_payload_async(
         )
     )
 
-    assert payload.model_dump() == {
-        "status": "ok",
-        "count": 3,
-        "items": ["alpha", "beta", "gamma"],
-    }
+    assert payload.status == "ok"
+    assert payload.count == 3
+    assert payload.items == ["alpha", "beta", "gamma"]
     assert len(completions.calls) == 1
-    assert completions.calls[0]["response_format"]["type"] == "json_schema"
-    _assert_schema_prompt_was_appended(completions.calls[0])
+    assert completions.calls[0]["response_model"] is _ProbeModel
+    assert "response_format" not in completions.calls[0]
 
 
 def test_prompt_tools_preflight_success_and_failure() -> None:
@@ -336,13 +328,13 @@ def test_prompt_tools_preflight_success_and_failure() -> None:
             chat=SimpleNamespace(completions=ok_completions),
             models=SimpleNamespace(list=lambda: [SimpleNamespace(id="demo-model")]),
         ),
-        mode_strategy=ProviderModeStrategy.PROMPT_TOOLS,
+        response_mode_strategy=ResponseModeStrategy.PROMPT_TOOLS,
     )
 
     ok_result = ok_provider.preflight(request_params={"temperature": 0})
 
     assert ok_result.ok is True
-    assert ok_result.resolved_mode is ProviderModeStrategy.PROMPT_TOOLS
+    assert ok_result.resolved_mode is ResponseModeStrategy.PROMPT_TOOLS
     assert ok_completions.calls[0]["temperature"] == 0
 
     bad_completions = _NativeSyncCompletions(_native_response("NOPE"))
@@ -352,7 +344,7 @@ def test_prompt_tools_preflight_success_and_failure() -> None:
             chat=SimpleNamespace(completions=bad_completions),
             models=SimpleNamespace(list=lambda: [SimpleNamespace(id="demo-model")]),
         ),
-        mode_strategy=ProviderModeStrategy.PROMPT_TOOLS,
+        response_mode_strategy=ResponseModeStrategy.PROMPT_TOOLS,
     )
 
     bad_result = bad_provider.preflight()
@@ -365,25 +357,25 @@ def test_prompt_tools_preflight_success_and_failure() -> None:
 def test_provider_mode_preferences_and_retry_helpers() -> None:
     assert (
         OpenAICompatibleProvider.for_ollama(
-            model="demo", mode_strategy=ProviderModeStrategy.JSON
+            model="demo", response_mode_strategy=ResponseModeStrategy.JSON
         ).prefers_simplified_json_schema_contract()
-        is True
+        is False
     )
     assert (
         OpenAICompatibleProvider(
-            model="demo", mode_strategy=ProviderModeStrategy.PROMPT_TOOLS
+            model="demo", response_mode_strategy=ResponseModeStrategy.PROMPT_TOOLS
         ).uses_staged_schema_protocol()
         is False
     )
     assert (
         OpenAICompatibleProvider(
-            model="demo", mode_strategy=ProviderModeStrategy.AUTO
+            model="demo", response_mode_strategy=ResponseModeStrategy.AUTO
         ).can_fallback_to_prompt_tools(ValueError("not retryable"))
         is False
     )
     assert (
         OpenAICompatibleProvider(
-            model="demo", mode_strategy=ProviderModeStrategy.AUTO
+            model="demo", response_mode_strategy=ResponseModeStrategy.AUTO
         ).can_fallback_to_prompt_tools(json.JSONDecodeError("bad json", "", 0))
         is True
     )
@@ -398,7 +390,7 @@ def test_prompt_tools_structured_mode_uses_schema_prompt_async() -> None:
     provider = OpenAICompatibleProvider(
         model="demo-model",
         async_client=_BareClient(chat=SimpleNamespace(completions=completions)),
-        mode_strategy=ProviderModeStrategy.PROMPT_TOOLS,
+        response_mode_strategy=ResponseModeStrategy.PROMPT_TOOLS,
     )
 
     payload = asyncio.run(
@@ -569,7 +561,7 @@ def test_provider_preflight_reports_success_for_selected_mode() -> None:
             ),
             models=SimpleNamespace(list=lambda: [SimpleNamespace(id="demo-model")]),
         ),
-        mode_strategy=ProviderModeStrategy.JSON,
+        response_mode_strategy=ResponseModeStrategy.JSON,
     )
 
     report = provider.preflight(request_params={"temperature": 0.0})
@@ -580,7 +572,7 @@ def test_provider_preflight_reports_success_for_selected_mode() -> None:
     assert report.selected_mode_supported is True
     assert report.model_listing_supported is True
     assert report.available_models == ["demo-model"]
-    assert report.resolved_mode is ProviderModeStrategy.JSON
+    assert report.resolved_mode is ResponseModeStrategy.JSON
     assert create_calls[0]["model"] == "demo-model"
     assert create_calls[0]["temperature"] == 0.0
 
@@ -611,7 +603,7 @@ def test_provider_preflight_reports_mode_failure_for_selected_mode() -> None:
             ),
             models=SimpleNamespace(list=lambda: [SimpleNamespace(id="demo-model")]),
         ),
-        mode_strategy=ProviderModeStrategy.JSON,
+        response_mode_strategy=ResponseModeStrategy.JSON,
     )
 
     report = provider.preflight()
@@ -621,7 +613,7 @@ def test_provider_preflight_reports_mode_failure_for_selected_mode() -> None:
     assert report.model_accepted is True
     assert report.selected_mode_supported is False
     assert report.model_listing_supported is True
-    assert "provider mode 'json'" in report.actionable_message
+    assert "response mode 'json'" in report.actionable_message
 
 
 def test_provider_preflight_reports_transport_failures_without_blaming_mode() -> None:
@@ -637,7 +629,7 @@ def test_provider_preflight_reports_transport_failures_without_blaming_mode() ->
             ),
             models=SimpleNamespace(list=lambda: [SimpleNamespace(id="demo-model")]),
         ),
-        mode_strategy=ProviderModeStrategy.JSON,
+        response_mode_strategy=ResponseModeStrategy.JSON,
     )
 
     report = provider.preflight()
@@ -695,10 +687,10 @@ def test_provider_client_factory_and_instructor_wrapping_helpers(
 
     monkeypatch.setattr(provider_module, "_instructor", _RealNamedInstructor())
     assert (
-        provider._instructor_sync_client(ProviderModeStrategy.TOOLS) is fake_sync_client
+        provider._instructor_sync_client(ResponseModeStrategy.TOOLS) is fake_sync_client
     )
     assert (
-        provider._instructor_async_client(ProviderModeStrategy.TOOLS)
+        provider._instructor_async_client(ResponseModeStrategy.TOOLS)
         is fake_async_client
     )
 
@@ -709,11 +701,11 @@ def test_provider_client_factory_and_instructor_wrapping_helpers(
         async_client=fake_async_client,
     )
     assert (
-        wrapped_provider._instructor_sync_client(ProviderModeStrategy.JSON)
+        wrapped_provider._instructor_sync_client(ResponseModeStrategy.JSON)
         is fake_sync_client
     )
     assert (
-        wrapped_provider._instructor_async_client(ProviderModeStrategy.JSON)
+        wrapped_provider._instructor_async_client(ResponseModeStrategy.JSON)
         is fake_async_client
     )
 

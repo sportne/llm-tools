@@ -58,7 +58,6 @@ from llm_tools.apps.assistant_app.ui import (
     _parse_positive_int_setting,
     _parse_temperature_setting,
     _protection_corpus_readiness_text,
-    _provider_api_key_env_var,
     _provider_base_url_help_text,
     _provider_endpoint_menu_rows,
     _referenced_document_text,
@@ -141,12 +140,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("directory", nargs="?", type=Path)
     parser.add_argument("--directory", dest="directory_override", type=Path)
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--provider")
+    parser.add_argument("--provider-protocol")
     parser.add_argument("--model", type=str)
-    parser.add_argument("--provider-mode-strategy", type=str)
+    parser.add_argument("--response-mode-strategy", type=str)
     parser.add_argument("--temperature", type=float)
     parser.add_argument("--api-base-url", type=str)
-    parser.add_argument("--api-key-env-var", type=str)
+    parser.add_argument("--requires-bearer-token", action="store_true")
+    parser.add_argument("--no-bearer-token", action="store_true")
     parser.add_argument("--db-path", type=Path, default=None)
     parser.add_argument("--db-key-file", type=Path, default=None)
     parser.add_argument("--user-key-file", type=Path, default=None)
@@ -183,18 +183,22 @@ def resolve_assistant_config(args: argparse.Namespace) -> AssistantConfig:
     raw.setdefault("llm", {})
     raw.setdefault("session", {})
     raw.setdefault("tool_limits", {})
-    if args.provider is not None:
-        raw["llm"]["provider"] = args.provider
+    if args.provider_protocol is not None:
+        raw["llm"]["provider_protocol"] = args.provider_protocol
     if args.model is not None:
-        raw["llm"]["model_name"] = args.model
-    if args.provider_mode_strategy is not None:
-        raw["llm"]["provider_mode_strategy"] = args.provider_mode_strategy
+        raw["llm"]["selected_model"] = args.model
+    if args.response_mode_strategy is not None:
+        raw["llm"]["response_mode_strategy"] = args.response_mode_strategy
     if args.temperature is not None:
         raw["llm"]["temperature"] = args.temperature
+    provider_connection = dict(raw["llm"].get("provider_connection") or {})
     if args.api_base_url is not None:
-        raw["llm"]["api_base_url"] = args.api_base_url
-    if args.api_key_env_var is not None:
-        raw["llm"]["api_key_env_var"] = args.api_key_env_var
+        provider_connection["api_base_url"] = args.api_base_url
+    if args.requires_bearer_token:
+        provider_connection["requires_bearer_token"] = True
+    if args.no_bearer_token:
+        provider_connection["requires_bearer_token"] = False
+    raw["llm"]["provider_connection"] = provider_connection
     for field_name in (
         "max_context_tokens",
         "max_tool_round_trips",
@@ -388,7 +392,6 @@ __all__ = [
     "_parse_positive_int_setting",
     "_parse_temperature_setting",
     "_protection_corpus_readiness_text",
-    "_provider_api_key_env_var",
     "_provider_base_url_help_text",
     "_provider_endpoint_menu_rows",
     "_referenced_document_text",

@@ -13,10 +13,10 @@ from pydantic import BaseModel, ValidationError
 
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.llm_providers.openai_compatible_models import (
-    ProviderModeStrategy as ProviderModeStrategy,
+    ProviderPreflightResult as ProviderPreflightResult,
 )
 from llm_tools.llm_providers.openai_compatible_models import (
-    ProviderPreflightResult as ProviderPreflightResult,
+    ResponseModeStrategy as ResponseModeStrategy,
 )
 from llm_tools.llm_providers.openai_compatible_models import (
     _ProviderPreflightResponse as _ProviderPreflightResponse,
@@ -64,23 +64,21 @@ class OpenAICompatibleProvider:
         model: str,
         api_key: str | None = None,
         base_url: str | None = None,
-        mode_strategy: ProviderModeStrategy | str = ProviderModeStrategy.AUTO,
+        response_mode_strategy: ResponseModeStrategy | str = ResponseModeStrategy.AUTO,
         default_request_params: dict[str, Any] | None = None,
         client: OpenAI | Any | None = None,
         async_client: AsyncOpenAI | Any | None = None,
-        provider_family: str = "generic",
     ) -> None:
         self.model = model
         self.base_url = base_url
-        self.mode_strategy = ProviderModeStrategy(mode_strategy)
+        self.response_mode_strategy = ResponseModeStrategy(response_mode_strategy)
         self.default_request_params = dict(default_request_params or {})
-        self.provider_family = provider_family
-        self.last_mode_used: ProviderModeStrategy | None = None
+        self.last_mode_used: ResponseModeStrategy | None = None
         self._api_key = api_key
         self._client = client
         self._async_client = async_client
-        self._instructor_sync_clients: dict[ProviderModeStrategy, Any] = {}
-        self._instructor_async_clients: dict[ProviderModeStrategy, Any] = {}
+        self._instructor_sync_clients: dict[ResponseModeStrategy, Any] = {}
+        self._instructor_async_clients: dict[ResponseModeStrategy, Any] = {}
 
     @classmethod
     def for_openai(
@@ -88,7 +86,7 @@ class OpenAICompatibleProvider:
         *,
         model: str,
         api_key: str | None = None,
-        mode_strategy: ProviderModeStrategy | str = ProviderModeStrategy.AUTO,
+        response_mode_strategy: ResponseModeStrategy | str = ResponseModeStrategy.AUTO,
         default_request_params: dict[str, Any] | None = None,
         client: OpenAI | Any | None = None,
         async_client: AsyncOpenAI | Any | None = None,
@@ -97,21 +95,20 @@ class OpenAICompatibleProvider:
         return cls(
             model=model,
             api_key=api_key,
-            mode_strategy=mode_strategy,
+            response_mode_strategy=response_mode_strategy,
             default_request_params=default_request_params,
             client=client,
             async_client=async_client,
-            provider_family="openai",
         )
 
     @classmethod
     def for_ollama(
         cls,
         *,
-        model: str = "gemma4:26b",
+        model: str,
         base_url: str = "http://localhost:11434/v1",
         api_key: str = "ollama",
-        mode_strategy: ProviderModeStrategy | str = ProviderModeStrategy.AUTO,
+        response_mode_strategy: ResponseModeStrategy | str = ResponseModeStrategy.AUTO,
         default_request_params: dict[str, Any] | None = None,
         client: OpenAI | Any | None = None,
         async_client: AsyncOpenAI | Any | None = None,
@@ -121,11 +118,10 @@ class OpenAICompatibleProvider:
             model=model,
             api_key=api_key,
             base_url=base_url,
-            mode_strategy=mode_strategy,
+            response_mode_strategy=response_mode_strategy,
             default_request_params=default_request_params,
             client=client,
             async_client=async_client,
-            provider_family="ollama",
         )
 
     def run_structured(
@@ -160,29 +156,24 @@ class OpenAICompatibleProvider:
 
     def prefers_simplified_json_schema_contract(self) -> bool:
         """Return whether JSON mode should use the simplified action envelope."""
-        return self._should_use_native_json_schema(ProviderModeStrategy.JSON)
+        return self._should_use_native_json_schema(ResponseModeStrategy.JSON)
 
     def uses_staged_schema_protocol(self) -> bool:
         """Return whether structured interaction should use staged strict schemas."""
-        if self.mode_strategy is ProviderModeStrategy.PROMPT_TOOLS:
+        if self.response_mode_strategy is ResponseModeStrategy.PROMPT_TOOLS:
             return False
-        if (
-            self.mode_strategy is ProviderModeStrategy.AUTO
-            and self.provider_family == "ollama"
-        ):
-            return True
-        return self.mode_strategy in {
-            ProviderModeStrategy.JSON,
+        return self.response_mode_strategy in {
+            ResponseModeStrategy.JSON,
         }
 
     def uses_prompt_tool_protocol(self) -> bool:
         """Return whether agent turns should use prompt-emitted tool calls."""
-        return self.mode_strategy is ProviderModeStrategy.PROMPT_TOOLS
+        return self.response_mode_strategy is ResponseModeStrategy.PROMPT_TOOLS
 
     def can_fallback_to_prompt_tools(self, exc: Exception) -> bool:
         """Return whether a native-mode failure can fall back to prompt tools."""
         return (
-            self.mode_strategy is ProviderModeStrategy.AUTO
+            self.response_mode_strategy is ResponseModeStrategy.AUTO
             and self._should_retry_mode_failure(exc)
         )
 
@@ -217,7 +208,7 @@ class OpenAICompatibleProvider:
         except Exception as exc:
             error_message = self._exception_summary(exc)
 
-        if self.mode_strategy is ProviderModeStrategy.AUTO:
+        if self.response_mode_strategy is ResponseModeStrategy.AUTO:
             try:
                 self.run_structured(
                     messages=self._preflight_messages(),
@@ -255,10 +246,10 @@ class OpenAICompatibleProvider:
                         selected_mode_supported=True,
                         model_listing_supported=model_listing_supported,
                         available_models=available_models,
-                        resolved_mode=ProviderModeStrategy.PROMPT_TOOLS,
+                        resolved_mode=ResponseModeStrategy.PROMPT_TOOLS,
                         actionable_message=(
                             "Model connection is ready for this session. "
-                            "Resolved provider mode: prompt_tools."
+                            "Resolved response mode: prompt_tools."
                         ),
                         error_message=error_message,
                     )
@@ -291,13 +282,13 @@ class OpenAICompatibleProvider:
                 resolved_mode=self.last_mode_used,
                 actionable_message=(
                     "Model connection is ready for this session. "
-                    f"Resolved provider mode: {(self.last_mode_used or self.mode_strategy).value}."
+                    f"Resolved response mode: {(self.last_mode_used or self.response_mode_strategy).value}."
                 ),
                 error_message=error_message,
             )
 
-        selected_mode = self.mode_strategy
-        if selected_mode is ProviderModeStrategy.PROMPT_TOOLS:
+        selected_mode = self.response_mode_strategy
+        if selected_mode is ResponseModeStrategy.PROMPT_TOOLS:
             try:
                 self._run_prompt_tools_preflight(request_params=request_params)
             except Exception as exc:
@@ -332,7 +323,7 @@ class OpenAICompatibleProvider:
                 resolved_mode=selected_mode,
                 actionable_message=(
                     "Model connection is ready for this session. "
-                    "Configured provider mode 'prompt_tools' works with this endpoint."
+                    "Configured response mode 'prompt_tools' works with this endpoint."
                 ),
                 error_message=error_message,
             )
@@ -373,7 +364,7 @@ class OpenAICompatibleProvider:
             resolved_mode=selected_mode,
             actionable_message=(
                 "Model connection is ready for this session. "
-                f"Configured provider mode '{selected_mode.value}' works with this endpoint."
+                f"Configured response mode '{selected_mode.value}' works with this endpoint."
             ),
             error_message=error_message,
         )
@@ -420,7 +411,7 @@ class OpenAICompatibleProvider:
             messages=cast(Any, list(messages)),
             **self._merged_request_params(request_params),
         )
-        self.last_mode_used = ProviderModeStrategy.PROMPT_TOOLS
+        self.last_mode_used = ResponseModeStrategy.PROMPT_TOOLS
         return self._plain_response_text(response)
 
     async def run_text_async(
@@ -435,7 +426,7 @@ class OpenAICompatibleProvider:
             messages=cast(Any, list(messages)),
             **self._merged_request_params(request_params),
         )
-        self.last_mode_used = ProviderModeStrategy.PROMPT_TOOLS
+        self.last_mode_used = ResponseModeStrategy.PROMPT_TOOLS
         return self._plain_response_text(response)
 
     def _run_with_fallback(
@@ -445,12 +436,12 @@ class OpenAICompatibleProvider:
         response_model: type[BaseModel],
         request_params: dict[str, Any] | None,
     ) -> object:
-        failures: list[tuple[ProviderModeStrategy, Exception]] = []
+        failures: list[tuple[ResponseModeStrategy, Exception]] = []
         previous_client: Any | None = None
         for mode in self._candidate_modes():
             client = self._sync_execution_client(mode)
             if (
-                mode is not ProviderModeStrategy.PROMPT_TOOLS
+                mode is not ResponseModeStrategy.PROMPT_TOOLS
                 and failures
                 and not self._mode_attempts_are_distinct(previous_client, client)
             ):
@@ -467,7 +458,7 @@ class OpenAICompatibleProvider:
                 self.last_mode_used = mode
                 return payload
             except Exception as exc:
-                if self.mode_strategy is not ProviderModeStrategy.AUTO:
+                if self.response_mode_strategy is not ResponseModeStrategy.AUTO:
                     raise
                 if not self._should_retry_mode_failure(exc):
                     raise
@@ -483,12 +474,12 @@ class OpenAICompatibleProvider:
         response_model: type[BaseModel],
         request_params: dict[str, Any] | None,
     ) -> object:
-        failures: list[tuple[ProviderModeStrategy, Exception]] = []
+        failures: list[tuple[ResponseModeStrategy, Exception]] = []
         previous_client: Any | None = None
         for mode in self._candidate_modes():
             client = self._async_execution_client(mode)
             if (
-                mode is not ProviderModeStrategy.PROMPT_TOOLS
+                mode is not ResponseModeStrategy.PROMPT_TOOLS
                 and failures
                 and not self._mode_attempts_are_distinct(previous_client, client)
             ):
@@ -505,7 +496,7 @@ class OpenAICompatibleProvider:
                 self.last_mode_used = mode
                 return payload
             except Exception as exc:
-                if self.mode_strategy is not ProviderModeStrategy.AUTO:
+                if self.response_mode_strategy is not ResponseModeStrategy.AUTO:
                     raise
                 if not self._should_retry_mode_failure(exc):
                     raise
@@ -517,7 +508,7 @@ class OpenAICompatibleProvider:
     def _run_in_mode(
         self,
         *,
-        mode: ProviderModeStrategy,
+        mode: ResponseModeStrategy,
         messages: Sequence[dict[str, Any]],
         response_model: type[BaseModel],
         request_params: dict[str, Any] | None,
@@ -536,7 +527,7 @@ class OpenAICompatibleProvider:
     def _create_sync_completion(
         self,
         *,
-        mode: ProviderModeStrategy,
+        mode: ResponseModeStrategy,
         client: Any,
         messages: Sequence[dict[str, Any]],
         response_model: type[BaseModel],
@@ -564,7 +555,7 @@ class OpenAICompatibleProvider:
     async def _create_async_completion(
         self,
         *,
-        mode: ProviderModeStrategy,
+        mode: ResponseModeStrategy,
         client: Any,
         messages: Sequence[dict[str, Any]],
         response_model: type[BaseModel],
@@ -702,7 +693,7 @@ class OpenAICompatibleProvider:
         *,
         available_models: list[str],
         model_listing_supported: bool,
-        selected_mode: ProviderModeStrategy | None = None,
+        selected_mode: ResponseModeStrategy | None = None,
     ) -> str:
         if self._looks_like_model_error(exc):
             if model_listing_supported and available_models:
@@ -716,8 +707,8 @@ class OpenAICompatibleProvider:
             )
         if selected_mode is not None and self._should_retry_mode_failure(exc):
             return (
-                f"The endpoint did not accept provider mode '{selected_mode.value}' for model '{self.model}'. "
-                "Choose a different provider mode for this endpoint."
+                f"The endpoint did not accept response mode '{selected_mode.value}' for model '{self.model}'. "
+                "Choose a different response mode for this endpoint."
             )
         return (
             "Unable to validate this provider configuration. "
@@ -751,44 +742,40 @@ class OpenAICompatibleProvider:
         )
         return not any(marker in message for marker in disconnected_markers)
 
-    def _candidate_modes(self) -> list[ProviderModeStrategy]:
-        if self.mode_strategy is ProviderModeStrategy.PROMPT_TOOLS:
-            return [ProviderModeStrategy.PROMPT_TOOLS]
-        if self.mode_strategy is ProviderModeStrategy.AUTO:
-            if self.provider_family == "ollama":
-                return [
-                    ProviderModeStrategy.JSON,
-                    ProviderModeStrategy.PROMPT_TOOLS,
-                ]
+    def _candidate_modes(self) -> list[ResponseModeStrategy]:
+        if self.response_mode_strategy is ResponseModeStrategy.PROMPT_TOOLS:
+            return [ResponseModeStrategy.PROMPT_TOOLS]
+        if self.response_mode_strategy is ResponseModeStrategy.AUTO:
             return [
-                ProviderModeStrategy.TOOLS,
-                ProviderModeStrategy.JSON,
-                ProviderModeStrategy.PROMPT_TOOLS,
+                ResponseModeStrategy.TOOLS,
+                ResponseModeStrategy.JSON,
+                ResponseModeStrategy.PROMPT_TOOLS,
             ]
-        return [self.mode_strategy]
+        return [self.response_mode_strategy]
 
-    def _should_use_native_json_schema(self, mode: ProviderModeStrategy) -> bool:
-        return self.provider_family == "ollama" and mode is ProviderModeStrategy.JSON
+    def _should_use_native_json_schema(self, mode: ResponseModeStrategy) -> bool:
+        del mode
+        return False
 
     @staticmethod
-    def _should_use_prompt_tools(mode: ProviderModeStrategy) -> bool:
-        return mode is ProviderModeStrategy.PROMPT_TOOLS
+    def _should_use_prompt_tools(mode: ResponseModeStrategy) -> bool:
+        return mode is ResponseModeStrategy.PROMPT_TOOLS
 
-    def _sync_execution_client(self, mode: ProviderModeStrategy) -> Any:
+    def _sync_execution_client(self, mode: ResponseModeStrategy) -> Any:
         if self._should_use_native_json_schema(mode) or self._should_use_prompt_tools(
             mode
         ):
             return self._sync_client
         return self._instructor_sync_client(mode)
 
-    def _async_execution_client(self, mode: ProviderModeStrategy) -> Any:
+    def _async_execution_client(self, mode: ResponseModeStrategy) -> Any:
         if self._should_use_native_json_schema(mode) or self._should_use_prompt_tools(
             mode
         ):
             return self._async_client_instance
         return self._instructor_async_client(mode)
 
-    def _instructor_sync_client(self, mode: ProviderModeStrategy) -> Any:
+    def _instructor_sync_client(self, mode: ResponseModeStrategy) -> Any:
         if mode not in self._instructor_sync_clients:
             instructor_module = self._require_instructor()
             base_client = self._sync_client
@@ -806,7 +793,7 @@ class OpenAICompatibleProvider:
                 )
         return self._instructor_sync_clients[mode]
 
-    def _instructor_async_client(self, mode: ProviderModeStrategy) -> Any:
+    def _instructor_async_client(self, mode: ResponseModeStrategy) -> Any:
         if mode not in self._instructor_async_clients:
             instructor_module = self._require_instructor()
             base_client = self._async_client_instance
@@ -824,11 +811,11 @@ class OpenAICompatibleProvider:
                 )
         return self._instructor_async_clients[mode]
 
-    def _resolve_instructor_mode(self, mode: ProviderModeStrategy) -> Any:
+    def _resolve_instructor_mode(self, mode: ResponseModeStrategy) -> Any:
         instructor_module = self._require_instructor()
         mode_name = {
-            ProviderModeStrategy.TOOLS: "TOOLS",
-            ProviderModeStrategy.JSON: "JSON",
+            ResponseModeStrategy.TOOLS: "TOOLS",
+            ResponseModeStrategy.JSON: "JSON",
         }[mode]
         try:
             return getattr(instructor_module.Mode, mode_name)
@@ -968,7 +955,7 @@ class OpenAICompatibleProvider:
         return f"{type(exc).__name__}: {message}"
 
     def _fallback_error_message(
-        self, failures: list[tuple[ProviderModeStrategy, Exception]]
+        self, failures: list[tuple[ResponseModeStrategy, Exception]]
     ) -> str:
         categories = {self._failure_category(exc) for _, exc in failures}
         overall_category = categories.pop() if len(categories) == 1 else "mixed"
@@ -980,7 +967,7 @@ class OpenAICompatibleProvider:
             for mode, exc in failures
         )
         return (
-            "All provider mode attempts failed. "
+            "All response mode attempts failed. "
             f"Overall failure type: {overall_category}. "
             f"Tried modes: {details}."
         )

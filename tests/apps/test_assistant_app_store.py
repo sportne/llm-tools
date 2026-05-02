@@ -122,7 +122,7 @@ def test_assistant_store_paths_expand_user(
 
 def test_store_initializes_and_round_trips_session(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    runtime = NiceGUIRuntimeConfig(model_name="test-model", root_path=str(tmp_path))
+    runtime = NiceGUIRuntimeConfig(selected_model="test-model", root_path=str(tmp_path))
 
     record = store.create_session(runtime, title="Repo chat")
     record.transcript.append(
@@ -178,7 +178,7 @@ def test_store_initializes_and_round_trips_session(tmp_path: Path) -> None:
     assert loaded is not None
     assert loaded.summary.title == "Repo chat"
     assert loaded.summary.message_count == 2
-    assert loaded.runtime.model_name == "test-model"
+    assert loaded.runtime.selected_model == "test-model"
     assert loaded.transcript[0].text == "What is here?"
     assert loaded.transcript[1].final_response is not None
     assert loaded.transcript[1].final_response.answer == "A repo."
@@ -195,7 +195,7 @@ def test_store_initializes_and_round_trips_session(tmp_path: Path) -> None:
 def test_harness_store_round_trips_encrypted_state(tmp_path: Path) -> None:
     store = _store(tmp_path)
     record = store.create_session(
-        NiceGUIRuntimeConfig(model_name="test-model"),
+        NiceGUIRuntimeConfig(selected_model="test-model"),
         title="Deep task chat",
         owner_user_id="user-a",
     )
@@ -258,7 +258,9 @@ def test_sqlcipher_database_rejects_plain_sqlite_and_wrong_key(
 ) -> None:
     db_path = tmp_path / "chat.sqlite3"
     store = _store(tmp_path)
-    store.create_session(NiceGUIRuntimeConfig(model_name="secret-model"), title="Alpha")
+    store.create_session(
+        NiceGUIRuntimeConfig(selected_model="secret-model"), title="Alpha"
+    )
 
     with pytest.raises(sqlite3.DatabaseError):
         sqlite3.connect(db_path).execute(
@@ -290,7 +292,7 @@ def test_existing_encrypted_database_requires_original_key_files(
     auth = LocalAuthProvider(store)
     user = auth.create_user(username="admin", password="secret-" + "value")
     store.create_session(
-        NiceGUIRuntimeConfig(model_name="secret-model"),
+        NiceGUIRuntimeConfig(selected_model="secret-model"),
         title="Alpha",
         owner_user_id=user.user_id,
     )
@@ -317,7 +319,7 @@ def test_existing_encrypted_database_requires_original_key_files(
 def test_user_owned_fields_are_encrypted_inside_open_database(tmp_path: Path) -> None:
     store = _store(tmp_path)
     record = store.create_session(
-        NiceGUIRuntimeConfig(model_name="visible-model", root_path="/secret/root"),
+        NiceGUIRuntimeConfig(selected_model="visible-model", root_path="/secret/root"),
         title="Secret title",
         owner_user_id="user-a",
     )
@@ -347,8 +349,8 @@ def test_user_owned_fields_are_encrypted_inside_open_database(tmp_path: Path) ->
     assert "Secret message" not in str(message_row["text"])
     assert "Secret workbench" not in str(workbench_row["title"])
     assert "payload" not in str(workbench_row["payload_json"])
-    assert session_row["provider"] == "ollama"
-    assert session_row["model_name"] == "visible-model"
+    assert session_row["provider_protocol"] == "openai_api"
+    assert session_row["selected_model"] == "visible-model"
 
 
 def test_per_user_encryption_detects_owner_swapping(tmp_path: Path) -> None:
@@ -358,7 +360,7 @@ def test_per_user_encryption_detects_owner_swapping(tmp_path: Path) -> None:
     user_a = auth.create_user(username="alice", password=password)
     user_b = auth.create_user(username="bob", password=password)
     record = store.create_session(
-        NiceGUIRuntimeConfig(model_name="alpha"),
+        NiceGUIRuntimeConfig(selected_model="alpha"),
         title="Alice chat",
         owner_user_id=user_a.user_id,
     )
@@ -377,9 +379,11 @@ def test_per_user_encryption_detects_owner_swapping(tmp_path: Path) -> None:
 def test_store_lists_searches_appends_and_deletes_sessions(tmp_path: Path) -> None:
     store = _store(tmp_path)
     first = store.create_session(
-        NiceGUIRuntimeConfig(model_name="alpha"), title="Alpha"
+        NiceGUIRuntimeConfig(selected_model="alpha"), title="Alpha"
     )
-    second = store.create_session(NiceGUIRuntimeConfig(model_name="beta"), title="Beta")
+    second = store.create_session(
+        NiceGUIRuntimeConfig(selected_model="beta"), title="Beta"
+    )
 
     store.append_message(
         first.summary.session_id,
@@ -406,12 +410,12 @@ def test_store_lists_searches_appends_and_deletes_sessions(tmp_path: Path) -> No
 def test_store_filters_sessions_and_preferences_by_owner(tmp_path: Path) -> None:
     store = _store(tmp_path)
     alpha = store.create_session(
-        NiceGUIRuntimeConfig(model_name="alpha"),
+        NiceGUIRuntimeConfig(selected_model="alpha"),
         title="Alpha",
         owner_user_id="user-a",
     )
     store.create_session(
-        NiceGUIRuntimeConfig(model_name="beta"),
+        NiceGUIRuntimeConfig(selected_model="beta"),
         title="Beta",
         owner_user_id="user-b",
     )

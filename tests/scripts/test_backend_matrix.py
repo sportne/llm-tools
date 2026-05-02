@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from llm_tools.llm_providers import ProviderModeStrategy
+from llm_tools.llm_providers import ResponseModeStrategy
 
 SCRIPT_DIR = Path(__file__).resolve().parents[2] / "scripts" / "e2e_assistant"
 if str(SCRIPT_DIR) not in sys.path:
@@ -26,7 +26,7 @@ def _backend_probe_config(tmp_path: Path) -> tuple[object, object]:
         output_dir=output_dir,
         ollama_base_url=common.DEFAULT_OLLAMA_BASE_URL,
         model=common.DEFAULT_MODEL,
-        provider_mode=ProviderModeStrategy.JSON,
+        response_mode=ResponseModeStrategy.JSON,
         timeout_seconds=5.0,
     )
     runtime = common.build_runtime_config(config, workspace=workspace)
@@ -39,7 +39,7 @@ def test_backend_matrix_protection_demo_uses_complete_protection_config(
     config, runtime = _backend_probe_config(tmp_path)
 
     result = backend_matrix._run_chat_protection_demo(
-        provider_mode=ProviderModeStrategy.JSON,
+        provider_mode=ResponseModeStrategy.JSON,
         provider_health={"ok": True},
         config=config,
         runtime=runtime,
@@ -65,7 +65,7 @@ def test_backend_matrix_research_approval_uses_controller_compatible_provider(
     config, runtime = _backend_probe_config(tmp_path)
 
     result = backend_matrix._run_research_approval_resume_write_flow(
-        provider_mode=ProviderModeStrategy.JSON,
+        provider_mode=ResponseModeStrategy.JSON,
         provider_health={"ok": True},
         config=config,
         runtime=runtime,

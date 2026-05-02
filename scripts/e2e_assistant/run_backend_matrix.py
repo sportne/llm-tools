@@ -30,7 +30,7 @@ from llm_tools.harness_api import (
 )
 from llm_tools.harness_api.replay import replay_session
 from llm_tools.llm_adapters import ParsedModelResponse
-from llm_tools.llm_providers import ProviderModeStrategy
+from llm_tools.llm_providers import ResponseModeStrategy
 from llm_tools.tool_api import SideEffectClass
 from llm_tools.workflow_api import (
     ChatSessionState,
@@ -160,21 +160,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--workspace", type=Path, default=common.REPO_ROOT)
     parser.add_argument(
-        "--provider",
-        default="ollama",
-        help="Assistant provider preset, such as ollama or custom_openai_compatible.",
-    )
-    parser.add_argument(
         "--ollama-base-url",
         default=common.DEFAULT_OLLAMA_BASE_URL,
     )
     parser.add_argument(
         "--api-base-url",
         help="OpenAI-compatible API base URL. Overrides --ollama-base-url.",
-    )
-    parser.add_argument(
-        "--api-key-env-var",
-        help="Environment variable used by custom OpenAI-compatible providers.",
     )
     parser.add_argument("--model", default=common.DEFAULT_MODEL)
     parser.add_argument("--output-dir")
@@ -197,12 +188,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--provider-mode",
         action="append",
         default=[],
-        help="Run one provider mode. May be repeated.",
+        help="Run one response mode. May be repeated.",
     )
     parser.add_argument(
         "--provider-modes",
         help=(
-            "Comma-separated provider modes: tools,json,prompt_tools,"
+            "Comma-separated response modes: tools,json,prompt_tools,"
             "prompt_tools_split,prompt_tools_single_action,prompt_tools_category. "
             "The prompt_tools mode uses the default single-action prompt protocol."
         ),
@@ -214,7 +205,7 @@ def _select_provider_mode_variants(
     *,
     mode_args: list[str],
     modes_csv: str | None,
-) -> list[tuple[str, ProviderModeStrategy, str | None]]:
+) -> list[tuple[str, ResponseModeStrategy, str | None]]:
     raw_values: list[str] = []
     for raw in mode_args:
         value = raw.strip()
@@ -225,7 +216,7 @@ def _select_provider_mode_variants(
     if not raw_values:
         raw_values = [mode.value for mode in common.DEFAULT_PROVIDER_MODES]
 
-    selected: list[tuple[str, ProviderModeStrategy, str | None]] = []
+    selected: list[tuple[str, ResponseModeStrategy, str | None]] = []
     seen: set[str] = set()
     valid_values = [
         *(mode.value for mode in common.DEFAULT_PROVIDER_MODES),
@@ -234,14 +225,14 @@ def _select_provider_mode_variants(
     for raw in raw_values:
         if raw in PROMPT_TOOL_VARIANT_MODES:
             label = raw
-            mode = ProviderModeStrategy.PROMPT_TOOLS
+            mode = ResponseModeStrategy.PROMPT_TOOLS
             strategy = PROMPT_TOOL_VARIANT_MODES[raw]
         else:
             try:
-                mode = ProviderModeStrategy(raw)
+                mode = ResponseModeStrategy(raw)
             except ValueError as exc:
                 raise ValueError(
-                    f"Unknown provider mode '{raw}'. Expected one of: {', '.join(valid_values)}"
+                    f"Unknown response mode '{raw}'. Expected one of: {', '.join(valid_values)}"
                 ) from exc
             label = mode.value
             strategy = None
@@ -302,7 +293,7 @@ def _build_probe_controller(
             config,
             active_runtime,
             api_key=None,
-            model_name=active_runtime.model_name,
+            selected_model=active_runtime.selected_model,
         )
 
     controller = NiceGUIChatController(
@@ -609,7 +600,7 @@ def _evaluate_chat_multi_turn(
 
 def _run_chat_multi_turn_scenario(
     *,
-    provider_mode: ProviderModeStrategy,
+    provider_mode: ResponseModeStrategy,
     provider_health: dict[str, Any],
     config: Any,
     runtime: Any,
@@ -745,7 +736,7 @@ def _evaluate_protection_demo(
 
 def _run_chat_protection_demo(
     *,
-    provider_mode: ProviderModeStrategy,
+    provider_mode: ResponseModeStrategy,
     provider_health: dict[str, Any],
     config: Any,
     runtime: Any,
@@ -836,9 +827,7 @@ def _run_chat_protection_demo(
             "usable_document_count": readiness_report.usable_document_count,
             "protection_ready": (
                 readiness_report.usable_document_count > 0
-                and bool(
-                    runtime_with_protection.protection.allowed_sensitivity_labels
-                )
+                and bool(runtime_with_protection.protection.allowed_sensitivity_labels)
             ),
             "readiness_issues": [
                 issue.model_dump(mode="json") for issue in readiness_report.issues
@@ -938,7 +927,7 @@ def _run_chat_protection_demo(
     result["sanitize_provenance_paths"] = sanitize_provenance_paths
     result["protection_environment"] = build_protection_environment(
         app_name="assistant_app",
-        model_name=runtime.model_name,
+        model_name=runtime.selected_model or "",
         workspace=runtime.root_path,
         enabled_tools=runtime.enabled_tools,
         allow_network=runtime.allow_network,
@@ -959,7 +948,7 @@ def _run_chat_protection_demo(
 def _run_chat_scenario(
     *,
     name: str,
-    provider_mode: ProviderModeStrategy,
+    provider_mode: ResponseModeStrategy,
     provider_health: dict[str, Any],
     config: Any,
     runtime: Any,
@@ -1037,7 +1026,7 @@ def _research_prompt() -> str:
 
 def _run_research_launch(
     *,
-    provider_mode: ProviderModeStrategy,
+    provider_mode: ResponseModeStrategy,
     provider_health: dict[str, Any],
     config: Any,
     runtime: Any,
@@ -1271,7 +1260,7 @@ def _evaluate_research_approval_resume(
 
 def _run_research_approval_resume_write_flow(
     *,
-    provider_mode: ProviderModeStrategy,
+    provider_mode: ResponseModeStrategy,
     provider_health: dict[str, Any],
     config: Any,
     runtime: Any,
@@ -1340,7 +1329,7 @@ def _run_research_approval_resume_write_flow(
 
 def _run_research_followup(
     *,
-    provider_mode: ProviderModeStrategy,
+    provider_mode: ResponseModeStrategy,
     provider_health: dict[str, Any],
     config: Any,
     runtime: Any,
@@ -1481,16 +1470,15 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=mode_output_dir,
             ollama_base_url=args.ollama_base_url,
             model=args.model,
-            provider_mode=provider_mode,
+            response_mode=provider_mode,
             timeout_seconds=args.timeout_seconds,
-            provider=args.provider,
             api_base_url=args.api_base_url,
-            api_key_env_var=args.api_key_env_var,
+            requires_bearer_token=bool(args.api_base_url),
         )
         runtime = common.build_runtime_config(config, workspace=workspace)
         provider_health = common.build_provider_health(config, runtime)
         provider_health["provider_mode"] = provider_mode_label
-        provider_health["provider_mode_strategy"] = provider_mode.value
+        provider_health["response_mode_strategy"] = provider_mode.value
         if prompt_tool_strategy is not None:
             provider_health["prompt_tool_strategy"] = prompt_tool_strategy
         provider_health_reports.append(provider_health)
@@ -1576,7 +1564,7 @@ def main(argv: list[str] | None = None) -> int:
             "output_dir": str(mode_output_dir),
             "selected_scenarios": selected,
             "provider_mode": provider_mode_label,
-            "provider_mode_strategy": provider_mode.value,
+            "response_mode_strategy": provider_mode.value,
             "prompt_tool_strategy": prompt_tool_strategy,
             "provider_health": provider_health,
             "results": mode_results,

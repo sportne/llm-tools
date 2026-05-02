@@ -3,13 +3,14 @@
 # access still stay off until you enable them in the sidebar.
 # No remote tools or durable research sessions are enabled.
 llm:
-  provider: ollama
-  provider_mode_strategy: auto
-  model_name: gemma4:26b
+  provider_protocol: openai_api
+  response_mode_strategy: auto
+  selected_model: gemma4:26b
   temperature: 0.1
-  api_base_url: http://127.0.0.1:11434/v1
+  provider_connection:
+    api_base_url: http://127.0.0.1:11434/v1
+    requires_bearer_token: false
   timeout_seconds: 60.0
-  api_key_env_var: null
   prompt_for_api_key_if_missing: true
 
 session:

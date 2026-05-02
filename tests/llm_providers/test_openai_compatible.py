@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 import llm_tools.llm_providers.openai_compatible as provider_module
 from llm_tools.llm_adapters import ActionEnvelopeAdapter
-from llm_tools.llm_providers import OpenAICompatibleProvider, ProviderModeStrategy
+from llm_tools.llm_providers import OpenAICompatibleProvider, ResponseModeStrategy
 from llm_tools.tool_api import ToolSpec
 
 
@@ -207,7 +207,7 @@ def test_provider_run_prefers_tools_mode_when_available(monkeypatch: Any) -> Non
 
     assert parsed.invocations[0].tool_name == "echo"
     assert parsed.invocations[0].arguments == {"value": "hello"}
-    assert provider.last_mode_used is ProviderModeStrategy.TOOLS
+    assert provider.last_mode_used is ResponseModeStrategy.TOOLS
     call = client.chat.completions.calls[0]
     assert call["model"] == "demo-model"
     assert call["temperature"] == 0
@@ -223,7 +223,7 @@ def test_provider_run_text_sends_plain_chat_completion() -> None:
     )
 
     assert text == "plain text"
-    assert provider.last_mode_used is ProviderModeStrategy.PROMPT_TOOLS
+    assert provider.last_mode_used is ResponseModeStrategy.PROMPT_TOOLS
     call = client.chat.completions.calls[0]
     assert call["model"] == "demo-model"
     assert call["temperature"] == 0.2
@@ -237,7 +237,7 @@ def test_provider_prompt_tools_structured_mode_uses_raw_text_transport() -> None
     provider = OpenAICompatibleProvider(
         model="demo-model",
         client=client,
-        mode_strategy=ProviderModeStrategy.PROMPT_TOOLS,
+        response_mode_strategy=ResponseModeStrategy.PROMPT_TOOLS,
     )
 
     payload = provider.run_structured(
@@ -246,7 +246,7 @@ def test_provider_prompt_tools_structured_mode_uses_raw_text_transport() -> None
     )
 
     assert payload == SimplePayload(answer="ok")
-    assert provider.last_mode_used is ProviderModeStrategy.PROMPT_TOOLS
+    assert provider.last_mode_used is ResponseModeStrategy.PROMPT_TOOLS
     call = client.chat.completions.calls[0]
     assert "tools" not in call
     assert "response_model" not in call
@@ -270,7 +270,7 @@ def test_provider_run_text_async_sends_plain_chat_completion() -> None:
     )
 
     assert text == "plain text"
-    assert provider.last_mode_used is ProviderModeStrategy.PROMPT_TOOLS
+    assert provider.last_mode_used is ResponseModeStrategy.PROMPT_TOOLS
     call = async_client.chat.completions.calls[0]
     assert "tools" not in call
     assert "response_model" not in call
@@ -297,7 +297,7 @@ def test_provider_run_auto_falls_back_to_json_for_retryable_schema_errors(
     )
 
     assert parsed.final_response == "done"
-    assert provider.last_mode_used is ProviderModeStrategy.JSON
+    assert provider.last_mode_used is ResponseModeStrategy.JSON
     assert [call.get("__mode") for call in client.chat.completions.calls] == [
         "TOOLS",
         "JSON",
@@ -375,7 +375,7 @@ def test_provider_run_async_uses_fallback_order_for_retryable_schema_errors(
     )
 
     assert parsed.invocations[0].arguments == {"value": "async"}
-    assert provider.last_mode_used is ProviderModeStrategy.PROMPT_TOOLS
+    assert provider.last_mode_used is ResponseModeStrategy.PROMPT_TOOLS
     assert [call.get("__mode") for call in client.chat.completions.calls] == [
         "TOOLS",
         "JSON",
@@ -480,11 +480,11 @@ def test_provider_caches_wrapped_clients_per_mode(monkeypatch: Any) -> None:
         async_client=_AsyncClient({"TOOLS": {"actions": [], "final_response": "ok"}}),
     )
 
-    sync_client = provider._instructor_sync_client(ProviderModeStrategy.TOOLS)
-    async_client = provider._instructor_async_client(ProviderModeStrategy.TOOLS)
+    sync_client = provider._instructor_sync_client(ResponseModeStrategy.TOOLS)
+    async_client = provider._instructor_async_client(ResponseModeStrategy.TOOLS)
 
-    assert provider._instructor_sync_client(ProviderModeStrategy.TOOLS) is sync_client
-    assert provider._instructor_async_client(ProviderModeStrategy.TOOLS) is async_client
+    assert provider._instructor_sync_client(ResponseModeStrategy.TOOLS) is sync_client
+    assert provider._instructor_async_client(ResponseModeStrategy.TOOLS) is async_client
 
 
 def test_provider_missing_instructor_does_not_resend_identical_requests(
@@ -576,7 +576,7 @@ def test_provider_run_auto_reports_all_retryable_mode_failures(
     provider = OpenAICompatibleProvider(model="demo-model", client=client)
 
     with pytest.raises(
-        ValueError, match="All provider mode attempts failed"
+        ValueError, match="All response mode attempts failed"
     ) as exc_info:
         provider.run(
             adapter=adapter,

@@ -7,8 +7,8 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 from llm_tools.apps.assistant_config import AssistantResearchConfig
-from llm_tools.apps.chat_config import ProviderPreset
-from llm_tools.llm_providers import ProviderModeStrategy
+from llm_tools.apps.chat_config import ProviderConnectionConfig, ProviderProtocol
+from llm_tools.llm_providers import ResponseModeStrategy
 from llm_tools.tool_api import SideEffectClass
 from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import (
@@ -152,11 +152,12 @@ class NiceGUIRuntimeConfig(BaseModel):
     """Mutable runtime controls owned by one NiceGUI session."""
 
     interaction_mode: NiceGUIInteractionMode = "chat"
-    provider: ProviderPreset = ProviderPreset.OLLAMA
-    provider_mode_strategy: ProviderModeStrategy = ProviderModeStrategy.AUTO
-    model_name: str = "gemma4:26b"
-    api_base_url: str | None = "http://127.0.0.1:11434/v1"
-    api_key_env_var: str | None = None
+    provider_protocol: ProviderProtocol = ProviderProtocol.OPENAI_API
+    provider_connection: ProviderConnectionConfig = Field(
+        default_factory=ProviderConnectionConfig
+    )
+    response_mode_strategy: ResponseModeStrategy = ResponseModeStrategy.AUTO
+    selected_model: str | None = None
     temperature: float = 0.1
     timeout_seconds: float = 60.0
     root_path: str | None = None
@@ -175,25 +176,9 @@ class NiceGUIRuntimeConfig(BaseModel):
     research: AssistantResearchConfig = Field(default_factory=AssistantResearchConfig)
     protection: ProtectionConfig = Field(default_factory=ProtectionConfig)
 
-    @field_validator("model_name")
+    @field_validator("selected_model")
     @classmethod
-    def validate_model_name(cls, value: str) -> str:
-        cleaned = value.strip()
-        if not cleaned:
-            raise ValueError("model_name must not be empty")
-        return cleaned
-
-    @field_validator("api_base_url")
-    @classmethod
-    def validate_api_base_url(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        cleaned = value.strip()
-        return cleaned or None
-
-    @field_validator("api_key_env_var")
-    @classmethod
-    def validate_api_key_env_var(cls, value: str | None) -> str | None:
+    def validate_selected_model(cls, value: str | None) -> str | None:
         if value is None:
             return None
         cleaned = value.strip()
@@ -233,8 +218,8 @@ class NiceGUISessionSummary(BaseModel):
     created_at: str
     updated_at: str
     root_path: str | None = None
-    provider: ProviderPreset = ProviderPreset.OLLAMA
-    model_name: str = "gemma4:26b"
+    provider_protocol: ProviderProtocol = ProviderProtocol.OPENAI_API
+    selected_model: str | None = None
     message_count: int = 0
     temporary: bool = False
     project_id: str | None = None

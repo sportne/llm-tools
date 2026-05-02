@@ -38,9 +38,9 @@ from llm_tools.apps.assistant_tool_capabilities import (
     build_tool_capabilities,
     build_tool_group_capability_summaries,
 )
-from llm_tools.apps.chat_config import ProviderPreset
+from llm_tools.apps.chat_config import ProviderProtocol
 from llm_tools.apps.chat_presentation import final_response_details
-from llm_tools.llm_providers import ProviderModeStrategy
+from llm_tools.llm_providers import ResponseModeStrategy
 from llm_tools.tool_api import SideEffectClass
 from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import (
@@ -53,8 +53,7 @@ from llm_tools.workflow_api import (
 )
 
 NICEGUI_PROVIDER_OPTIONS = [
-    ProviderPreset.OLLAMA.value,
-    ProviderPreset.CUSTOM_OPENAI_COMPATIBLE.value,
+    ProviderProtocol.OPENAI_API.value,
 ]
 NICEGUI_APPROVAL_OPTIONS = [
     SideEffectClass.LOCAL_READ,
@@ -247,10 +246,19 @@ def _runtime_summary_parts(
 ) -> list[tuple[str, str]]:
     """Return compact clickable runtime metadata labels."""
     root = runtime.root_path or "No workspace"
+    endpoint = runtime.provider_connection.api_base_url or "No endpoint"
+    model = runtime.selected_model or "No model"
+    credential = (
+        "credential needed"
+        if runtime.provider_connection.requires_bearer_token
+        else "no token"
+    )
     parts = [
-        ("provider", runtime.provider.value),
-        ("model", runtime.model_name),
-        ("mode", runtime.provider_mode_strategy.value),
+        ("provider_protocol", runtime.provider_protocol.value),
+        ("endpoint", endpoint),
+        ("credential", credential),
+        ("model", model),
+        ("mode", runtime.response_mode_strategy.value),
         ("workspace", root),
     ]
     if runtime.show_token_usage:
@@ -654,16 +662,6 @@ def _referenced_document_text(prompt: ProtectionPendingPrompt) -> str:
     return ", ".join(prompt.referenced_document_ids)
 
 
-def _provider_api_key_env_var(
-    provider: ProviderPreset,
-    configured_env_var: str | None,
-) -> str:
-    """Return the configured provider API-key env var without exposing a secret."""
-    if provider is ProviderPreset.OLLAMA:
-        return configured_env_var or ""
-    return configured_env_var or "OPENAI_API_KEY"
-
-
 def _tool_capability_tooltip(capability: AssistantToolCapability) -> str:
     """Return compact hover text for a tool capability."""
     lines = [capability.tool_name]
@@ -762,14 +760,15 @@ def _extract_model_names_from_models_payload(payload: object) -> list[str]:
 
 def _discover_model_names(
     *,
-    provider: ProviderPreset,
+    provider_protocol: ProviderProtocol,
     base_url: str | None,
-    api_key_env_var: str | None = None,
+    requires_bearer_token: bool = True,
     api_key: str | None = None,
-    allow_env_api_key: bool = True,
     timeout: float = 5.0,
 ) -> list[str]:
     """Discover available models from an OpenAI-compatible provider endpoint."""
+    if provider_protocol.value != ProviderProtocol.OPENAI_API.value:
+        return []
     if not base_url:
         return []
     url = _models_endpoint_url(base_url)
@@ -779,14 +778,10 @@ def _discover_model_names(
     if parsed_url.scheme not in {"http", "https"}:
         return []
     headers = {"Accept": "application/json"}
-    api_key_env_var = _provider_api_key_env_var(provider, api_key_env_var)
-    effective_api_key = api_key or (
-        os.environ.get(api_key_env_var)
-        if api_key_env_var and allow_env_api_key
-        else None
-    )
-    if provider is not ProviderPreset.OLLAMA and effective_api_key:
-        headers["Authorization"] = f"Bearer {effective_api_key}"
+    if requires_bearer_token and not api_key:
+        return []
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     request = Request(url, headers=headers, method="GET")  # noqa: S310
     try:
         with urlopen(request, timeout=timeout) as response:  # noqa: S310
@@ -1370,12 +1365,14 @@ def build_assistant_ui(  # noqa: C901
     provider_select: Any = None
     model_input: Any = None
     base_url_input: Any = None
+    bearer_token_required_switch: Any = None
     provider_api_key_input: Any = None
     mode_select: Any = None
     workspace_input: Any = None
     database_path_input: Any = None
     provider_quick_select: Any = None
     base_url_quick_input: Any = None
+    bearer_token_required_quick_switch: Any = None
     provider_api_key_quick_input: Any = None
     model_quick_select: Any = None
     mode_quick_select: Any = None
@@ -1485,18 +1482,18 @@ def build_assistant_ui(  # noqa: C901
 
     def remember_recent_runtime_values(runtime: NiceGUIRuntimeConfig) -> None:
         """Persist non-secret runtime values for future sessions."""
-        provider_key = runtime.provider.value
-        if runtime.model_name:
+        provider_key = runtime.provider_protocol.value
+        if runtime.selected_model:
             models = controller.preferences.recent_models.setdefault(provider_key, [])
-            if runtime.model_name in models:
-                models.remove(runtime.model_name)
-            models.insert(0, runtime.model_name)
+            if runtime.selected_model in models:
+                models.remove(runtime.selected_model)
+            models.insert(0, runtime.selected_model)
             del models[10:]
-        if runtime.api_base_url:
+        if runtime.provider_connection.api_base_url:
             urls = controller.preferences.recent_base_urls.setdefault(provider_key, [])
-            if runtime.api_base_url in urls:
-                urls.remove(runtime.api_base_url)
-            urls.insert(0, runtime.api_base_url)
+            if runtime.provider_connection.api_base_url in urls:
+                urls.remove(runtime.provider_connection.api_base_url)
+            urls.insert(0, runtime.provider_connection.api_base_url)
             del urls[10:]
         if runtime.root_path:
             roots = controller.preferences.recent_roots
@@ -1507,10 +1504,15 @@ def build_assistant_ui(  # noqa: C901
 
     def base_url_options(runtime: NiceGUIRuntimeConfig) -> list[str]:
         options = list(
-            controller.preferences.recent_base_urls.get(runtime.provider.value, [])
+            controller.preferences.recent_base_urls.get(
+                runtime.provider_protocol.value, []
+            )
         )
-        if runtime.api_base_url and runtime.api_base_url not in options:
-            options.insert(0, runtime.api_base_url)
+        if (
+            runtime.provider_connection.api_base_url
+            and runtime.provider_connection.api_base_url not in options
+        ):
+            options.insert(0, runtime.provider_connection.api_base_url)
         return options
 
     def apply_layout_state() -> None:
@@ -1529,7 +1531,7 @@ def build_assistant_ui(  # noqa: C901
             )
             workbench_column.set_visibility(controller.preferences.workbench_open)
 
-    def set_model_options(values: Sequence[str], *, selected: str) -> None:
+    def set_model_options(values: Sequence[str], *, selected: str | None) -> None:
         options = [value for value in values if value]
         if selected and selected not in options:
             options.insert(0, selected)
@@ -1541,18 +1543,23 @@ def build_assistant_ui(  # noqa: C901
 
     def sync_connection_settings(runtime: NiceGUIRuntimeConfig) -> None:
         if provider_select is not None:
-            provider_select.value = runtime.provider.value
+            provider_select.value = runtime.provider_protocol.value
         if model_input is not None:
             set_model_options(
-                model_options_state["values"], selected=runtime.model_name
+                model_options_state["values"], selected=runtime.selected_model
             )
         if mode_select is not None:
-            mode_select.value = runtime.provider_mode_strategy.value
+            mode_select.value = runtime.response_mode_strategy.value
         if base_url_input is not None:
             base_url_input.set_options(
-                base_url_options(runtime), value=runtime.api_base_url or None
+                base_url_options(runtime),
+                value=runtime.provider_connection.api_base_url or None,
             )
-            base_url_input.value = runtime.api_base_url or ""
+            base_url_input.value = runtime.provider_connection.api_base_url or ""
+        if bearer_token_required_switch is not None:
+            bearer_token_required_switch.value = (
+                runtime.provider_connection.requires_bearer_token
+            )
         if temperature_input is not None:
             temperature_input.value = str(runtime.temperature)
         if timeout_seconds_input is not None:
@@ -1735,22 +1742,28 @@ def build_assistant_ui(  # noqa: C901
 
     def open_provider_dialog() -> None:
         runtime = active_runtime()
-        provider_quick_select.value = runtime.provider.value
+        provider_quick_select.value = runtime.provider_protocol.value
         base_url_quick_input.set_options(
-            base_url_options(runtime), value=runtime.api_base_url or None
+            base_url_options(runtime),
+            value=runtime.provider_connection.api_base_url or None,
         )
-        base_url_quick_input.value = runtime.api_base_url or ""
+        base_url_quick_input.value = runtime.provider_connection.api_base_url or ""
+        bearer_token_required_quick_switch.value = (
+            runtime.provider_connection.requires_bearer_token
+        )
         provider_api_key_quick_input.value = ""
         dialogs["provider_settings"].open()
 
     def open_model_dialog() -> None:
         runtime = active_runtime()
-        set_model_options(model_options_state["values"], selected=runtime.model_name)
-        model_quick_select.value = runtime.model_name
+        set_model_options(
+            model_options_state["values"], selected=runtime.selected_model
+        )
+        model_quick_select.value = runtime.selected_model
         dialogs["model_settings"].open()
 
     def open_mode_dialog() -> None:
-        mode_quick_select.value = active_runtime().provider_mode_strategy.value
+        mode_quick_select.value = active_runtime().response_mode_strategy.value
         dialogs["mode_settings"].open()
 
     def open_workspace_dialog() -> None:
@@ -1758,7 +1771,7 @@ def build_assistant_ui(  # noqa: C901
         dialogs["workspace_settings"].open()
 
     def open_runtime_part_dialog(part_name: str) -> None:
-        if part_name == "provider":
+        if part_name in {"provider_protocol", "endpoint", "credential"}:
             open_provider_dialog()
         elif part_name == "model":
             open_model_dialog()
@@ -2166,7 +2179,8 @@ def build_assistant_ui(  # noqa: C901
                         ):
                             ui.label(summary.title).classes("text-sm")
                             ui.label(
-                                f"{summary.model_name} | {summary.message_count} msgs"
+                                f"{summary.selected_model or 'No model'} | "
+                                f"{summary.message_count} msgs"
                             ).classes("text-xs llmt-muted")
                         with ui.row().classes("gap-0"):
                             ui.button(
@@ -2712,10 +2726,15 @@ def build_assistant_ui(  # noqa: C901
         except ValueError as exc:
             ui.notify(str(exc), type="negative")
             return False
-        runtime.provider = ProviderPreset(str(provider_select.value))
-        runtime.model_name = str(model_input.value or runtime.model_name)
-        runtime.provider_mode_strategy = ProviderModeStrategy(str(mode_select.value))
-        runtime.api_base_url = str(base_url_input.value or "").strip() or None
+        runtime.provider_protocol = ProviderProtocol(str(provider_select.value))
+        runtime.selected_model = str(model_input.value or "").strip() or None
+        runtime.response_mode_strategy = ResponseModeStrategy(str(mode_select.value))
+        runtime.provider_connection.api_base_url = (
+            str(base_url_input.value or "").strip() or None
+        )
+        runtime.provider_connection.requires_bearer_token = bool(
+            bearer_token_required_switch.value
+        )
         runtime.temperature = updated_runtime.temperature
         runtime.timeout_seconds = updated_runtime.timeout_seconds
         runtime.show_token_usage = updated_runtime.show_token_usage
@@ -2840,19 +2859,24 @@ def build_assistant_ui(  # noqa: C901
         refresh_all()
 
     def refresh_model_options(*, notify: bool = True) -> None:
-        provider = ProviderPreset(
-            str(provider_select.value or active_runtime().provider)
+        provider_protocol = ProviderProtocol(
+            str(provider_select.value or active_runtime().provider_protocol)
         )
-        base_url = str(base_url_input.value or active_runtime().api_base_url or "")
+        base_url = str(
+            base_url_input.value
+            or active_runtime().provider_connection.api_base_url
+            or ""
+        )
         provider_api_key = str(provider_api_key_input.value or "").strip()
-        current_model = str(model_input.value or active_runtime().model_name)
+        current_model = str(model_input.value or active_runtime().selected_model or "")
         models = _discover_model_names(
-            provider=provider,
+            provider_protocol=provider_protocol,
             base_url=base_url,
-            api_key_env_var=active_runtime().api_key_env_var,
+            requires_bearer_token=(
+                active_runtime().provider_connection.requires_bearer_token
+            ),
             api_key=provider_api_key
             or controller.provider_api_key(session_id=controller.active_session_id),
-            allow_env_api_key=False,
         )
         if not models:
             set_model_options(model_options_state["values"], selected=current_model)
@@ -2865,15 +2889,14 @@ def build_assistant_ui(  # noqa: C901
 
     def refresh_quick_model_options(*, notify: bool = True) -> None:
         runtime = active_runtime()
-        current_model = str(model_quick_select.value or runtime.model_name)
+        current_model = str(model_quick_select.value or runtime.selected_model or "")
         models = _discover_model_names(
-            provider=runtime.provider,
-            base_url=runtime.api_base_url,
-            api_key_env_var=runtime.api_key_env_var,
+            provider_protocol=runtime.provider_protocol,
+            base_url=runtime.provider_connection.api_base_url,
+            requires_bearer_token=runtime.provider_connection.requires_bearer_token,
             api_key=controller.provider_api_key(
                 session_id=controller.active_session_id
             ),
-            allow_env_api_key=False,
         )
         if not models:
             set_model_options(model_options_state["values"], selected=current_model)
@@ -2886,8 +2909,13 @@ def build_assistant_ui(  # noqa: C901
 
     def apply_provider_settings_and_close() -> None:
         runtime = active_runtime()
-        runtime.provider = ProviderPreset(str(provider_quick_select.value))
-        runtime.api_base_url = str(base_url_quick_input.value or "").strip() or None
+        runtime.provider_protocol = ProviderProtocol(str(provider_quick_select.value))
+        runtime.provider_connection.api_base_url = (
+            str(base_url_quick_input.value or "").strip() or None
+        )
+        runtime.provider_connection.requires_bearer_token = bool(
+            bearer_token_required_quick_switch.value
+        )
         provider_api_key = str(provider_api_key_quick_input.value or "").strip()
         if provider_api_key and secret_entry_enabled():
             controller.set_session_secret(PROVIDER_API_KEY_FIELD, provider_api_key)
@@ -2899,7 +2927,7 @@ def build_assistant_ui(  # noqa: C901
 
     def apply_model_settings_and_close() -> None:
         runtime = active_runtime()
-        runtime.model_name = str(model_quick_select.value or runtime.model_name)
+        runtime.selected_model = str(model_quick_select.value or "").strip() or None
         remember_recent_runtime_values(runtime)
         controller.save_active_session()
         dialogs["model_settings"].close()
@@ -2907,7 +2935,7 @@ def build_assistant_ui(  # noqa: C901
 
     def apply_mode_settings_and_close() -> None:
         runtime = active_runtime()
-        runtime.provider_mode_strategy = ProviderModeStrategy(
+        runtime.response_mode_strategy = ResponseModeStrategy(
             str(mode_quick_select.value)
         )
         controller.save_active_session()
@@ -3269,9 +3297,13 @@ def build_assistant_ui(  # noqa: C901
                 with ui.row().classes("w-full items-end gap-2 no-wrap"):
                     model_input = (
                         ui.select(
-                            [controller.active_record.runtime.model_name],
+                            (
+                                [controller.active_record.runtime.selected_model]
+                                if controller.active_record.runtime.selected_model
+                                else []
+                            ),
                             label="Model",
-                            value=controller.active_record.runtime.model_name,
+                            value=controller.active_record.runtime.selected_model,
                             with_input=True,
                             new_value_mode="add-unique",
                         )
@@ -3283,8 +3315,8 @@ def build_assistant_ui(  # noqa: C901
                         on_click=lambda: refresh_model_options(notify=True),
                     ).props("flat round color=primary")
                 mode_select = ui.select(
-                    [strategy.value for strategy in ProviderModeStrategy],
-                    label="Provider mode",
+                    [strategy.value for strategy in ResponseModeStrategy],
+                    label="Response mode",
                 ).classes("w-full")
                 with ui.row().classes("w-full items-end gap-2"):
                     temperature_input = (
@@ -3311,6 +3343,12 @@ def build_assistant_ui(  # noqa: C901
                     with base_url_input:
                         ui.tooltip(_provider_base_url_help_text()).props("delay=700")
                     render_provider_endpoint_help_button()
+                bearer_token_required_switch = ui.switch(
+                    "Requires bearer token",
+                    value=(
+                        controller.active_record.runtime.provider_connection.requires_bearer_token
+                    ),
+                )
                 with ui.row().classes("w-full items-end gap-2 no-wrap"):
                     provider_api_key_input = (
                         ui.input(
@@ -3589,6 +3627,12 @@ def build_assistant_ui(  # noqa: C901
             with base_url_quick_input:
                 ui.tooltip(_provider_base_url_help_text()).props("delay=700")
             render_provider_endpoint_help_button()
+        bearer_token_required_quick_switch = ui.switch(
+            "Requires bearer token",
+            value=(
+                controller.active_record.runtime.provider_connection.requires_bearer_token
+            ),
+        )
         with ui.row().classes("w-full items-end gap-2 no-wrap"):
             provider_api_key_quick_input = (
                 ui.input(
@@ -3614,9 +3658,13 @@ def build_assistant_ui(  # noqa: C901
         with ui.row().classes("w-full items-end gap-2 no-wrap"):
             model_quick_select = (
                 ui.select(
-                    [controller.active_record.runtime.model_name],
+                    (
+                        [controller.active_record.runtime.selected_model]
+                        if controller.active_record.runtime.selected_model
+                        else []
+                    ),
                     label="Model",
-                    value=controller.active_record.runtime.model_name,
+                    value=controller.active_record.runtime.selected_model,
                     with_input=True,
                     new_value_mode="add-unique",
                 )
@@ -3633,10 +3681,10 @@ def build_assistant_ui(  # noqa: C901
 
     with ui.dialog() as mode_settings_dialog, ui.card().classes("w-[420px]"):
         dialogs["mode_settings"] = mode_settings_dialog
-        ui.label("Provider mode").classes("text-lg")
+        ui.label("Response mode").classes("text-lg")
         mode_quick_select = ui.select(
-            [strategy.value for strategy in ProviderModeStrategy],
-            label="Provider mode",
+            [strategy.value for strategy in ResponseModeStrategy],
+            label="Response mode",
         ).classes("w-full")
         with ui.row().classes("justify-end w-full"):
             ui.button("Cancel", on_click=mode_settings_dialog.close).props("flat")

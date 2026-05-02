@@ -67,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--provider-modes",
         default=",".join(DEFAULT_PROVIDER_MODES),
-        help="Comma-separated provider modes to test.",
+        help="Comma-separated response modes to test.",
     )
     parser.add_argument(
         "--scenarios",

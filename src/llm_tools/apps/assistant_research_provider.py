@@ -18,7 +18,7 @@ from llm_tools.llm_adapters import (
     ActionEnvelopeAdapter,
     ParsedModelResponse,
 )
-from llm_tools.llm_providers import OpenAICompatibleProvider, ProviderModeStrategy
+from llm_tools.llm_providers import OpenAICompatibleProvider, ResponseModeStrategy
 from llm_tools.tool_api import ToolContext, ToolRegistry
 from llm_tools.workflow_api.executor import PreparedModelInteraction
 from llm_tools.workflow_api.model_turn_protocol import (
@@ -152,9 +152,9 @@ def build_live_harness_provider(
     *,
     config: AssistantConfig,
     provider_config: ChatLLMConfig,
-    model_name: str,
+    selected_model: str,
     api_key: str | None,
-    mode_strategy: ProviderModeStrategy,
+    response_mode_strategy: ResponseModeStrategy,
     tool_registry: ToolRegistry,
     enabled_tool_names: set[str],
     workspace_enabled: bool,
@@ -165,17 +165,19 @@ def build_live_harness_provider(
 ) -> AssistantHarnessTurnProvider:
     """Create the live provider wrapper used by research sessions."""
     provider = create_provider(
-        provider_config,
+        provider_protocol=provider_config.provider_protocol,
+        provider_connection=provider_config.provider_connection,
         api_key=api_key,
-        model_name=model_name,
-        mode_strategy=mode_strategy,
+        selected_model=selected_model,
+        response_mode_strategy=response_mode_strategy,
+        timeout_seconds=provider_config.timeout_seconds,
     )
     protection_controller = build_protection_controller(
         config=config.protection,
         provider=provider,
         environment=build_protection_environment(
             app_name="assistant_app_research",
-            model_name=model_name,
+            model_name=selected_model,
             workspace=workspace,
             enabled_tools=enabled_tool_names,
             allow_network=allow_network,

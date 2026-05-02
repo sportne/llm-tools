@@ -15,10 +15,10 @@ from llm_tools.apps.chat_config_models import (
     ChatUIConfig as ChatUIConfig,
 )
 from llm_tools.apps.chat_config_models import (
-    ProviderPreset as ProviderPreset,
+    ProviderConnectionConfig as ProviderConnectionConfig,
 )
 from llm_tools.apps.chat_config_models import (
-    _populate_provider_mode_default as _populate_provider_mode_default,
+    ProviderProtocol as ProviderProtocol,
 )
 
 __all__ = [
@@ -26,5 +26,6 @@ __all__ = [
     "ChatLLMConfig",
     "ChatPolicyConfig",
     "ChatUIConfig",
-    "ProviderPreset",
+    "ProviderConnectionConfig",
+    "ProviderProtocol",
 ]

@@ -8,7 +8,12 @@ import pytest
 from pydantic import ValidationError
 
 from llm_tools.apps.assistant_app.models import NiceGUIPreferences, NiceGUIRuntimeConfig
-from llm_tools.apps.chat_config import ChatLLMConfig, ChatPolicyConfig, ProviderPreset
+from llm_tools.apps.chat_config import (
+    ChatLLMConfig,
+    ChatPolicyConfig,
+    ProviderConnectionConfig,
+    ProviderProtocol,
+)
 from llm_tools.apps.chat_presentation import (
     final_response_details,
     format_citation,
@@ -18,7 +23,7 @@ from llm_tools.apps.chat_presentation import (
     format_transcript_text,
     pretty_json,
 )
-from llm_tools.llm_providers import ProviderModeStrategy
+from llm_tools.llm_providers import ResponseModeStrategy
 from llm_tools.tool_api.redaction import RedactionConfig
 from llm_tools.workflow_api import ChatCitation, ChatFinalResponse
 
@@ -26,33 +31,28 @@ _CHAT_RUNTIME_MODULE = importlib.import_module("llm_tools.apps.chat_runtime")
 
 
 def test_chat_config_validation_and_metadata() -> None:
-    metadata = ChatLLMConfig(
-        provider=ProviderPreset.OPENAI
-    ).credential_prompt_metadata()
-    assert metadata.api_key_env_var == "OPENAI_API_KEY"
+    metadata = ChatLLMConfig().credential_prompt_metadata()
     assert metadata.expects_api_key is True
 
     custom_config = ChatLLMConfig(
-        provider=ProviderPreset.CUSTOM_OPENAI_COMPATIBLE,
+        provider_connection=ProviderConnectionConfig(requires_bearer_token=False),
         prompt_for_api_key_if_missing=False,
     )
     custom_metadata = custom_config.credential_prompt_metadata()
-    assert custom_metadata.api_key_env_var == "OPENAI_API_KEY"
     assert custom_metadata.prompt_for_api_key_if_missing is False
-    assert custom_config.provider_mode_strategy is ProviderModeStrategy.JSON
+    assert custom_metadata.expects_api_key is False
     assert (
-        ChatLLMConfig(provider_mode_strategy="prompt_tools").provider_mode_strategy
-        is ProviderModeStrategy.PROMPT_TOOLS
+        ChatLLMConfig(response_mode_strategy="prompt_tools").response_mode_strategy
+        is ResponseModeStrategy.PROMPT_TOOLS
     )
 
-    ollama_metadata = ChatLLMConfig(api_key_env_var=None).credential_prompt_metadata()
-    assert ollama_metadata.api_key_env_var == "API key"
-    assert ollama_metadata.expects_api_key is False
-
-    with pytest.raises(ValidationError):
-        ChatLLMConfig(model_name="   ")
-    with pytest.raises(ValidationError):
-        ChatLLMConfig(api_base_url="   ")
+    assert ChatLLMConfig(selected_model="   ").selected_model is None
+    assert (
+        ChatLLMConfig(
+            provider_connection=ProviderConnectionConfig(api_base_url="  ")
+        ).provider_connection.api_base_url
+        is None
+    )
     with pytest.raises(ValidationError):
         ChatLLMConfig(temperature=1.5)
     with pytest.raises(ValidationError):
@@ -63,22 +63,20 @@ def test_chat_config_validation_and_metadata() -> None:
 
 def test_nicegui_runtime_models_validate_and_normalize() -> None:
     runtime = NiceGUIRuntimeConfig(
-        model_name="  demo  ",
-        api_base_url="  ",
+        selected_model="  demo  ",
         root_path="  ",
         enabled_tools=[" read_file ", "search_text"],
-        provider_mode_strategy="prompt_tools",
+        response_mode_strategy="prompt_tools",
     )
-    assert runtime.model_name == "demo"
-    assert runtime.api_base_url is None
+    assert runtime.selected_model == "demo"
+    assert runtime.provider_connection.api_base_url is None
     assert runtime.root_path is None
     assert runtime.enabled_tools == ["read_file", "search_text"]
-    assert runtime.provider_mode_strategy.value == "prompt_tools"
+    assert runtime.response_mode_strategy.value == "prompt_tools"
 
     assert NiceGUIRuntimeConfig().protection.enabled is False
 
-    with pytest.raises(ValueError):
-        NiceGUIRuntimeConfig(model_name="   ")
+    assert NiceGUIRuntimeConfig(selected_model="   ").selected_model is None
     with pytest.raises(ValueError):
         NiceGUIRuntimeConfig(enabled_tools=["read_file", " "])
 
@@ -135,8 +133,6 @@ def test_chat_runtime_provider_factory_and_executor_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = ChatLLMConfig()
-    openai_calls: list[dict[str, object]] = []
-    ollama_calls: list[dict[str, object]] = []
     custom_calls: list[dict[str, object]] = []
 
     class _FakeProvider:
@@ -144,85 +140,56 @@ def test_chat_runtime_provider_factory_and_executor_defaults(
             custom_calls.append(dict(kwargs))
             self.kind = "custom-provider"
 
-        @classmethod
-        def for_openai(cls, **kwargs: object) -> str:
-            openai_calls.append(dict(kwargs))
-            return "openai-provider"
-
-        @classmethod
-        def for_ollama(cls, **kwargs: object) -> str:
-            ollama_calls.append(dict(kwargs))
-            return "ollama-provider"
-
     monkeypatch.setattr(_CHAT_RUNTIME_MODULE, "OpenAICompatibleProvider", _FakeProvider)
     monkeypatch.setenv("OPENAI_API_KEY", "env-key")
 
-    openai_config = config.model_copy(
-        update={
-            "provider": ProviderPreset.OPENAI,
-            "api_key_env_var": "OPENAI_API_KEY",
-            "api_base_url": None,
-        }
-    )
-    assert (
-        _CHAT_RUNTIME_MODULE.create_provider(
-            openai_config,
-            api_key=None,
-            model_name="gpt-4.1-mini",
-            mode_strategy="json",
-        )
-        == "openai-provider"
-    )
-    assert openai_calls[0]["api_key"] == "env-key"
-    assert openai_calls[0]["mode_strategy"] == "json"
-
-    ollama_config = config.model_copy(
-        update={
-            "provider": ProviderPreset.OLLAMA,
-            "api_base_url": None,
-        }
-    )
-    assert (
-        _CHAT_RUNTIME_MODULE.create_provider(
-            ollama_config,
-            api_key=None,
-            model_name="gemma4:26b",
-            mode_strategy="json",
-        )
-        == "ollama-provider"
-    )
-    assert ollama_calls[0]["base_url"] == "http://127.0.0.1:11434/v1"
-    assert ollama_calls[0]["api_key"] == "ollama"
-    assert ollama_calls[0]["mode_strategy"] == "json"
-
-    custom_config = config.model_copy(
-        update={
-            "provider": ProviderPreset.CUSTOM_OPENAI_COMPATIBLE,
-            "api_base_url": "https://example.invalid/v1",
-            "api_key_env_var": "OPENAI_API_KEY",
-        }
-    )
     custom_provider = _CHAT_RUNTIME_MODULE.create_provider(
-        custom_config,
+        provider_protocol=ProviderProtocol.OPENAI_API,
+        provider_connection=ProviderConnectionConfig(
+            api_base_url="https://example.invalid/v1"
+        ),
         api_key="provided",
-        model_name="custom-model",
-        mode_strategy="tools",
-    )
-    default_custom_provider = _CHAT_RUNTIME_MODULE.create_provider(
-        custom_config,
-        api_key="provided",
-        model_name="custom-model",
+        selected_model="custom-model",
+        response_mode_strategy="tools",
+        timeout_seconds=config.timeout_seconds,
     )
     assert custom_provider.kind == "custom-provider"
-    assert default_custom_provider.kind == "custom-provider"
     assert custom_calls[0]["api_key"] == "provided"
-    assert custom_calls[0]["mode_strategy"] == "tools"
-    assert custom_calls[1]["mode_strategy"] == ProviderModeStrategy.JSON
-    with pytest.raises(ValueError, match="require api_base_url"):
+    assert custom_calls[0]["model"] == "custom-model"
+    assert custom_calls[0]["base_url"] == "https://example.invalid/v1"
+    assert custom_calls[0]["response_mode_strategy"] == "tools"
+    env_provider = _CHAT_RUNTIME_MODULE.create_provider(
+        provider_protocol=ProviderProtocol.OPENAI_API,
+        provider_connection=ProviderConnectionConfig(
+            api_base_url="https://example.invalid/v1"
+        ),
+        api_key=None,
+        selected_model="env-model",
+        response_mode_strategy="auto",
+        timeout_seconds=config.timeout_seconds,
+    )
+    assert env_provider.kind == "custom-provider"
+    assert custom_calls[1]["api_key"] == "env-key"
+    assert custom_calls[1]["model"] == "env-model"
+    with pytest.raises(ValueError, match="Choose a model"):
         _CHAT_RUNTIME_MODULE.create_provider(
-            custom_config.model_copy(update={"api_base_url": None}),
+            provider_protocol=ProviderProtocol.OPENAI_API,
+            provider_connection=ProviderConnectionConfig(
+                api_base_url="https://example.invalid/v1"
+            ),
             api_key=None,
-            model_name="custom-model",
+            selected_model="  ",
+            response_mode_strategy="auto",
+            timeout_seconds=config.timeout_seconds,
+        )
+    with pytest.raises(ValueError, match="API base URL"):
+        _CHAT_RUNTIME_MODULE.create_provider(
+            provider_protocol=ProviderProtocol.OPENAI_API,
+            provider_connection=ProviderConnectionConfig(api_base_url=None),
+            api_key=None,
+            selected_model="custom-model",
+            response_mode_strategy="auto",
+            timeout_seconds=config.timeout_seconds,
         )
 
     captured: dict[str, object] = {}

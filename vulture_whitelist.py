@@ -17,6 +17,8 @@ _.execute_model_output_async  # workflow executor public API
 _.filter_tools  # registry public query API
 _.finalize_expired_approvals_async  # workflow executor public API
 _.find_files  # filesystem service protocol method
+_.for_ollama  # provider public convenience constructor
+_.for_openai  # provider public convenience constructor
 _.get_file_info  # filesystem service protocol method
 _._iter_registered_tools  # registry internal inspection surface used by tests
 _.list_directory  # filesystem service protocol method

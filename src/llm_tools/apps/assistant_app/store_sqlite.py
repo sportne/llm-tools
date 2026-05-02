@@ -81,8 +81,8 @@ chat_sessions = Table(
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
     Column("root_path", String, nullable=True),
-    Column("provider", String, nullable=False),
-    Column("model_name", String, nullable=False),
+    Column("provider_protocol", String, nullable=False),
+    Column("selected_model", String, nullable=True),
     Column("runtime_json", Text, nullable=False),
     Column("workflow_session_state_json", Text, nullable=False),
     Column("token_usage_json", Text, nullable=True),
@@ -342,8 +342,8 @@ def _load_payload_json(*, raw: str | None, field_name: str) -> object:
 
 def _sync_summary_fields(record: NiceGUISessionRecord) -> None:
     record.summary.root_path = record.runtime.root_path
-    record.summary.provider = record.runtime.provider
-    record.summary.model_name = record.runtime.model_name
+    record.summary.provider_protocol = record.runtime.provider_protocol
+    record.summary.selected_model = record.runtime.selected_model
     record.summary.message_count = len(
         [entry for entry in record.transcript if entry.show_in_transcript]
     )
@@ -368,8 +368,8 @@ def _new_session_record(
         created_at=timestamp,
         updated_at=timestamp,
         root_path=runtime.root_path,
-        provider=runtime.provider,
-        model_name=runtime.model_name,
+        provider_protocol=runtime.provider_protocol,
+        selected_model=runtime.selected_model,
         temporary=temporary,
         owner_user_id=owner_user_id,
     )
@@ -498,8 +498,10 @@ class SQLiteNiceGUIChatStore:
                     column="root_path",
                     value=row["root_path"],
                 ),
-                provider=row["provider"],
-                model_name=str(row["model_name"]),
+                provider_protocol=row["provider_protocol"],
+                selected_model=(
+                    str(row["selected_model"]) if row["selected_model"] else None
+                ),
                 message_count=self._message_count(str(row["session_id"])),
                 temporary=bool(row["temporary"]),
                 project_id=row["project_id"],
@@ -513,7 +515,10 @@ class SQLiteNiceGUIChatStore:
                 summary
                 for summary in summaries
                 if cleaned_query in summary.title.lower()
-                or cleaned_query in summary.model_name.lower()
+                or (
+                    summary.selected_model is not None
+                    and cleaned_query in summary.selected_model.lower()
+                )
                 or (
                     summary.root_path is not None
                     and cleaned_query in summary.root_path.lower()
@@ -648,8 +653,12 @@ class SQLiteNiceGUIChatStore:
                     column="root_path",
                     value=session_row["root_path"],
                 ),
-                provider=session_row["provider"],
-                model_name=str(session_row["model_name"]),
+                provider_protocol=session_row["provider_protocol"],
+                selected_model=(
+                    str(session_row["selected_model"])
+                    if session_row["selected_model"]
+                    else None
+                ),
                 message_count=len(
                     [entry for entry in transcript if entry.show_in_transcript]
                 ),
@@ -1280,8 +1289,8 @@ class SQLiteNiceGUIChatStore:
                 column="root_path",
                 value=record.runtime.root_path,
             ),
-            "provider": record.runtime.provider.value,
-            "model_name": record.runtime.model_name,
+            "provider_protocol": record.runtime.provider_protocol.value,
+            "selected_model": record.runtime.selected_model,
             "runtime_json": self._encrypt_field(
                 owner_user_id,
                 table="chat_sessions",

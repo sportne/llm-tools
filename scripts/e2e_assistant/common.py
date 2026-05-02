@@ -18,23 +18,27 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from llm_tools.apps.assistant_app.models import NiceGUIRuntimeConfig  # noqa: E402
 from llm_tools.apps.assistant_config import (  # noqa: E402
     AssistantConfig,
     load_assistant_config,
 )
-from llm_tools.apps.chat_config import ChatLLMConfig, ProviderPreset  # noqa: E402
+from llm_tools.apps.chat_config import (  # noqa: E402
+    ChatLLMConfig,
+    ProviderConnectionConfig,
+    ProviderProtocol,
+)
 from llm_tools.apps.chat_runtime import create_provider  # noqa: E402
-from llm_tools.apps.assistant_app.models import NiceGUIRuntimeConfig  # noqa: E402
-from llm_tools.llm_providers import ProviderModeStrategy  # noqa: E402
+from llm_tools.llm_providers import ResponseModeStrategy  # noqa: E402
 from llm_tools.tool_api import SideEffectClass  # noqa: E402
 
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
 DEFAULT_MODEL = "gemma4:e4b"
 DEFAULT_TIMEOUT_SECONDS = 60.0
 DEFAULT_PROVIDER_MODES = [
-    ProviderModeStrategy.TOOLS,
-    ProviderModeStrategy.JSON,
-    ProviderModeStrategy.PROMPT_TOOLS,
+    ResponseModeStrategy.TOOLS,
+    ResponseModeStrategy.JSON,
+    ResponseModeStrategy.PROMPT_TOOLS,
 ]
 DEFAULT_ENABLED_TOOLS = [
     "list_directory",
@@ -86,15 +90,13 @@ def build_assistant_config(
     output_dir: Path,
     ollama_base_url: str,
     model: str,
-    provider_mode: ProviderModeStrategy,
+    response_mode: ResponseModeStrategy,
     timeout_seconds: float,
-    provider: str = "ollama",
     api_base_url: str | None = None,
-    api_key_env_var: str | None = None,
+    requires_bearer_token: bool = False,
 ) -> AssistantConfig:
     """Build the local-only assistant config used by the probe scripts."""
     effective_base_url = api_base_url or ollama_base_url
-    provider_preset = ProviderPreset(provider)
     template = load_assistant_config(
         REPO_ROOT / "examples" / "assistant_configs" / "harness-research-chat.yaml"
     )
@@ -102,12 +104,14 @@ def build_assistant_config(
         update={
             "llm": template.llm.model_copy(
                 update={
-                    "provider": provider_preset,
-                    "api_base_url": effective_base_url,
-                    "model_name": model,
-                    "provider_mode_strategy": provider_mode,
+                    "provider_protocol": ProviderProtocol.OPENAI_API,
+                    "provider_connection": ProviderConnectionConfig(
+                        api_base_url=effective_base_url,
+                        requires_bearer_token=requires_bearer_token,
+                    ),
+                    "selected_model": model,
+                    "response_mode_strategy": response_mode,
                     "timeout_seconds": timeout_seconds,
-                    "api_key_env_var": api_key_env_var,
                 }
             ),
             "policy": template.policy.model_copy(
@@ -143,11 +147,10 @@ def build_runtime_config(
         {SideEffectClass.LOCAL_WRITE, SideEffectClass.EXTERNAL_WRITE}
     )
     return NiceGUIRuntimeConfig(
-        provider=config.llm.provider,
-        provider_mode_strategy=config.llm.provider_mode_strategy,
-        model_name=config.llm.model_name,
-        api_base_url=config.llm.api_base_url,
-        api_key_env_var=config.llm.api_key_env_var,
+        provider_protocol=config.llm.provider_protocol,
+        provider_connection=config.llm.provider_connection.model_copy(deep=True),
+        response_mode_strategy=config.llm.response_mode_strategy,
+        selected_model=config.llm.selected_model,
         temperature=config.llm.temperature,
         timeout_seconds=config.llm.timeout_seconds,
         root_path=str(workspace.resolve()),
@@ -174,11 +177,10 @@ def llm_config_for_runtime(
     """Return the effective LLM config for one NiceGUI runtime."""
     return config.llm.model_copy(
         update={
-            "provider": runtime.provider,
-            "provider_mode_strategy": runtime.provider_mode_strategy,
-            "model_name": runtime.model_name,
-            "api_base_url": runtime.api_base_url,
-            "api_key_env_var": runtime.api_key_env_var,
+            "provider_protocol": runtime.provider_protocol,
+            "provider_connection": runtime.provider_connection.model_copy(deep=True),
+            "response_mode_strategy": runtime.response_mode_strategy,
+            "selected_model": runtime.selected_model,
             "temperature": runtime.temperature,
             "timeout_seconds": runtime.timeout_seconds,
         }
@@ -190,14 +192,16 @@ def create_provider_for_runtime(
     runtime: NiceGUIRuntimeConfig,
     *,
     api_key: str | None = None,
-    model_name: str | None = None,
+    selected_model: str | None = None,
 ) -> Any:
     """Create an OpenAI-compatible provider for one NiceGUI E2E runtime."""
     return create_provider(
-        llm_config_for_runtime(config, runtime),
+        provider_protocol=runtime.provider_protocol,
+        provider_connection=runtime.provider_connection,
         api_key=api_key,
-        model_name=model_name or runtime.model_name,
-        mode_strategy=runtime.provider_mode_strategy,
+        selected_model=selected_model or runtime.selected_model or "",
+        response_mode_strategy=runtime.response_mode_strategy,
+        timeout_seconds=runtime.timeout_seconds,
         allow_env_api_key=True,
     )
 
@@ -206,9 +210,9 @@ def select_provider_modes(
     *,
     mode_args: Sequence[str],
     modes_csv: str | None,
-) -> list[ProviderModeStrategy]:
-    """Return the selected provider modes in stable order."""
-    chosen: list[ProviderModeStrategy] = []
+) -> list[ResponseModeStrategy]:
+    """Return the selected response modes in stable order."""
+    chosen: list[ResponseModeStrategy] = []
     raw_values: list[str] = []
     for raw in mode_args:
         value = raw.strip()
@@ -223,14 +227,14 @@ def select_provider_modes(
         return list(DEFAULT_PROVIDER_MODES)
     for raw in raw_values:
         try:
-            chosen.append(ProviderModeStrategy(raw))
+            chosen.append(ResponseModeStrategy(raw))
         except ValueError as exc:
             valid = ", ".join(mode.value for mode in DEFAULT_PROVIDER_MODES)
             raise ValueError(
-                f"Unknown provider mode '{raw}'. Expected one of: {valid}"
+                f"Unknown response mode '{raw}'. Expected one of: {valid}"
             ) from exc
-    deduped: list[ProviderModeStrategy] = []
-    seen: set[ProviderModeStrategy] = set()
+    deduped: list[ResponseModeStrategy] = []
+    seen: set[ResponseModeStrategy] = set()
     for mode in chosen:
         if mode in seen:
             continue
@@ -239,8 +243,8 @@ def select_provider_modes(
     return deduped
 
 
-def mode_output_dir(parent: Path, mode: ProviderModeStrategy) -> Path:
-    """Return the artifact directory for one provider mode."""
+def mode_output_dir(parent: Path, mode: ResponseModeStrategy) -> Path:
+    """Return the artifact directory for one response mode."""
     path = (parent / mode.value).resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -258,9 +262,9 @@ def build_provider_health(
     payload = preflight.model_dump(mode="json")
     payload.update(
         {
-            "base_url": runtime.api_base_url,
-            "model": runtime.model_name,
-            "provider": runtime.provider.value,
+            "base_url": runtime.provider_connection.api_base_url,
+            "model": runtime.selected_model,
+            "provider": runtime.provider_protocol.value,
         }
     )
     return payload

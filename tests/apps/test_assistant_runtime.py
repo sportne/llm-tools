@@ -52,11 +52,10 @@ def _flatten_capabilities(capability_groups):
 def _runtime(**overrides: object) -> SimpleNamespace:
     config = AssistantConfig()
     values: dict[str, object] = {
-        "provider": config.llm.provider,
-        "provider_mode_strategy": config.llm.provider_mode_strategy,
-        "model_name": config.llm.model_name,
-        "api_base_url": config.llm.api_base_url,
-        "api_key_env_var": config.llm.api_key_env_var,
+        "provider_protocol": config.llm.provider_protocol,
+        "provider_connection": config.llm.provider_connection.model_copy(deep=True),
+        "response_mode_strategy": config.llm.response_mode_strategy,
+        "selected_model": config.llm.selected_model,
         "temperature": config.llm.temperature,
         "timeout_seconds": config.llm.timeout_seconds,
         "root_path": None,

@@ -80,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--provider-modes",
         default=",".join(DEFAULT_PROVIDER_MODES),
-        help="Comma-separated provider modes to test.",
+        help="Comma-separated response modes to test.",
     )
     parser.add_argument(
         "--scenarios",
@@ -142,12 +142,8 @@ def main(argv: list[str] | None = None) -> int:
             command = [
                 sys.executable,
                 str(Path(__file__).with_name("run_backend_matrix.py")),
-                "--provider",
-                "custom_openai_compatible",
                 "--api-base-url",
                 args.gemini_base_url,
-                "--api-key-env-var",
-                GEMINI_API_KEY_ENV_VAR,
                 "--model",
                 model,
                 "--provider-modes",
@@ -160,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
                 str(model_dir),
             ]
             env = dict(os.environ)
-            env[GEMINI_API_KEY_ENV_VAR] = api_key
+            env["OPENAI_API_KEY"] = api_key
             completed = subprocess.run(command, check=False, env=env)
             run_records.append(
                 {
@@ -233,8 +229,8 @@ def discover_gemini_models(
 
 
 def _fetch_json(url: str, *, headers: dict[str, str]) -> dict[str, Any]:
-    request = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(request, timeout=30) as response:
+    request = urllib.request.Request(url, headers=headers)  # noqa: S310
+    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
         payload = json.loads(response.read().decode("utf-8"))
     return payload if isinstance(payload, dict) else {}
 

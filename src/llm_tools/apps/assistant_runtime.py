@@ -46,7 +46,7 @@ from llm_tools.harness_api import (
     HarnessStateStore,
 )
 from llm_tools.harness_api.context import TurnContextBundle
-from llm_tools.llm_providers import ProviderModeStrategy
+from llm_tools.llm_providers import ResponseModeStrategy
 from llm_tools.tool_api import ToolPolicy, ToolRegistry, ToolSpec
 from llm_tools.workflow_api import (
     ChatSessionState,
@@ -302,11 +302,17 @@ def _create_bundle_provider(
 ) -> ModelTurnProvider:
     if provider_factory is not None:
         return provider_factory(runtime)
+    if runtime.selected_model is None:
+        raise ValueError("Choose a model before running a model turn.")
+    if runtime.provider_connection.requires_bearer_token and not provider_api_key:
+        raise ValueError("Enter provider credentials before running a model turn.")
     return create_provider(
-        effective_config.llm,
+        provider_protocol=runtime.provider_protocol,
+        provider_connection=runtime.provider_connection,
         api_key=provider_api_key,
-        model_name=runtime.model_name,
-        mode_strategy=runtime.provider_mode_strategy,
+        selected_model=runtime.selected_model,
+        response_mode_strategy=runtime.response_mode_strategy,
+        timeout_seconds=effective_config.llm.timeout_seconds,
         allow_env_api_key=False,
     )
 
@@ -365,7 +371,7 @@ def _build_bundle_protection_controller(
     )
     protection_environment = build_protection_environment(
         app_name=app_name,
-        model_name=runtime.model_name,
+        model_name=runtime.selected_model or "",
         workspace=runtime.root_path,
         enabled_tools=sorted(exposed_tool_names),
         allow_network=runtime.allow_network,
@@ -400,11 +406,12 @@ def _effective_assistant_config(
         update={
             "llm": config.llm.model_copy(
                 update={
-                    "provider": runtime.provider,
-                    "provider_mode_strategy": runtime.provider_mode_strategy,
-                    "model_name": runtime.model_name,
-                    "api_base_url": runtime.api_base_url,
-                    "api_key_env_var": runtime.api_key_env_var,
+                    "provider_protocol": runtime.provider_protocol,
+                    "provider_connection": runtime.provider_connection.model_copy(
+                        deep=True
+                    ),
+                    "response_mode_strategy": runtime.response_mode_strategy,
+                    "selected_model": runtime.selected_model,
                     "temperature": runtime.temperature,
                     "timeout_seconds": runtime.timeout_seconds,
                 }
@@ -490,9 +497,9 @@ def build_live_harness_provider(
     *,
     config: AssistantConfig,
     provider_config: ChatLLMConfig,
-    model_name: str,
+    selected_model: str,
     api_key: str | None,
-    mode_strategy: ProviderModeStrategy,
+    response_mode_strategy: ResponseModeStrategy,
     tool_registry: ToolRegistry,
     enabled_tool_names: set[str],
     workspace_enabled: bool,
@@ -503,17 +510,19 @@ def build_live_harness_provider(
 ) -> AssistantHarnessTurnProvider:
     """Create the live provider wrapper used by research sessions."""
     provider = create_provider(
-        provider_config,
+        provider_protocol=provider_config.provider_protocol,
+        provider_connection=provider_config.provider_connection,
         api_key=api_key,
-        model_name=model_name,
-        mode_strategy=mode_strategy,
+        selected_model=selected_model,
+        response_mode_strategy=response_mode_strategy,
+        timeout_seconds=provider_config.timeout_seconds,
     )
     protection_controller = build_protection_controller(
         config=config.protection,
         provider=provider,
         environment=build_protection_environment(
             app_name="assistant_app_research",
-            model_name=model_name,
+            model_name=selected_model,
             workspace=workspace,
             enabled_tools=enabled_tool_names,
             allow_network=allow_network,

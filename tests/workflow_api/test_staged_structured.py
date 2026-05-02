@@ -267,7 +267,7 @@ def test_staged_runner_helpers_cover_edge_cases() -> None:
     assert not is_repairable_stage_error(RuntimeError("connection refused"))
     assert not is_repairable_stage_error(
         ValueError(
-            "All provider mode attempts failed. Overall failure type: transport-related."
+            "All response mode attempts failed. Overall failure type: transport-related."
         )
     )
     pydantic_error_type = type(

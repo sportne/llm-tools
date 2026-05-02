@@ -2,12 +2,12 @@
 
 from llm_tools.llm_providers.openai_compatible import (
     OpenAICompatibleProvider,
-    ProviderModeStrategy,
     ProviderPreflightResult,
+    ResponseModeStrategy,
 )
 
 __all__ = [
     "OpenAICompatibleProvider",
-    "ProviderModeStrategy",
+    "ResponseModeStrategy",
     "ProviderPreflightResult",
 ]

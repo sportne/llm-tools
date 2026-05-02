@@ -22,9 +22,14 @@ from llm_tools.apps.assistant_config import (
 from llm_tools.apps.assistant_tool_registry import (
     build_assistant_available_tool_specs,
 )
-from llm_tools.apps.chat_config import ChatLLMConfig, ChatPolicyConfig, ChatUIConfig
+from llm_tools.apps.chat_config import (
+    ChatLLMConfig,
+    ChatPolicyConfig,
+    ChatUIConfig,
+    ProviderProtocol,
+)
 from llm_tools.llm_adapters import ParsedModelResponse
-from llm_tools.llm_providers import ProviderModeStrategy
+from llm_tools.llm_providers import ResponseModeStrategy
 from llm_tools.tool_api import ToolInvocationRequest
 from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import ChatSessionConfig, ProtectionConfig
@@ -154,8 +159,11 @@ def test_local_only_chat_example_loads_cleanly() -> None:
 
     config = load_assistant_config(path)
 
-    assert config.llm.provider.value == "ollama"
-    assert config.llm.provider_mode_strategy is ProviderModeStrategy.AUTO
+    assert config.llm.provider_protocol is ProviderProtocol.OPENAI_API
+    assert config.llm.provider_connection.api_base_url == "http://127.0.0.1:11434/v1"
+    assert config.llm.provider_connection.requires_bearer_token is False
+    assert config.llm.selected_model == "gemma4:26b"
+    assert config.llm.response_mode_strategy is ResponseModeStrategy.AUTO
     assert config.workspace.default_root == "."
     assert config.research.enabled is False
     assert set(config.policy.enabled_tools or []) == LOCAL_ONLY_TOOLS
@@ -169,8 +177,13 @@ def test_enterprise_data_chat_example_loads_cleanly() -> None:
 
     config = load_assistant_config(path)
 
-    assert config.llm.provider.value == "custom_openai_compatible"
-    assert config.llm.provider_mode_strategy is ProviderModeStrategy.JSON
+    assert config.llm.provider_protocol is ProviderProtocol.OPENAI_API
+    assert (
+        config.llm.provider_connection.api_base_url == "https://llm.example.internal/v1"
+    )
+    assert config.llm.provider_connection.requires_bearer_token is True
+    assert config.llm.selected_model == "assistant-model"
+    assert config.llm.response_mode_strategy is ResponseModeStrategy.JSON
     assert config.workspace.default_root is None
     assert config.research.enabled is False
     assert set(config.policy.enabled_tools or []) == ENTERPRISE_DATA_TOOLS
@@ -184,7 +197,10 @@ def test_harness_research_chat_example_loads_cleanly() -> None:
 
     config = load_assistant_config(path)
 
-    assert config.llm.provider.value == "ollama"
+    assert config.llm.provider_protocol is ProviderProtocol.OPENAI_API
+    assert config.llm.provider_connection.api_base_url == "http://127.0.0.1:11434/v1"
+    assert config.llm.provider_connection.requires_bearer_token is False
+    assert config.llm.selected_model == "gemma4:26b"
     assert config.workspace.default_root == "."
     assert config.research.enabled is True
     assert config.research.store_dir is None
@@ -201,9 +217,9 @@ def test_local_only_chat_example_supports_direct_turn_without_workspace(
 ) -> None:
     config = load_assistant_config(EXAMPLES_DIR / "local-only-chat.yaml")
     runtime = NiceGUIRuntimeConfig(
-        provider=config.llm.provider,
-        model_name=config.llm.model_name,
-        api_base_url=config.llm.api_base_url,
+        provider_protocol=config.llm.provider_protocol,
+        provider_connection=config.llm.provider_connection.model_copy(deep=True),
+        selected_model=config.llm.selected_model,
     )
     controller = _controller(
         tmp_path,
@@ -230,9 +246,9 @@ def test_local_only_chat_example_supports_workspace_read_turn(
     config = load_assistant_config(EXAMPLES_DIR / "local-only-chat.yaml")
     (tmp_path / "notes.txt").write_text("Workspace facts for the assistant.", "utf-8")
     runtime = NiceGUIRuntimeConfig(
-        provider=config.llm.provider,
-        model_name=config.llm.model_name,
-        api_base_url=config.llm.api_base_url,
+        provider_protocol=config.llm.provider_protocol,
+        provider_connection=config.llm.provider_connection.model_copy(deep=True),
+        selected_model=config.llm.selected_model,
         root_path=str(tmp_path),
         enabled_tools=list(config.policy.enabled_tools or []),
         allow_filesystem=True,
@@ -271,9 +287,9 @@ def test_local_only_chat_example_supports_workspace_read_turn(
 def test_enterprise_data_chat_example_respects_network_and_credentials_gate() -> None:
     config = load_assistant_config(EXAMPLES_DIR / "enterprise-data-chat.yaml")
     runtime = NiceGUIRuntimeConfig(
-        provider=config.llm.provider,
-        model_name=config.llm.model_name,
-        api_base_url=config.llm.api_base_url,
+        provider_protocol=config.llm.provider_protocol,
+        provider_connection=config.llm.provider_connection.model_copy(deep=True),
+        selected_model=config.llm.selected_model,
         enabled_tools=list(config.policy.enabled_tools or []),
         allow_network=False,
     )

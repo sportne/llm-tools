@@ -19,7 +19,7 @@ The app is organized around four stable regions:
   including continuation notices, tool timeline/status, copy, retry, and
   edit-last-user affordances as the implementation matures.
 - A sticky composer with multiline input, send/stop controls, attachment/tool
-  placeholders, provider mode indicator, and busy/disabled states.
+  placeholders, response mode indicator, and busy/disabled states.
 
 The right workbench is an inspector/debug shell in v1. It intentionally reserves
 the space and persistence shape for future Canvas/Artifacts-style outputs

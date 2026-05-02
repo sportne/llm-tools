@@ -4,40 +4,37 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
-from llm_tools.llm_providers import ProviderModeStrategy
+from llm_tools.llm_providers import ResponseModeStrategy
 from llm_tools.tool_api import SideEffectClass
 from llm_tools.tool_api.redaction import RedactionConfig
 
 
-class ProviderPreset(str, Enum):  # noqa: UP042
-    """OpenAI-compatible provider presets available in app surfaces."""
+class ProviderProtocol(str, Enum):  # noqa: UP042
+    """Model-service API protocols available in app surfaces."""
 
-    OPENAI = "openai"
-    OLLAMA = "ollama"
-    CUSTOM_OPENAI_COMPATIBLE = "custom_openai_compatible"
+    OPENAI_API = "openai_api"
 
 
-def _populate_provider_mode_default(data: object) -> object:
-    if not isinstance(data, dict):
-        return data
-    payload = dict(data)
-    if "provider_mode_strategy" in payload:
-        return payload
-    provider = payload.get("provider", ProviderPreset.OLLAMA)
-    provider_value = (
-        provider.value if isinstance(provider, ProviderPreset) else str(provider)
-    )
-    if provider_value == ProviderPreset.CUSTOM_OPENAI_COMPATIBLE.value:
-        payload["provider_mode_strategy"] = ProviderModeStrategy.JSON
-    return payload
+class ProviderConnectionConfig(BaseModel):
+    """Non-secret endpoint and auth settings for one provider connection."""
+
+    api_base_url: str | None = None
+    requires_bearer_token: bool = True
+
+    @field_validator("api_base_url")
+    @classmethod
+    def validate_api_base_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip().rstrip("/")
+        return cleaned or None
 
 
 class ChatCredentialPromptMetadata(BaseModel):
     """UI-safe credential prompt policy without any persisted secret value."""
 
-    api_key_env_var: str = "OPENAI_API_KEY"
     prompt_for_api_key_if_missing: bool = True
     expects_api_key: bool = False
     secret_kind: str = "api_key"  # noqa: S105
@@ -49,39 +46,24 @@ class ChatCredentialPromptMetadata(BaseModel):
 class ChatLLMConfig(BaseModel):
     """Standalone chat runtime configuration."""
 
-    provider: ProviderPreset = ProviderPreset.OLLAMA
-    provider_mode_strategy: ProviderModeStrategy = ProviderModeStrategy.AUTO
-    model_name: str = "gemma4:26b"
+    provider_protocol: ProviderProtocol = ProviderProtocol.OPENAI_API
+    provider_connection: ProviderConnectionConfig = Field(
+        default_factory=ProviderConnectionConfig
+    )
+    response_mode_strategy: ResponseModeStrategy = ResponseModeStrategy.AUTO
+    selected_model: str | None = None
     temperature: float = 0.1
-    api_base_url: str | None = "http://127.0.0.1:11434/v1"
     timeout_seconds: float = 60.0
-    api_key_env_var: str | None = None
     prompt_for_api_key_if_missing: bool = True
 
-    @model_validator(mode="before")
+    @field_validator("selected_model")
     @classmethod
-    def populate_provider_mode_default(
-        cls,
-        data: object,
-    ) -> object:
-        return _populate_provider_mode_default(data)
-
-    @field_validator("model_name")
-    @classmethod
-    def validate_non_empty_strings(cls, value: str) -> str:
-        cleaned = value.strip()
-        if not cleaned:
-            raise ValueError("chat LLM string settings must not be empty")
-        return cleaned
-
-    @field_validator("api_base_url")
-    @classmethod
-    def validate_optional_api_base_url(cls, value: str | None) -> str | None:
+    def validate_selected_model(cls, value: str | None) -> str | None:
         if value is None:
             return None
         cleaned = value.strip()
         if not cleaned:
-            raise ValueError("api_base_url must not be empty when provided")
+            return None
         return cleaned
 
     @field_validator("temperature")
@@ -100,14 +82,8 @@ class ChatLLMConfig(BaseModel):
 
     def credential_prompt_metadata(self) -> ChatCredentialPromptMetadata:
         """Return UI-safe credential-prompt metadata derived from config."""
-        env_var = self.api_key_env_var
-        expects_api_key = self.provider is not ProviderPreset.OLLAMA
-        if env_var is None and self.provider is ProviderPreset.OPENAI:
-            env_var = "OPENAI_API_KEY"
-        if env_var is None and self.provider is ProviderPreset.CUSTOM_OPENAI_COMPATIBLE:
-            env_var = "OPENAI_API_KEY"
+        expects_api_key = self.provider_connection.requires_bearer_token
         return ChatCredentialPromptMetadata(
-            api_key_env_var=env_var or "API key",
             prompt_for_api_key_if_missing=self.prompt_for_api_key_if_missing,
             expects_api_key=expects_api_key,
         )
@@ -144,6 +120,6 @@ __all__ = [
     "ChatLLMConfig",
     "ChatPolicyConfig",
     "ChatUIConfig",
-    "ProviderPreset",
-    "_populate_provider_mode_default",
+    "ProviderConnectionConfig",
+    "ProviderProtocol",
 ]

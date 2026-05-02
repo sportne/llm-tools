@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from llm_tools.llm_providers import ProviderModeStrategy
+from llm_tools.llm_providers import ResponseModeStrategy
 
 SCRIPT_DIR = Path(__file__).resolve().parents[2] / "scripts" / "e2e_assistant"
 if str(SCRIPT_DIR) not in sys.path:
@@ -29,21 +29,20 @@ def test_backend_matrix_config_supports_custom_openai_provider(tmp_path: Path) -
         workspace=tmp_path,
         output_dir=tmp_path / "out",
         ollama_base_url="http://127.0.0.1:11434/v1",
-        provider="custom_openai_compatible",
         api_base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-        api_key_env_var="GOOGLE_AI_STUDIO_API_KEY",
         model="gemini-3-flash-preview",
-        provider_mode=ProviderModeStrategy.JSON,
+        response_mode=ResponseModeStrategy.JSON,
         timeout_seconds=30.0,
+        requires_bearer_token=True,
     )
 
-    assert config.llm.provider.value == "custom_openai_compatible"
+    assert config.llm.provider_protocol.value == "openai_api"
     assert (
-        config.llm.api_base_url
-        == "https://generativelanguage.googleapis.com/v1beta/openai/"
+        config.llm.provider_connection.api_base_url
+        == "https://generativelanguage.googleapis.com/v1beta/openai"
     )
-    assert config.llm.api_key_env_var == "GOOGLE_AI_STUDIO_API_KEY"
-    assert config.llm.model_name == "gemini-3-flash-preview"
+    assert config.llm.provider_connection.requires_bearer_token is True
+    assert config.llm.selected_model == "gemini-3-flash-preview"
 
 
 def test_gemini_discovery_filters_and_normalizes_text_models() -> None:

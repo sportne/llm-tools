@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from os import getenv
 
-from llm_tools.apps.chat_config import ChatLLMConfig
-from llm_tools.llm_providers import OpenAICompatibleProvider, ProviderModeStrategy
+from llm_tools.apps.chat_config import ProviderConnectionConfig, ProviderProtocol
+from llm_tools.llm_providers import OpenAICompatibleProvider, ResponseModeStrategy
 from llm_tools.tool_api import SideEffectClass, ToolPolicy, ToolRegistry
 from llm_tools.tool_api.redaction import RedactionConfig
 from llm_tools.tools import (
@@ -17,55 +17,31 @@ from llm_tools.workflow_api import WorkflowExecutor
 
 
 def create_provider(
-    config: ChatLLMConfig,
     *,
+    provider_protocol: ProviderProtocol,
+    provider_connection: ProviderConnectionConfig,
     api_key: str | None,
-    model_name: str,
-    mode_strategy: ProviderModeStrategy | str | None = None,
+    selected_model: str,
+    response_mode_strategy: ResponseModeStrategy | str,
+    timeout_seconds: float,
     allow_env_api_key: bool = True,
 ) -> OpenAICompatibleProvider:
-    """Create a provider client for the configured OpenAI-compatible backend."""
-    request_params = {"timeout": config.timeout_seconds}
-    effective_mode_strategy = mode_strategy or config.provider_mode_strategy
-    if (
-        mode_strategy is None
-        and config.provider.value == "custom_openai_compatible"
-        and effective_mode_strategy is ProviderModeStrategy.AUTO
-    ):
-        effective_mode_strategy = ProviderModeStrategy.JSON
-    if config.provider.value == "openai":
-        return OpenAICompatibleProvider.for_openai(
-            model=model_name,
-            api_key=api_key
-            or (
-                getenv(config.api_key_env_var or "OPENAI_API_KEY")
-                if allow_env_api_key
-                else None
-            ),
-            mode_strategy=effective_mode_strategy,
-            default_request_params=request_params,
-        )
-    if config.provider.value == "ollama":
-        base_url = config.api_base_url or "http://127.0.0.1:11434/v1"
-        return OpenAICompatibleProvider.for_ollama(
-            model=model_name,
-            base_url=base_url,
-            api_key=api_key or "ollama",
-            mode_strategy=effective_mode_strategy,
-            default_request_params=request_params,
-        )
-    if not config.api_base_url:
-        raise ValueError("Custom OpenAI-compatible providers require api_base_url.")
+    """Create a provider client from execution-ready provider fields."""
+    if not selected_model.strip():
+        raise ValueError("Choose a model before running a model turn.")
+    if not provider_connection.api_base_url:
+        raise ValueError("Enter an API base URL before running a model turn.")
+    request_params = {"timeout": timeout_seconds}
+    if provider_protocol is not ProviderProtocol.OPENAI_API:  # pragma: no cover
+        raise ValueError(f"Unsupported provider protocol: {provider_protocol.value}")
+    effective_api_key = api_key
+    if effective_api_key is None and allow_env_api_key:
+        effective_api_key = getenv("OPENAI_API_KEY")
     return OpenAICompatibleProvider(
-        model=model_name,
-        base_url=config.api_base_url,
-        api_key=api_key
-        or (
-            getenv(config.api_key_env_var or "OPENAI_API_KEY")
-            if allow_env_api_key
-            else None
-        ),
-        mode_strategy=effective_mode_strategy,
+        model=selected_model,
+        base_url=provider_connection.api_base_url,
+        api_key=effective_api_key,
+        response_mode_strategy=response_mode_strategy,
         default_request_params=request_params,
     )
 
