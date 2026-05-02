@@ -120,6 +120,15 @@ The cleanest one-turn boundary is:
 
 That boundary is what `harness_api` builds on.
 
+The next intended deepening inside this layer is a shared Model-Turn Protocol
+module. That module should take caller-built provider messages, prepared model
+interaction metadata, and a final-response model, then produce one parsed model
+turn while hiding staged schemas, prompt-emitted tool calls, fallback, repair
+retries, provider capability detection, optional protection, and redacted
+model-turn events. Assistant Chat and Deep Task should remain responsible for
+their own context projection, but should not each implement the same
+model-facing protocol logic.
+
 The package also exports interactive session state and protection helpers, but
 the public modules are now split differently than earlier audit docs implied:
 
@@ -168,6 +177,15 @@ Current app surfaces are:
 These modules may compose all lower layers, but they should not accidentally
 become the main public extension surface for library consumers.
 
+The next intended deepening inside this layer is Assistant Runtime Assembly.
+That module should return an app-layer runtime bundle shared by Assistant Chat
+and Deep Task. The bundle owns provider creation, registry and workflow
+executor construction, admin feature filtering, exposed tool calculation,
+policy, session environment overrides, system prompts, and protection setup.
+The assistant controller should keep product flow control such as session
+selection, queued events, transcript updates, approval UI state, persistence
+timing, and result-to-UI mapping.
+
 ## Important boundaries
 
 ### Workflow vs harness
@@ -208,6 +226,7 @@ Current hotspots are implementation modules, not the thin public facades:
 - `src/llm_tools/apps/assistant_runtime.py`
 - `src/llm_tools/harness_api/executor_loop.py`
 - `src/llm_tools/workflow_api/chat_runner.py`
+- `src/llm_tools/apps/assistant_research_provider.py`
 - `src/llm_tools/tool_api/runtime.py`
 - `src/llm_tools/tools/filesystem/_content.py`
 

@@ -1,6 +1,6 @@
 # llm-tools/.codex/config.toml
 
-approval_policy = "never"
+#approval_policy = "never"
 [agents]
 max_threads = 20
 max_depth = 2
