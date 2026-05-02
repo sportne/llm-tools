@@ -695,16 +695,6 @@ def test_chat_session_runner_helper_error_branches(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="run_structured"):
         native_runner._structured_provider()
 
-    prompt_step = native_runner._run_prompt_tool_step(
-        round_index=1,
-        stage_name="decision",
-        messages=[],
-        parser=lambda text: text,
-        repair_context={},
-    )
-    with pytest.raises(RuntimeError, match="run_text"):
-        next(prompt_step)
-
     staged_runner = run_interactive_chat_session_turn(
         user_message="Answer plainly.",
         session_state=ChatSessionState(),

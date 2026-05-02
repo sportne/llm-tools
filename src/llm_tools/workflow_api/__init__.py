@@ -23,6 +23,17 @@ from llm_tools.workflow_api.chat_session import (
     run_interactive_chat_session_turn,
 )
 from llm_tools.workflow_api.executor import PreparedModelInteraction, WorkflowExecutor
+from llm_tools.workflow_api.model_turn_protocol import (
+    ModelTurnProtectionContext,
+    ModelTurnProtocolEvent,
+    ModelTurnProtocolEventKind,
+    ModelTurnProtocolKind,
+    ModelTurnProtocolMode,
+    ModelTurnProtocolObserver,
+    ModelTurnProtocolProvider,
+    ModelTurnProtocolRequest,
+    ModelTurnProtocolRunner,
+)
 from llm_tools.workflow_api.models import (
     ApprovalRequest,
     WorkflowInvocationOutcome,
@@ -91,6 +102,15 @@ __all__ = [
     "ChatSessionTurnRecord",
     "ChatSessionTurnRunner",
     "ModelTurnProvider",
+    "ModelTurnProtocolEvent",
+    "ModelTurnProtocolEventKind",
+    "ModelTurnProtocolKind",
+    "ModelTurnProtocolMode",
+    "ModelTurnProtocolObserver",
+    "ModelTurnProtocolProvider",
+    "ModelTurnProtocolRequest",
+    "ModelTurnProtocolRunner",
+    "ModelTurnProtectionContext",
     "ChatTokenUsage",
     "ChatWorkflowResultEvent",
     "ChatWorkflowStatusEvent",

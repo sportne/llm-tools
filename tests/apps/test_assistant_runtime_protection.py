@@ -36,6 +36,7 @@ from llm_tools.tool_api import (
     ToolResult,
 )
 from llm_tools.workflow_api import (
+    ModelTurnProtocolRunner,
     PromptProtectionDecision,
     ProtectionAction,
     ProtectionConfig,
@@ -827,6 +828,30 @@ def test_direct_research_provider_repairs_invalid_sync_stage_and_exposes_helpers
         is False
     )
     assert (
+        provider_module.AssistantHarnessTurnProvider(
+            provider=object(),  # type: ignore[arg-type]
+            temperature=0.1,
+            system_prompt="research-system",
+        ).uses_staged_schema_protocol()
+        is False
+    )
+    assert (
+        provider_module.AssistantHarnessTurnProvider(
+            provider=object(),  # type: ignore[arg-type]
+            temperature=0.1,
+            system_prompt="research-system",
+        ).uses_prompt_tool_protocol()
+        is False
+    )
+    assert (
+        provider_module.AssistantHarnessTurnProvider(
+            provider=provider,  # type: ignore[arg-type]
+            temperature=0.1,
+            system_prompt="research-system",
+        ).uses_staged_schema_protocol()
+        is True
+    )
+    assert (
         provider_module.AssistantHarnessTurnProvider._validation_error_summary(
             RuntimeError("")
         )
@@ -1169,10 +1194,7 @@ def test_direct_research_provider_prompt_tools_category_async_flow(
 
     monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "category")
     monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_CATEGORY_THRESHOLD", "bad")
-    assert (
-        provider_module.AssistantHarnessTurnProvider._prompt_tool_category_threshold()
-        == 7
-    )
+    assert ModelTurnProtocolRunner._prompt_tool_category_threshold() == 7
     monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_CATEGORY_THRESHOLD", "1")
     provider = _PromptToolProvider(
         [
