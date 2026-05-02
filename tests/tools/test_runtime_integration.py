@@ -21,7 +21,6 @@ from llm_tools.tools.filesystem import register_filesystem_tools
 from llm_tools.tools.git import register_git_tools
 from llm_tools.tools.git import tools as git_tools
 from llm_tools.tools.gitlab import register_gitlab_tools
-from llm_tools.tools.text import register_text_tools
 
 
 def _runtime(
@@ -49,7 +48,6 @@ def _runtime(
 def test_runtime_executes_filesystem_and_text_builtins(tmp_path: str) -> None:
     registry = ToolRegistry()
     register_filesystem_tools(registry)
-    register_text_tools(registry)
     runtime = _runtime(registry, allow_write=True)
     context = ToolContext(invocation_id="inv-1", workspace=str(tmp_path))
 

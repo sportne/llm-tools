@@ -1,4 +1,4 @@
-"""Focused coverage tests for shared filesystem and text helper modules."""
+"""Focused coverage tests for shared filesystem helper modules."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 import llm_tools.tools.filesystem._ops as filesystem_ops_module
-import llm_tools.tools.text._ops as text_ops_module
+import llm_tools.tools.filesystem.search_text_ops as text_ops_module
 from llm_tools.tools.filesystem._content import (
     LoadedReadableContent,
     convert_with_markitdown,
@@ -42,7 +42,10 @@ from llm_tools.tools.filesystem.models import (
     SourceFilters,
     ToolLimits,
 )
-from llm_tools.tools.text._ops import build_text_search_match, search_text_impl
+from llm_tools.tools.filesystem.search_text_ops import (
+    build_text_search_match,
+    search_text_impl,
+)
 
 
 def test_helper_models_cover_validation_errors() -> None:

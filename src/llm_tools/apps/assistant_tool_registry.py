@@ -10,7 +10,6 @@ from llm_tools.tools import (
     register_filesystem_tools,
     register_git_tools,
     register_gitlab_tools,
-    register_text_tools,
 )
 from llm_tools.workflow_api import WorkflowExecutor
 
@@ -20,7 +19,6 @@ def build_assistant_registry() -> ToolRegistry:
     registry = ToolRegistry()
     register_filesystem_tools(registry)
     register_git_tools(registry)
-    register_text_tools(registry)
     register_atlassian_tools(registry)
     register_gitlab_tools(registry)
     return registry

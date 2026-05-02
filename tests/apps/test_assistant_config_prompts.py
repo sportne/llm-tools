@@ -18,14 +18,13 @@ from llm_tools.apps.assistant_prompts import (
     build_research_system_prompt,
 )
 from llm_tools.tool_api import ToolRegistry
-from llm_tools.tools import register_filesystem_tools, register_text_tools
+from llm_tools.tools import register_filesystem_tools
 from llm_tools.tools.filesystem import ToolLimits
 
 
 def _registry() -> ToolRegistry:
     registry = ToolRegistry()
     register_filesystem_tools(registry)
-    register_text_tools(registry)
     return registry
 
 

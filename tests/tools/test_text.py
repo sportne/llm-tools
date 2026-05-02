@@ -8,7 +8,7 @@ from llm_tools.tool_api import (
     ToolRegistry,
     ToolRuntime,
 )
-from llm_tools.tools.text import SearchTextTool
+from llm_tools.tools.filesystem import SearchTextTool
 
 
 def _runtime() -> ToolRuntime:

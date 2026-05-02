@@ -38,7 +38,7 @@ src/llm_tools/
   tool_api/       typed tool substrate, runtime, policy, redaction
   llm_adapters/   model-output normalization and prompt-tool protocols
   llm_providers/  OpenAI-compatible provider transport
-  tools/          bundled local, Git, text, GitLab, and Atlassian tools
+  tools/          bundled filesystem, Git, GitLab, and Atlassian tools
   workflow_api/   one-turn execution, interactive chat, protection
   harness_api/    durable orchestration, replay, approvals, task state
   apps/           Assistant app, harness CLI, shared app runtime helpers

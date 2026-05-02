@@ -48,10 +48,10 @@ surfaces described in `README.md` and the design docs.
 
 ### [ ] Modularize bundled integration surfaces
 
-- [ ] Finish the Atlassian split so product-specific implementation stops
-  concentrating in `src/llm_tools/tools/atlassian/tools.py`.
-- [ ] Revisit the `filesystem` and `text` tool boundary, which still shares the
-  same readable-content pipeline and cache path.
+- [x] Split built-in tool implementations into per-tool modules while keeping
+  family `tools.py` files as thin registration and re-export facades.
+- [x] Move text search into the filesystem package and register `search_text`
+  through `register_filesystem_tools`.
 - [ ] Review remote-integration wiring that is still embedded directly in
   `tool_api` runtime and execution helpers.
 

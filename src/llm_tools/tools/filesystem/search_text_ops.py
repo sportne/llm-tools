@@ -19,7 +19,10 @@ from llm_tools.tools.filesystem._paths import (
     should_prune_directory,
 )
 from llm_tools.tools.filesystem.models import SourceFilters, ToolLimits
-from llm_tools.tools.text.models import TextSearchMatch, TextSearchResult
+from llm_tools.tools.filesystem.search_text_models import (
+    TextSearchMatch,
+    TextSearchResult,
+)
 
 
 def build_text_search_match(

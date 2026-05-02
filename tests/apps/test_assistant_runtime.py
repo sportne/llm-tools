@@ -173,7 +173,7 @@ def test_build_tool_group_capability_summaries_count_statuses_and_approval() -> 
         "plain_text": ToolSpec(
             name="plain_text",
             description="Text helper",
-            tags=["text"],
+            tags=["filesystem", "text"],
             side_effects=SideEffectClass.NONE,
         ),
     }
@@ -191,18 +191,12 @@ def test_build_tool_group_capability_summaries_count_statuses_and_approval() -> 
     summaries = build_tool_group_capability_summaries(capabilities)
 
     local_files = summaries["Local Files"]
-    assert local_files.total_tools == 2
+    assert local_files.total_tools == 3
     assert local_files.enabled_tools == 2
     assert local_files.exposed_tools == 1
     assert local_files.available_tools == 1
-    assert local_files.disabled_tools == 0
+    assert local_files.disabled_tools == 1
     assert local_files.missing_workspace_tools == 1
     assert local_files.missing_credentials_tools == 0
     assert local_files.permission_blocked_tools == 0
     assert local_files.approval_gated_tools == 1
-
-    text = summaries["Text"]
-    assert text.total_tools == 1
-    assert text.enabled_tools == 0
-    assert text.disabled_tools == 1
-    assert text.approval_gated_tools == 0

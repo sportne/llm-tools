@@ -29,7 +29,7 @@ from llm_tools.tools.filesystem._ops import (
     resolve_search_file_or_directory,
 )
 from llm_tools.tools.filesystem.models import SourceFilters, ToolLimits
-from llm_tools.tools.text._ops import search_text_impl
+from llm_tools.tools.filesystem.search_text_ops import search_text_impl
 
 
 def test_content_helpers_cover_text_binary_markitdown_and_limits(

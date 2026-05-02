@@ -21,7 +21,7 @@ from llm_tools.tool_api import (
     ToolResult,
 )
 from llm_tools.tool_api.redaction import RedactionConfig
-from llm_tools.tools import register_filesystem_tools, register_text_tools
+from llm_tools.tools import register_filesystem_tools, register_git_tools
 from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import (
     ChatContextSummary,
@@ -225,7 +225,6 @@ class _CallableJsonStrategyProvider(_FakeStagedProvider):
 def _executor() -> WorkflowExecutor:
     registry = ToolRegistry()
     register_filesystem_tools(registry)
-    register_text_tools(registry)
     return WorkflowExecutor(
         registry=registry,
         policy=ToolPolicy(
@@ -791,7 +790,7 @@ def test_chat_session_runner_executes_prompt_tool_rounds(tmp_path: Path) -> None
                 "BEGIN_ARG: query\nneedle\nEND_ARG\n"
                 "```"
             ),
-            "```decision\nMODE: finalize\n```",
+            "```category\nMODE: finalize\n```",
             "```final\nANSWER:\nIt is defined in src/app.py.\n```",
         ]
     )
@@ -839,7 +838,6 @@ def test_chat_session_runner_prompt_tool_path_honors_approval_gates(
 ) -> None:
     registry = ToolRegistry()
     register_filesystem_tools(registry)
-    register_text_tools(registry)
     executor = WorkflowExecutor(
         registry=registry,
         policy=ToolPolicy(
@@ -859,7 +857,7 @@ def test_chat_session_runner_prompt_tool_path_honors_approval_gates(
                 "BEGIN_ARG: query\nneedle\nEND_ARG\n"
                 "```"
             ),
-            "```decision\nMODE: finalize\n```",
+            "```category\nMODE: finalize\n```",
             "```final\nANSWER:\nIt is defined in src/app.py.\n```",
         ]
     )
@@ -906,7 +904,7 @@ def test_chat_session_runner_prompt_tool_category_strategy(
     (tmp_path / "src" / "app.py").write_text("needle = 1\n", encoding="utf-8")
     provider = _FakePromptToolProvider(
         [
-            "```category\nMODE: category\nCATEGORY: text\n```",
+            "```category\nMODE: category\nCATEGORY: filesystem\n```",
             (
                 "```tool\n"
                 "TOOL_NAME: search_text\n"
@@ -918,10 +916,19 @@ def test_chat_session_runner_prompt_tool_category_strategy(
             "```final\nANSWER:\nIt is defined in src/app.py.\n```",
         ]
     )
+    registry = ToolRegistry()
+    register_filesystem_tools(registry)
+    register_git_tools(registry)
+    executor = WorkflowExecutor(
+        registry=registry,
+        policy=ToolPolicy(
+            allowed_side_effects={SideEffectClass.NONE, SideEffectClass.LOCAL_READ}
+        ),
+    )
     runner = run_interactive_chat_session_turn(
         user_message="Where is needle defined?",
         session_state=ChatSessionState(),
-        executor=_executor(),
+        executor=executor,
         provider=provider,
         system_prompt="You are helpful.",
         base_context=_context(tmp_path),
@@ -935,10 +942,10 @@ def test_chat_session_runner_prompt_tool_category_strategy(
 
     assert len(provider.calls) == 4
     assert "Available categories:" in provider.calls[0][-1]["content"]
-    assert "Current tool category: text" in provider.calls[1][-1]["content"]
+    assert "Current tool category: filesystem" in provider.calls[1][-1]["content"]
     assert any(
         isinstance(event, ChatWorkflowStatusEvent)
-        and event.status == "using text tools"
+        and event.status == "using filesystem tools"
         for event in events
     )
     result_event = events[-1]
@@ -1682,7 +1689,6 @@ def test_chat_session_runner_pauses_for_approval_and_resumes_same_turn(
 ) -> None:
     registry = ToolRegistry()
     register_filesystem_tools(registry)
-    register_text_tools(registry)
     executor = WorkflowExecutor(
         registry=registry,
         policy=ToolPolicy(
@@ -1739,7 +1745,6 @@ def test_chat_session_runner_pauses_for_approval_and_resumes_same_turn(
 def test_chat_session_runner_denied_approval_continues_turn(tmp_path: Path) -> None:
     registry = ToolRegistry()
     register_filesystem_tools(registry)
-    register_text_tools(registry)
     executor = WorkflowExecutor(
         registry=registry,
         policy=ToolPolicy(
@@ -1988,7 +1993,6 @@ def test_chat_session_runner_cancelled_while_waiting_for_approval(
 ) -> None:
     registry = ToolRegistry()
     register_filesystem_tools(registry)
-    register_text_tools(registry)
     executor = WorkflowExecutor(
         registry=registry,
         policy=ToolPolicy(

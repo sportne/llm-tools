@@ -407,7 +407,7 @@ def test_category_grouping_and_decision_parsing() -> None:
         ToolSpec(
             name="search_text",
             description="Search text.",
-            tags=["text", "search", "read"],
+            tags=["filesystem", "search", "read", "text"],
         ),
         ToolSpec(name="custom", description="Custom."),
     ]
@@ -415,23 +415,25 @@ def test_category_grouping_and_decision_parsing() -> None:
     categories = adapter.derive_tool_categories(specs)
     assert [category.name for category in categories] == [
         "filesystem",
-        "text",
         "other",
     ]
-    assert [spec.name for spec in adapter.category_tool_specs(categories, "text")] == [
-        "search_text"
+    assert [
+        spec.name for spec in adapter.category_tool_specs(categories, "filesystem")
+    ] == [
+        "read_file",
+        "search_text",
     ]
 
     parsed = adapter.parse_category_decision(
-        "```category\nMODE: category\nCATEGORY: text\n```",
+        "```category\nMODE: category\nCATEGORY: filesystem\n```",
         categories=categories,
     )
     mode_category = adapter.parse_category_decision(
-        "```category\nMODE: text\nCATEGORY: text\n```",
+        "```category\nMODE: filesystem\nCATEGORY: filesystem\n```",
         categories=categories,
     )
     category_fence = adapter.parse_category_decision(
-        "```text\nMODE: text\nCATEGORY: text\n```",
+        "```filesystem\nMODE: filesystem\nCATEGORY: filesystem\n```",
         categories=categories,
     )
     final = adapter.parse_category_decision(
@@ -439,11 +441,11 @@ def test_category_grouping_and_decision_parsing() -> None:
         categories=categories,
     )
     assert parsed.mode == "category"
-    assert parsed.category == "text"
+    assert parsed.category == "filesystem"
     assert mode_category.mode == "category"
-    assert mode_category.category == "text"
+    assert mode_category.category == "filesystem"
     assert category_fence.mode == "category"
-    assert category_fence.category == "text"
+    assert category_fence.category == "filesystem"
     assert final.mode == "finalize"
     with pytest.raises(PromptToolProtocolError, match="unknown category"):
         adapter.parse_category_decision(

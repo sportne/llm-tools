@@ -131,14 +131,13 @@ The bundled built-in tool families are:
 
 - filesystem
 - git
-- text
 - GitLab
 - Atlassian
 
-The assistant's local working set is primarily filesystem, git, and text.
+The assistant's local working set is primarily filesystem and git.
 GitLab and Atlassian are intentionally bundled but secondary integrations.
 Document-conversion backends such as MarkItDown and MPXJ are part of the
-filesystem and text read pipeline rather than first-class tool families.
+filesystem read/search pipeline rather than first-class tool families.
 
 ## Current architectural constraints
 

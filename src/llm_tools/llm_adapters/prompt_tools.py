@@ -50,10 +50,9 @@ class PromptToolCategory:
 class PromptToolAdapter:
     """Format and parse the fenced prompt-tool protocol."""
 
-    CATEGORY_ORDER = ("filesystem", "text", "git", "gitlab", "atlassian", "other")
+    CATEGORY_ORDER = ("filesystem", "git", "gitlab", "atlassian", "other")
     CATEGORY_DESCRIPTIONS = {
-        "filesystem": "Read, list, inspect, or write local workspace files.",
-        "text": "Search readable local file contents for literal text.",
+        "filesystem": ("Read, list, inspect, write, or search local workspace files."),
         "git": "Inspect local git status, diffs, and history.",
         "gitlab": "Search and read GitLab project data.",
         "atlassian": "Search and read Jira, Confluence, and Bitbucket data.",

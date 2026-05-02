@@ -10,13 +10,12 @@ from llm_tools.tool_api import (
     ToolRegistry,
     ToolRuntime,
 )
-from llm_tools.tools import register_filesystem_tools, register_text_tools
+from llm_tools.tools import register_filesystem_tools
 
 
 def _runtime(tmp_path: Path) -> tuple[ToolRuntime, ToolContext]:
     registry = ToolRegistry()
     register_filesystem_tools(registry)
-    register_text_tools(registry)
     runtime = ToolRuntime(registry)
     context = ToolContext(
         invocation_id="chat-test",

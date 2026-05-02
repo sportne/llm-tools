@@ -128,7 +128,6 @@ def build_builtin_registry() -> Any:
         register_filesystem_tools,
         register_git_tools,
         register_gitlab_tools,
-        register_text_tools,
     )
 
     registry = ToolRegistry()
@@ -136,7 +135,6 @@ def build_builtin_registry() -> Any:
     register_git_tools(registry)
     register_gitlab_tools(registry)
     register_atlassian_tools(registry)
-    register_text_tools(registry)
     return registry
 
 

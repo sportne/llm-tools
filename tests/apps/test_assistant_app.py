@@ -16,6 +16,7 @@ from llm_tools.apps.assistant_app.app import (
     NICEGUI_APPROVAL_LABELS,
     NICEGUI_APPROVAL_OPTIONS,
     NICEGUI_PROVIDER_OPTIONS,
+    AssistantUIRenderer,
     _account_menu_action_labels,
     _account_menu_identity_labels,
     _available_windows_drive_roots,
@@ -49,14 +50,18 @@ from llm_tools.apps.assistant_app.app import (
     _provider_api_key_env_var,
     _provider_base_url_help_text,
     _provider_endpoint_menu_rows,
+    _referenced_document_text,
     _runtime_summary_parts,
     _runtime_summary_text,
     _runtime_with_settings_values,
+    _selected_tool_chip_classes,
     _selected_tool_groups,
+    _selected_tool_icon,
     _session_token_estimate_text,
     _set_composer_draft,
     _settings_section_default_open,
     _sidebar_container_classes,
+    _tool_capability_tooltip,
     _workbench_container_classes,
     build_assistant_ui,
     build_parser,
@@ -609,6 +614,101 @@ def test_composer_runtime_helpers() -> None:
         SideEffectClass.EXTERNAL_READ,
         SideEffectClass.EXTERNAL_WRITE,
     ]
+
+
+def test_ui_helper_edge_branches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback_usage = ChatTokenUsage(input_tokens=10, output_tokens=5)
+    assert _session_token_estimate_text(fallback_usage) == "~15 tokens"
+
+    composer_state = {"text": "old"}
+    _set_composer_draft("new", composer_state, None)
+    assert composer_state == {"text": "new"}
+
+    for parser, args in (
+        (_parse_positive_int_setting, ("Count", "abc")),
+        (_parse_positive_float_setting, ("Timeout", "abc")),
+        (_parse_temperature_setting, ("abc",)),
+    ):
+        with pytest.raises(ValueError):
+            parser(*args)
+
+    assert _format_transcript_time("2026-04-26T10:05:02+00:00")
+    assert _parse_information_security_category_catalog(
+        "\n: alias\nMINOR: low | desc | ex\nMINOR: duplicate\n"
+    ) == [
+        ProtectionCategory(
+            label="MINOR",
+            aliases=["low"],
+            description="desc",
+            examples=["ex"],
+        )
+    ]
+    assert _default_protection_corrections_path(" ") == ""
+    assert (
+        _protection_corpus_readiness_text(ProtectionConfig(enabled=False))
+        == "Protection is disabled."
+    )
+    assert "Choose a corpus directory" in _protection_corpus_readiness_text(
+        ProtectionConfig(
+            enabled=True,
+            allowed_sensitivity_labels=["TRIVIAL"],
+        )
+    )
+    empty_corpus = tmp_path / "empty-corpus"
+    empty_corpus.mkdir()
+    assert (
+        _protection_corpus_readiness_text(
+            ProtectionConfig(
+                enabled=True,
+                document_paths=[str(empty_corpus)],
+                allowed_sensitivity_labels=["TRIVIAL"],
+            )
+        )
+        == "Not ready: no readable protection documents were found."
+    )
+
+    prompt = ProtectionPendingPrompt(
+        original_user_message="hello",
+        reasoning="test",
+        referenced_document_ids=[],
+    )
+    assert _referenced_document_text(prompt) == "No referenced document IDs."
+    assert (
+        _referenced_document_text(
+            prompt.model_copy(update={"referenced_document_ids": ["a", "b"]})
+        )
+        == "a, b"
+    )
+
+    blocked = AssistantToolCapability(
+        tool_name="search_jira",
+        group="Jira",
+        enabled=True,
+        exposed_to_model=False,
+        status="missing_credentials",
+        detail="Missing credentials",
+        required_secrets=["JIRA_API_TOKEN"],
+        approval_required=True,
+        approval_gate={"required": True, "side_effects": SideEffectClass.EXTERNAL_READ},
+        side_effects=SideEffectClass.EXTERNAL_READ,
+    )
+    assert "Missing credentials" in _tool_capability_tooltip(blocked)
+    assert "Approval required" in _tool_capability_tooltip(blocked)
+    assert "JIRA_API_TOKEN" in _tool_capability_tooltip(blocked)
+    assert _selected_tool_chip_classes(blocked).endswith("llmt-tool-chip-blocked")
+    assert _selected_tool_icon(blocked) == "block"
+
+    rendered: list[object] = []
+    controller = object()
+    monkeypatch.setattr(
+        nicegui_app_module._ui_module,
+        "build_assistant_ui",
+        lambda value: rendered.append(value),
+    )
+    AssistantUIRenderer(controller).build()  # type: ignore[arg-type]
+    assert rendered == [controller]
 
 
 def test_context_capacity_meter_state() -> None:

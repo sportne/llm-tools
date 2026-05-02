@@ -5,13 +5,12 @@ from __future__ import annotations
 from tempfile import TemporaryDirectory
 
 from llm_tools.tool_api import SideEffectClass, ToolContext, ToolInvocationRequest, ToolPolicy, ToolRegistry, ToolRuntime
-from llm_tools.tools import register_filesystem_tools, register_text_tools
+from llm_tools.tools import register_filesystem_tools
 
 
 def main() -> None:
     registry = ToolRegistry()
     register_filesystem_tools(registry)
-    register_text_tools(registry)
 
     runtime = ToolRuntime(
         registry,

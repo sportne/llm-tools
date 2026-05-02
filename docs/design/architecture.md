@@ -97,11 +97,10 @@ The current families are:
 
 - filesystem
 - git
-- text
 - GitLab
 - Atlassian
 
-The local assistant core uses filesystem, git, and text most directly. GitLab
+The local assistant core uses filesystem and git most directly. GitLab
 and Atlassian are intentionally bundled remote integrations.
 
 ### `workflow_api`
@@ -203,12 +202,13 @@ concerns without pretending the assistant surface is outside repo scope.
 
 Current hotspots are implementation modules, not the thin public facades:
 
-- `src/llm_tools/apps/assistant_app/app.py`
+- `src/llm_tools/apps/assistant_app/ui.py`
+- `src/llm_tools/apps/assistant_app/controller_core.py`
+- `src/llm_tools/apps/assistant_app/store_sqlite.py`
 - `src/llm_tools/apps/assistant_runtime.py`
 - `src/llm_tools/harness_api/executor_loop.py`
 - `src/llm_tools/workflow_api/chat_runner.py`
 - `src/llm_tools/tool_api/runtime.py`
-- `src/llm_tools/tools/atlassian/tools.py`
 - `src/llm_tools/tools/filesystem/_content.py`
 
 These are concentration and modularization problems. They are not, by

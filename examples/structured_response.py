@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from llm_tools.llm_adapters import ActionEnvelopeAdapter
 from llm_tools.llm_providers import OpenAICompatibleProvider
 from llm_tools.tool_api import SideEffectClass, ToolContext, ToolPolicy, ToolRegistry
-from llm_tools.tools import register_filesystem_tools, register_text_tools
+from llm_tools.tools import register_filesystem_tools
 from llm_tools.workflow_api import WorkflowExecutor
 
 
@@ -32,7 +32,6 @@ class _FakeClient:
 def main() -> None:
     registry = ToolRegistry()
     register_filesystem_tools(registry)
-    register_text_tools(registry)
     adapter = ActionEnvelopeAdapter()
     executor = WorkflowExecutor(
         registry,

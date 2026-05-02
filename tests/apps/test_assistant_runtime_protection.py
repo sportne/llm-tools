@@ -1090,7 +1090,7 @@ def test_direct_research_provider_prompt_tools_category_flow(
     monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_CATEGORY_THRESHOLD", "1")
     provider = _PromptToolProvider(
         [
-            "```category\nMODE: category\nCATEGORY: text\n```",
+            "```category\nMODE: category\nCATEGORY: filesystem\n```",
             (
                 "```tool\n"
                 "TOOL_NAME: search_text\n"
@@ -1112,7 +1112,7 @@ def test_direct_research_provider_prompt_tools_category_flow(
         context=ToolContext(invocation_id="research-category", metadata={}),
         adapter=ActionEnvelopeAdapter(),
         prepared_interaction=_prepared_research_interaction_for_tools(
-            ["read_file", "search_text"]
+            ["read_file", "search_text", "run_git_status"]
         ),
     )
 
@@ -1123,7 +1123,9 @@ def test_direct_research_provider_prompt_tools_category_flow(
         "include_hidden": False,
     }
     assert "Available categories:" in provider.sync_messages[0][-1]["content"]
-    assert "Current tool category: text" in provider.sync_messages[1][-1]["content"]
+    assert (
+        "Current tool category: filesystem" in provider.sync_messages[1][-1]["content"]
+    )
 
 
 def test_direct_research_provider_prompt_tools_category_finalize(
@@ -1151,7 +1153,7 @@ def test_direct_research_provider_prompt_tools_category_finalize(
         context=ToolContext(invocation_id="research-category-final", metadata={}),
         adapter=ActionEnvelopeAdapter(),
         prepared_interaction=_prepared_research_interaction_for_tools(
-            ["read_file", "search_text"]
+            ["read_file", "search_text", "run_git_status"]
         ),
     )
 
@@ -1191,7 +1193,7 @@ def test_direct_research_provider_prompt_tools_category_async_flow(
             context=ToolContext(invocation_id="research-category-async", metadata={}),
             adapter=ActionEnvelopeAdapter(),
             prepared_interaction=_prepared_research_interaction_for_tools(
-                ["read_file", "search_text"]
+                ["read_file", "search_text", "run_git_status"]
             ),
         )
     )
@@ -1230,7 +1232,7 @@ def test_direct_research_provider_prompt_tools_category_async_finalize(
             ),
             adapter=ActionEnvelopeAdapter(),
             prepared_interaction=_prepared_research_interaction_for_tools(
-                ["read_file", "search_text"]
+                ["read_file", "search_text", "run_git_status"]
             ),
         )
     )

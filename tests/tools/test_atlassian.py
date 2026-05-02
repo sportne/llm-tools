@@ -31,6 +31,19 @@ from llm_tools.tools.atlassian import (
 from llm_tools.tools.atlassian import tools as atlassian_tools
 
 
+def test_product_facades_reexport_tools() -> None:
+    from llm_tools.tools.atlassian import bitbucket, confluence, jira
+
+    assert bitbucket.SearchBitbucketCodeTool is SearchBitbucketCodeTool
+    assert bitbucket.ReadBitbucketFileTool is ReadBitbucketFileTool
+    assert bitbucket.ReadBitbucketPullRequestTool is ReadBitbucketPullRequestTool
+    assert confluence.SearchConfluenceTool is SearchConfluenceTool
+    assert confluence.ReadConfluencePageTool is ReadConfluencePageTool
+    assert confluence.ReadConfluenceAttachmentTool is ReadConfluenceAttachmentTool
+    assert jira.SearchJiraTool is SearchJiraTool
+    assert jira.ReadJiraIssueTool is ReadJiraIssueTool
+
+
 def _atlassian_runtime() -> ToolRuntime:
     registry = ToolRegistry()
     registry.register(SearchJiraTool())

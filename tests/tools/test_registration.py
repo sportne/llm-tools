@@ -10,7 +10,6 @@ from llm_tools.tools import (
     register_filesystem_tools,
     register_git_tools,
     register_gitlab_tools,
-    register_text_tools,
 )
 
 
@@ -25,6 +24,7 @@ from llm_tools.tools import (
                 "list_directory",
                 "find_files",
                 "get_file_info",
+                "search_text",
             },
         ),
         (
@@ -52,10 +52,6 @@ from llm_tools.tools import (
                 "read_confluence_page",
             },
         ),
-        (
-            register_text_tools,
-            {"search_text"},
-        ),
     ],
 )
 def test_register_helpers_add_expected_tools(
@@ -75,7 +71,6 @@ def test_register_helpers_add_expected_tools(
         register_git_tools,
         register_gitlab_tools,
         register_atlassian_tools,
-        register_text_tools,
     ],
 )
 def test_register_helpers_reject_duplicate_registration(register_tools: object) -> None:

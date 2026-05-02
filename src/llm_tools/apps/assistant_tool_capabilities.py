@@ -129,8 +129,6 @@ def assistant_tool_group(spec: ToolSpec) -> str:
         return "Git"
     if "filesystem" in tags:
         return "Local Files"
-    if "text" in tags:
-        return "Text"
     return "Other"
 
 

@@ -12,7 +12,6 @@ from llm_tools.tools import (
     register_atlassian_tools,
     register_filesystem_tools,
     register_git_tools,
-    register_text_tools,
 )
 from llm_tools.workflow_api import WorkflowExecutor
 
@@ -76,7 +75,6 @@ def build_chat_registry() -> ToolRegistry:
     registry = ToolRegistry()
     register_filesystem_tools(registry)
     register_git_tools(registry)
-    register_text_tools(registry)
     register_atlassian_tools(registry)
     return registry
 

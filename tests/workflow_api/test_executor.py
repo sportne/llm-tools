@@ -29,7 +29,6 @@ from llm_tools.tools.atlassian import register_atlassian_tools
 from llm_tools.tools.filesystem import register_filesystem_tools
 from llm_tools.tools.git import register_git_tools
 from llm_tools.tools.git import tools as git_tools
-from llm_tools.tools.text import register_text_tools
 from llm_tools.workflow_api import WorkflowExecutor, WorkflowTurnResult
 from llm_tools.workflow_api.models import (
     ApprovalRequest,
@@ -271,7 +270,6 @@ def test_workflow_turn_result_rejects_non_ascending_outcome_indices() -> None:
 def test_workflow_executor_prepares_registered_tools_for_model_interaction() -> None:
     registry = ToolRegistry()
     register_filesystem_tools(registry)
-    register_text_tools(registry)
     executor = _executor(registry, allow_subprocess=True)
 
     prepared = executor.prepare_model_interaction(ActionEnvelopeAdapter())
@@ -305,6 +303,7 @@ def test_workflow_executor_export_filters_out_policy_denied_tools_with_context(
         "list_directory",
         "find_files",
         "get_file_info",
+        "search_text",
     ]
 
 
@@ -335,6 +334,7 @@ def test_workflow_executor_export_can_include_approval_required_tools(
         "list_directory",
         "find_files",
         "get_file_info",
+        "search_text",
     ]
 
 

@@ -34,7 +34,7 @@ from llm_tools.tools.filesystem._content import (
 )
 from llm_tools.tools.filesystem._ops import get_file_info_impl
 from llm_tools.tools.filesystem.models import SourceFilters, ToolLimits
-from llm_tools.tools.text._ops import search_text_impl
+from llm_tools.tools.filesystem.search_text_ops import search_text_impl
 
 
 def _read_file_runtime() -> ToolRuntime:
