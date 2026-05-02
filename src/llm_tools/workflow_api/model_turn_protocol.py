@@ -99,7 +99,7 @@ class StructuredModelTurnProtocolProvider(Protocol):
         self,
         *,
         messages: list[dict[str, Any]],
-        response_model: object,
+        response_model: type[BaseModel],
         request_params: dict[str, Any] | None = None,
     ) -> object:
         """Return one structured provider payload."""
@@ -112,7 +112,7 @@ class AsyncStructuredModelTurnProtocolProvider(Protocol):
         self,
         *,
         messages: list[dict[str, Any]],
-        response_model: object,
+        response_model: type[BaseModel],
         request_params: dict[str, Any] | None = None,
     ) -> object:
         """Return one async structured provider payload."""

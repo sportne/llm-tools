@@ -8,6 +8,7 @@ import pytest
 from pydantic import BaseModel
 
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
+from llm_tools.llm_providers import OpenAICompatibleProvider
 from llm_tools.tool_api import ProtectionProvenanceSnapshot, ToolSpec
 from llm_tools.workflow_api.executor import PreparedModelInteraction
 from llm_tools.workflow_api.model_turn_protocol import (
@@ -621,6 +622,30 @@ def test_protocol_provider_protocol_surface_is_split_by_capability() -> None:
     for protocol, expected_methods in capability_methods.items():
         for method_name in expected_methods:
             assert callable(getattr(protocol, method_name, None))
+
+
+def test_structured_capability_protocol_matches_canonical_provider() -> None:
+    assert callable(getattr(OpenAICompatibleProvider, "run_structured", None))
+    assert callable(getattr(OpenAICompatibleProvider, "run_structured_async", None))
+
+    structured_annotation = OpenAICompatibleProvider.run_structured.__annotations__
+    async_structured_annotation = (
+        OpenAICompatibleProvider.run_structured_async.__annotations__
+    )
+    protocol_annotation = (
+        StructuredModelTurnProtocolProvider.run_structured.__annotations__
+    )
+    async_protocol_annotation = (
+        AsyncStructuredModelTurnProtocolProvider.run_structured_async.__annotations__
+    )
+
+    assert (
+        structured_annotation["response_model"] == protocol_annotation["response_model"]
+    )
+    assert (
+        async_structured_annotation["response_model"]
+        == async_protocol_annotation["response_model"]
+    )
 
 
 def test_workflow_api_exports_model_turn_protocol_capability_types() -> None:
