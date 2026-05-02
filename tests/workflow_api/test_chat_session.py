@@ -371,6 +371,43 @@ def test_chat_session_runner_compacts_old_context_before_provider_call(
     )
 
 
+def test_chat_session_runner_emits_compaction_status_before_summary_call(
+    tmp_path: Path,
+) -> None:
+    old_turn = ChatSessionTurnRecord(
+        status="completed",
+        new_messages=[
+            ChatMessage(role="user", content="old question " * 30),
+            ChatMessage(role="assistant", content="old answer " * 30),
+        ],
+        final_response=ChatFinalResponse(answer="old answer"),
+    )
+    provider = _FakePromptToolProvider(
+        ["durable summary of old context", "```final\nANSWER:\nDone.\n```"]
+    )
+    runner = run_interactive_chat_session_turn(
+        user_message="Answer plainly.",
+        session_state=ChatSessionState(turns=[old_turn]),
+        executor=_empty_executor(),
+        provider=provider,
+        system_prompt="You are helpful.",
+        base_context=_context(tmp_path),
+        session_config=ChatSessionConfig(max_context_tokens=40),
+        tool_limits=ToolLimits(),
+        redaction_config=RedactionConfig(),
+        temperature=0.1,
+    )
+
+    iterator = iter(runner)
+    assert next(iterator) == ChatWorkflowStatusEvent(status="thinking")
+    assert next(iterator) == ChatWorkflowStatusEvent(status="compacting context")
+    assert provider.calls == []
+
+    events = list(iterator)
+    assert any(isinstance(event, ChatWorkflowResultEvent) for event in events)
+    assert provider.calls
+
+
 def test_chat_session_runner_retries_context_limit_after_compaction(
     tmp_path: Path,
 ) -> None:

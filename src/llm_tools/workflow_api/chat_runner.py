@@ -301,8 +301,9 @@ class ChatSessionTurnRunner:
         round_count = 0
         executed_tool_call_count = 0
         yield ChatWorkflowStatusEvent(status="thinking")
-        if self._compact_context_if_needed(force_all_prior=False):
+        if self._context_compaction_needed(force_all_prior=False):
             yield ChatWorkflowStatusEvent(status="compacting context")
+            self._compact_context_if_needed(force_all_prior=False)
         messages = self._messages_with_current_turn(new_messages)
 
         pending_prompt_event = self._maybe_handle_pending_protection_prompt(
@@ -581,7 +582,15 @@ class ChatSessionTurnRunner:
         if context_warning is not None and self._context_warning is None:
             self._context_warning = context_warning
 
-    def _compact_context_if_needed(self, *, force_all_prior: bool) -> bool:
+    def _context_compaction_needed(self, *, force_all_prior: bool) -> bool:
+        _target_turn_count, turns_to_compact = self._context_turns_to_compact(
+            force_all_prior=force_all_prior
+        )
+        return bool(turns_to_compact)
+
+    def _context_turns_to_compact(
+        self, *, force_all_prior: bool
+    ) -> tuple[int, list[ChatSessionTurnRecord]]:
         target_turn_count = (
             len(self._session_state.turns)
             if force_all_prior
@@ -593,10 +602,20 @@ class ChatSessionTurnRunner:
             else 0
         )
         if target_turn_count <= covered_turn_count:
-            return False
-        turns_to_compact = self._session_state.turns[
+            return target_turn_count, []
+        return target_turn_count, self._session_state.turns[
             covered_turn_count:target_turn_count
         ]
+
+    def _compact_context_if_needed(self, *, force_all_prior: bool) -> bool:
+        covered_turn_count = (
+            self._context_summary.covered_turn_count
+            if self._context_summary is not None
+            else 0
+        )
+        target_turn_count, turns_to_compact = self._context_turns_to_compact(
+            force_all_prior=force_all_prior
+        )
         if not turns_to_compact:
             return False
         now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
