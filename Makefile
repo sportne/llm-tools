@@ -4,7 +4,7 @@ PYTHON := $(VENV)/bin/python
 SRC_DIR := src
 TEST_DIR := tests
 PACKAGE := llm_tools
-PYTEST_FLAGS ?= -s
+PYTEST_FLAGS ?=
 
 .PHONY: \
 	help setup-venv install-dev \

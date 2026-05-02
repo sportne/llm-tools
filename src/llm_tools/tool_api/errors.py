@@ -13,3 +13,11 @@ class DuplicateToolError(ToolRegistryError):
 
 class ToolNotRegisteredError(ToolRegistryError):
     """Raised when looking up a tool name that has not been registered."""
+
+
+class RetryableToolExecutionError(RuntimeError):
+    """Execution failure that should be surfaced as retryable."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.retryable = True

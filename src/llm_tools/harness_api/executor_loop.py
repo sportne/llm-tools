@@ -8,6 +8,10 @@ from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 import llm_tools.harness_api.executor as executor_api
+from llm_tools.harness_api.approval_context import (
+    rehydrate_pending_approval_context,
+    sanitize_pending_approval_context,
+)
 from llm_tools.harness_api.executor_approvals import (
     ApprovalResolution,
     HarnessRetryPolicy,
@@ -27,8 +31,6 @@ from llm_tools.harness_api.models import (
     TurnApprovalAuditRecord,
     TurnDecision,
     TurnDecisionAction,
-    rehydrate_pending_approval_context,
-    sanitize_pending_approval_context,
 )
 from llm_tools.harness_api.protection import scrub_state_for_protection
 from llm_tools.harness_api.replay import (

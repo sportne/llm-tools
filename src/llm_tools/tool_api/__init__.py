@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from llm_tools.tool_api.errors import (
     DuplicateToolError,
+    RetryableToolExecutionError,
     ToolNotRegisteredError,
     ToolRegistryError,
 )
@@ -26,7 +27,6 @@ from llm_tools.tool_api.models import (
     PolicyDecision,
     PolicyVerdict,
     ProtectionProvenanceSnapshot,
-    RetryableToolExecutionError,
     RiskLevel,
     SideEffectClass,
     SourceProvenanceRef,

@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from enum import Enum
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from llm_tools.harness_api.approval_context import (
+    rehydrate_pending_approval_context as rehydrate_pending_approval_context,
+)
+from llm_tools.harness_api.approval_context import (
+    sanitize_pending_approval_context as sanitize_pending_approval_context,
+)
 from llm_tools.harness_api.verification import (
     NoProgressSignal,
     VerificationEvidenceRecord,
@@ -271,31 +277,6 @@ class PendingApprovalRecord(BaseModel):
                 "pending_index must reference an invocation in parsed_response."
             )
         return self
-
-
-def sanitize_pending_approval_context(context: ToolContext) -> ToolContext:
-    """Return the durable subset of tool context safe to persist."""
-    return context.model_copy(
-        update={
-            "env": {},
-            "logs": [],
-            "artifacts": [],
-            "source_provenance": [],
-        },
-        deep=True,
-    )
-
-
-def rehydrate_pending_approval_context(
-    context: ToolContext,
-    *,
-    env: Mapping[str, str] | None = None,
-) -> ToolContext:
-    """Rebuild a persisted approval context with the current process env."""
-    return context.model_copy(
-        update={"env": dict(env or {})},
-        deep=True,
-    )
 
 
 class HarnessTurn(BaseModel):

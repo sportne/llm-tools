@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from llm_tools.harness_api.approval_context import sanitize_pending_approval_context
 from llm_tools.harness_api.context import HarnessContextBuilder
 from llm_tools.harness_api.defaults import (
     DefaultHarnessTurnDriver,
@@ -23,7 +24,6 @@ from llm_tools.harness_api.models import (
     HarnessState,
     TurnDecision,
     TurnDecisionAction,
-    sanitize_pending_approval_context,
 )
 from llm_tools.harness_api.planning import HarnessPlanner
 from llm_tools.harness_api.replay import (

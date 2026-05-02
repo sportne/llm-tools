@@ -7,6 +7,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from llm_tools.tool_api.errors import (
+    RetryableToolExecutionError as RetryableToolExecutionError,
+)
+
 
 class SideEffectClass(str, Enum):  # noqa: UP042
     """Classes of side effects a tool may perform."""
@@ -105,14 +109,6 @@ class ToolInvocationRequest(BaseModel):
     tool_name: str = Field(min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
     tool_call_id: str | None = None
-
-
-class RetryableToolExecutionError(RuntimeError):
-    """Execution failure that should be surfaced as retryable."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.retryable = True
 
 
 class ToolError(BaseModel):
