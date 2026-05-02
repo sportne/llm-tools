@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -195,6 +196,56 @@ def _session_token_estimate_text(token_usage: ChatTokenUsage | None) -> str:
         else:
             token_count = usage_count
     return f"~{token_count:,} tokens"
+
+
+@dataclass(frozen=True)
+class ContextCapacityMeterState:
+    """UI state for the chat context capacity meter."""
+
+    used_tokens: int
+    limit_tokens: int
+    remaining_tokens: int
+    used_ratio: float
+    used_percent: int
+    compacting: bool
+    track_classes: str
+    fill_style: str
+    tooltip: str
+
+
+def _context_capacity_meter_state(
+    runtime: NiceGUIRuntimeConfig,
+    token_usage: ChatTokenUsage | None = None,
+    *,
+    status_text: str = "",
+) -> ContextCapacityMeterState:
+    """Return display state for the context capacity meter."""
+    limit_tokens = max(1, runtime.session_config.max_context_tokens)
+    used_tokens = 0
+    if token_usage is not None and token_usage.active_context_tokens is not None:
+        used_tokens = max(0, token_usage.active_context_tokens)
+    used_ratio = min(used_tokens / limit_tokens, 1.0)
+    used_percent = round(used_ratio * 100)
+    remaining_tokens = max(limit_tokens - used_tokens, 0)
+    compacting = status_text.strip().lower() == "compacting context"
+    track_classes = "llmt-context-meter-track"
+    if compacting:
+        track_classes += " compacting"
+    tooltip = (
+        f"Context used: ~{used_tokens:,} of ~{limit_tokens:,} tokens "
+        f"({used_percent}%). ~{remaining_tokens:,} tokens remain before compaction."
+    )
+    return ContextCapacityMeterState(
+        used_tokens=used_tokens,
+        limit_tokens=limit_tokens,
+        remaining_tokens=remaining_tokens,
+        used_ratio=used_ratio,
+        used_percent=used_percent,
+        compacting=compacting,
+        track_classes=track_classes,
+        fill_style=f"width: {used_ratio * 100:.1f}%;",
+        tooltip=tooltip,
+    )
 
 
 def _runtime_summary_parts(
@@ -1298,6 +1349,30 @@ def build_assistant_ui(  # noqa: C901
         }
         .llmt-composer-row { flex-wrap: nowrap; }
         .llmt-composer-input { flex: 1 1 auto; min-width: 0; }
+        .llmt-context-meter-shell {
+            width: 100%; height: 3px; padding: 0; margin: 1px 0 0;
+        }
+        .llmt-context-meter-track {
+            width: 100%; height: 3px; border-radius: 999px; overflow: hidden;
+            background: #d5d3cb; position: relative;
+        }
+        body.body--dark .llmt-context-meter-track { background: #3c3e39; }
+        .llmt-context-meter-fill {
+            height: 100%; border-radius: inherit;
+            background: linear-gradient(90deg, #74746e, #2f302c);
+            transition: width 160ms ease-out;
+        }
+        body.body--dark .llmt-context-meter-fill {
+            background: linear-gradient(90deg, #70726d, #f5f5f0);
+        }
+        .llmt-context-meter-track.compacting .llmt-context-meter-fill {
+            animation: llmt-context-pulse 1.1s ease-in-out infinite;
+        }
+        @keyframes llmt-context-pulse {
+            0% { opacity: 0.55; }
+            50% { opacity: 1; }
+            100% { opacity: 0.55; }
+        }
         .llmt-composer-meta {
             flex-wrap: nowrap; min-width: 0; overflow: hidden;
             max-width: 100%; min-height: 22px;
@@ -1476,6 +1551,7 @@ def build_assistant_ui(  # noqa: C901
     status_chip: Any = None
     selected_tools_row: Any = None
     tool_menu_column: Any = None
+    context_meter_row: Any = None
     composer_meta_row: Any = None
     composer_action_button: Any = None
     composer_disclaimer_label: Any = None
@@ -1900,6 +1976,26 @@ def build_assistant_ui(  # noqa: C901
                     on_click=lambda _event, part=label: open_runtime_part_dialog(part),
                 ).props("flat dense no-caps color=primary").classes("llmt-runtime-chip")
 
+    def render_context_meter(
+        runtime: NiceGUIRuntimeConfig,
+        token_usage: ChatTokenUsage | None,
+        *,
+        status_text: str,
+    ) -> None:
+        context_meter_row.clear()
+        state = _context_capacity_meter_state(
+            runtime,
+            token_usage,
+            status_text=status_text,
+        )
+        with (
+            context_meter_row,
+            ui.element("div").classes("llmt-context-meter-shell"),
+            ui.element("div").classes(state.track_classes),
+        ):
+            ui.element("div").classes("llmt-context-meter-fill").style(state.fill_style)
+            ui.tooltip(state.tooltip)
+
     def current_tool_capability_groups() -> dict[str, list[AssistantToolCapability]]:
         runtime = active_runtime()
         return build_tool_capabilities(
@@ -2289,6 +2385,11 @@ def build_assistant_ui(  # noqa: C901
             composer_disclaimer_label.set_visibility(runtime.show_footer_help)
         render_selected_tools()
         render_tool_menu()
+        render_context_meter(
+            runtime,
+            controller.active_record.token_usage,
+            status_text=turn_state.status_text,
+        )
         render_runtime_summary(runtime, controller.active_record.token_usage)
         composer_action_button.props(
             "icon="
@@ -3208,6 +3309,10 @@ def build_assistant_ui(  # noqa: C901
                         ),
                         on_click=submit_or_stop,
                     ).props("round color=primary")
+                with ui.row().classes(
+                    "llmt-context-meter-row w-full"
+                ) as context_meter_row:
+                    pass
                 with ui.row().classes(
                     "llmt-selected-tools w-full items-center gap-1"
                 ) as selected_tools_row:

@@ -24,6 +24,7 @@ from llm_tools.apps.assistant_app.app import (
     _branding_icon_uses_material,
     _can_admin_disable_user,
     _composer_action_icon,
+    _context_capacity_meter_state,
     _default_protection_corrections_path,
     _discover_model_names,
     _ensure_information_security_category_catalog,
@@ -610,6 +611,42 @@ def test_composer_runtime_helpers() -> None:
     ]
 
 
+def test_context_capacity_meter_state() -> None:
+    runtime = NiceGUIRuntimeConfig(
+        session_config=ChatSessionConfig(max_context_tokens=1000)
+    )
+
+    empty_state = _context_capacity_meter_state(runtime)
+    assert empty_state.used_tokens == 0
+    assert empty_state.limit_tokens == 1000
+    assert empty_state.remaining_tokens == 1000
+    assert empty_state.used_ratio == 0.0
+    assert empty_state.used_percent == 0
+    assert empty_state.fill_style == "width: 0.0%;"
+    assert empty_state.compacting is False
+    assert "1,000 tokens remain" in empty_state.tooltip
+
+    partial_state = _context_capacity_meter_state(
+        runtime,
+        ChatTokenUsage(active_context_tokens=250),
+    )
+    assert partial_state.used_ratio == 0.25
+    assert partial_state.used_percent == 25
+    assert partial_state.remaining_tokens == 750
+    assert partial_state.fill_style == "width: 25.0%;"
+
+    full_state = _context_capacity_meter_state(
+        runtime,
+        ChatTokenUsage(active_context_tokens=1250),
+        status_text=" compacting context ",
+    )
+    assert full_state.used_ratio == 1.0
+    assert full_state.used_percent == 100
+    assert full_state.remaining_tokens == 0
+    assert full_state.compacting is True
+    assert full_state.track_classes == "llmt-context-meter-track compacting"
+
+
 def test_information_security_helpers(tmp_path: Path) -> None:
     assert _parse_information_security_categories(" TRIVIAL\nMINOR,TRIVIAL\n") == [
         "TRIVIAL",
@@ -1059,6 +1096,8 @@ def test_module_entrypoint_uses_package_main(monkeypatch: Any) -> None:
 
 
 def test_app_builder_renders_with_temporary_sqlite_db(tmp_path: Path) -> None:
+    from nicegui import ui
+
     provider = _FakeProvider(
         [
             ParsedModelResponse(
@@ -1074,10 +1113,35 @@ def test_app_builder_renders_with_temporary_sqlite_db(tmp_path: Path) -> None:
         ]
     )
     controller = _controller(tmp_path, provider)
+    controller.active_record.token_usage = ChatTokenUsage(active_context_tokens=12000)
 
     build_assistant_ui(controller)
 
     assert controller.active_record.summary.title == "New chat"
+    elements = list(ui.context.client.elements.values())
+    composer_row_index = next(
+        index
+        for index, element in enumerate(elements)
+        if "llmt-composer-row" in element.classes
+    )
+    meter_index = next(
+        index
+        for index, element in enumerate(elements)
+        if "llmt-context-meter-row" in element.classes
+    )
+    selected_tools_index = next(
+        index
+        for index, element in enumerate(elements)
+        if "llmt-selected-tools" in element.classes
+    )
+    runtime_summary_index = next(
+        index
+        for index, element in enumerate(elements)
+        if "llmt-composer-meta" in element.classes
+    )
+    assert composer_row_index < meter_index < selected_tools_index
+    assert meter_index < runtime_summary_index
+    assert any("llmt-context-meter-fill" in element.classes for element in elements)
 
 
 def test_app_builder_renders_final_response_metadata(tmp_path: Path) -> None:
