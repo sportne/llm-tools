@@ -2,7 +2,7 @@
 
 ## Status
 
-[ ] Not started
+[x] Completed
 
 ## Task
 

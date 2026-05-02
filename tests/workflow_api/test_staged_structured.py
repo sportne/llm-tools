@@ -101,6 +101,26 @@ def test_staged_runner_runs_tool_stage_with_small_models() -> None:
     )
 
 
+def test_staged_runner_runs_final_stage_sync() -> None:
+    adapter = ActionEnvelopeAdapter()
+    provider = _FakeProvider(
+        [
+            {"mode": "finalize"},
+            {"mode": "finalize", "final_response": {"answer": "done"}},
+        ]
+    )
+
+    parsed = StagedStructuredToolRunner(adapter=adapter, temperature=0).run_round(
+        provider=provider,
+        messages=[{"role": "user", "content": "answer"}],
+        prepared=_prepared(adapter),
+        final_response_model=_FinalAnswer,
+    )
+
+    assert parsed.final_response == {"answer": "done"}
+    assert provider.response_model_names == ["DecisionStep", "FinalResponseStep"]
+
+
 def test_staged_runner_decision_stage_accepts_tool_use_context() -> None:
     adapter = ActionEnvelopeAdapter()
     messages = StagedStructuredToolRunner(
@@ -143,6 +163,32 @@ def test_staged_runner_runs_final_stage_async() -> None:
     assert "Current step: finalize the answer." in str(provider.messages[1][-1])
 
 
+def test_staged_runner_runs_tool_stage_async() -> None:
+    adapter = ActionEnvelopeAdapter()
+    provider = _FakeProvider(
+        [
+            {"mode": "tool", "tool_name": "lookup"},
+            {
+                "mode": "tool",
+                "tool_name": "lookup",
+                "arguments": {"path": "README.md"},
+            },
+        ]
+    )
+
+    parsed = asyncio.run(
+        StagedStructuredToolRunner(adapter=adapter, temperature=0).run_round_async(
+            provider=provider,
+            messages=[{"role": "user", "content": "inspect"}],
+            prepared=_prepared(adapter),
+            final_response_model=_FinalAnswer,
+        )
+    )
+
+    assert parsed.invocations[0].arguments == {"path": "README.md"}
+    assert provider.response_model_names == ["DecisionStep", "LookupInvocationStep"]
+
+
 def test_staged_runner_repairs_twice_then_raises() -> None:
     adapter = ActionEnvelopeAdapter()
     provider = _FakeProvider(
@@ -167,6 +213,31 @@ def test_staged_runner_repairs_twice_then_raises() -> None:
         "The previous decision response was invalid."
     )
     assert provider.messages[2][-1]["content"].startswith(
+        "The previous decision response was invalid."
+    )
+
+
+def test_staged_runner_repairs_async_step() -> None:
+    adapter = ActionEnvelopeAdapter()
+    provider = _FakeProvider(
+        [
+            ValueError("schema validation failed first"),
+            {"mode": "finalize"},
+            {"mode": "finalize", "final_response": {"answer": "repaired"}},
+        ]
+    )
+
+    parsed = asyncio.run(
+        StagedStructuredToolRunner(adapter=adapter, temperature=0).run_round_async(
+            provider=provider,
+            messages=[{"role": "user", "content": "answer"}],
+            prepared=_prepared(adapter),
+            final_response_model=_FinalAnswer,
+        )
+    )
+
+    assert parsed.final_response == {"answer": "repaired"}
+    assert provider.messages[1][-1]["content"].startswith(
         "The previous decision response was invalid."
     )
 
@@ -199,16 +270,47 @@ def test_staged_runner_helpers_cover_edge_cases() -> None:
             "All provider mode attempts failed. Overall failure type: transport-related."
         )
     )
+    pydantic_error_type = type(
+        "PydanticWrapperError",
+        (Exception,),
+        {"__module__": "pydantic.wrapper"},
+    )
+    prompt_tool_error_type = type(
+        "PromptToolProtocolError",
+        (Exception,),
+        {"__module__": "llm_tools.llm_adapters.prompt_tools"},
+    )
+    instructor_error_type = type(
+        "InstructorValidationError",
+        (Exception,),
+        {"__module__": "instructor.retry"},
+    )
+    openai_error_type = type(
+        "OpenAIValidationError",
+        (Exception,),
+        {"__module__": "openai.types"},
+    )
+    assert is_repairable_stage_error(pydantic_error_type("wrapped"))
+    assert is_repairable_stage_error(prompt_tool_error_type("wrapped"))
+    assert is_repairable_stage_error(instructor_error_type("schema mismatch"))
+    assert not is_repairable_stage_error(openai_error_type("schema mismatch"))
     assert repair_stage_guidance("tool:lookup").startswith("Tool stage rules:")
     assert repair_stage_guidance("final_response").startswith(
         "Finalization stage rules:"
     )
+    assert repair_stage_guidance("single_action").startswith("Single-action rules:")
     assert (
         repair_stage_guidance("other")
         == "Return only the fields required for this stage."
     )
     assert format_invalid_payload(None) == "(unavailable)"
     assert format_invalid_payload("bad") == "bad"
+    assert "action-envelope shape" in format_invalid_payload(
+        '{"actions": [{"tool_name": "lookup"}]}',
+        stage_name="decision",
+    )
+    assert "fenced text" in format_invalid_payload("```json\n{}\n```")
+    assert format_invalid_payload("x" * 801).endswith("...(truncated)")
     bad_keys = {object(): "value"}
     assert format_invalid_payload(bad_keys) == str(bad_keys)
     assert tool_spec_by_name([spec], "lookup") is spec

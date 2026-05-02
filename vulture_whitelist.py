@@ -28,6 +28,8 @@ _.require_filesystem  # execution service protocol method
 _.require_subprocess  # execution service protocol method
 _.resolve_pending_approval_async  # workflow executor public API
 _.resume_session_async  # harness session service public API
+_.run_round  # staged structured runner public API
+_.run_round_async  # staged structured runner public API
 _.run_session_async  # harness session service public API
 
 format_final_response  # app presentation helper

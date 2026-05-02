@@ -34,6 +34,10 @@ architecture documents.
 - Use `mypy` for static type checking.
 - Use `pytest` and `pytest-cov` for testing and coverage reporting.
 - Prefer `make` targets for common local workflows.
+- Treat Vulture findings as review leads, not ground truth. Before deleting
+  code or adding a whitelist entry, check whether the symbol is part of a
+  public API, protocol/interface surface, framework callback, generated/runtime
+  lookup path, or test-only coverage of an intentional extension point.
 
 Primary commands:
 
@@ -43,6 +47,8 @@ make install-dev
 make format
 make lint
 make typecheck
+make dead-code
+make reachability
 make test
 make coverage
 make package

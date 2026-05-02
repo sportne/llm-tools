@@ -49,7 +49,10 @@ from llm_tools.workflow_api.models import (
     WorkflowInvocationStatus,
     WorkflowTurnResult,
 )
-from llm_tools.workflow_api.staged_structured import repair_stage_guidance
+from llm_tools.workflow_api.staged_structured import (
+    repair_stage_guidance,
+    tool_spec_by_name,
+)
 
 
 class _FakeProvider:
@@ -695,16 +698,6 @@ def test_chat_session_runner_helper_error_branches(tmp_path: Path) -> None:
     ) == {"role": "assistant", "content": "{}"}
     with pytest.raises(RuntimeError, match="run_structured"):
         native_runner._structured_provider()
-
-    prompt_step = native_runner._run_prompt_tool_step(
-        round_index=1,
-        stage_name="decision",
-        messages=[],
-        parser=lambda text: text,
-        repair_context={},
-    )
-    with pytest.raises(RuntimeError, match="run_text"):
-        next(prompt_step)
 
     staged_runner = run_interactive_chat_session_turn(
         user_message="Answer plainly.",
@@ -1622,7 +1615,7 @@ def test_chat_session_runner_stage_helpers_cover_remaining_edges(
         "...(truncated)"
     )
     try:
-        runner._tool_spec([], "missing")
+        tool_spec_by_name([], "missing")
     except ValueError as exc:
         assert "Unknown tool selected during staged interaction" in str(exc)
     else:  # pragma: no cover - defensive assertion
