@@ -40,6 +40,7 @@ from llm_tools.apps.assistant_app.app import (
     _is_admin_user,
     _is_tool_url_setting,
     _models_endpoint_url,
+    _normalized_provider_base_url,
     _parse_information_security_categories,
     _parse_information_security_category_catalog,
     _parse_optional_positive_int_setting,
@@ -48,11 +49,13 @@ from llm_tools.apps.assistant_app.app import (
     _parse_temperature_setting,
     _protection_corpus_readiness_text,
     _provider_base_url_help_text,
+    _provider_connection_identity,
     _provider_endpoint_menu_rows,
     _referenced_document_text,
     _runtime_summary_parts,
     _runtime_summary_text,
     _runtime_with_settings_values,
+    _selected_model_unavailable_message,
     _selected_tool_chip_classes,
     _selected_tool_groups,
     _selected_tool_icon,
@@ -996,6 +999,57 @@ def test_common_provider_endpoint_catalog_is_local_and_copyable() -> None:
     assert "OpenAI-compatible base URL" in _provider_base_url_help_text()
 
 
+def test_provider_connection_identity_normalizes_for_secret_scoping() -> None:
+    assert (
+        _normalized_provider_base_url(" https://example.test/v1/ ")
+        == "https://example.test/v1"
+    )
+    assert _normalized_provider_base_url("  ") is None
+    assert _provider_connection_identity(
+        provider_protocol=ProviderProtocol.OPENAI_API,
+        base_url=" https://example.test/v1/ ",
+        requires_bearer_token=True,
+    ) == ("openai_api", "https://example.test/v1", True)
+    assert _provider_connection_identity(
+        provider_protocol=ProviderProtocol.OPENAI_API,
+        base_url="https://example.test/v1",
+        requires_bearer_token=False,
+    ) == ("openai_api", "https://example.test/v1", False)
+
+
+def test_selected_model_unavailable_message_only_blocks_on_successful_discovery() -> (
+    None
+):
+    assert (
+        _selected_model_unavailable_message(
+            selected_model="missing-model",
+            discovered_models=["model-a", "model-b"],
+        )
+        == "Model 'missing-model' was not found for the configured provider connection."
+    )
+    assert (
+        _selected_model_unavailable_message(
+            selected_model="model-a",
+            discovered_models=["model-a", "model-b"],
+        )
+        is None
+    )
+    assert (
+        _selected_model_unavailable_message(
+            selected_model="manual-model",
+            discovered_models=[],
+        )
+        is None
+    )
+    assert (
+        _selected_model_unavailable_message(
+            selected_model=None,
+            discovered_models=["model-a"],
+        )
+        is None
+    )
+
+
 def test_available_windows_drive_roots_uses_probe() -> None:
     roots = _available_windows_drive_roots(
         path_exists=lambda path: str(path) in {"C:\\", "Z:\\"}
@@ -1043,6 +1097,13 @@ def test_model_discovery_fetches_openai_compatible_models(
     assert calls == [
         ("https://example.test/v1/models", "Bearer typed-key", 1.5),
     ]
+    assert _discover_model_names(
+        provider_protocol=ProviderProtocol.OPENAI_API,
+        base_url="http://127.0.0.1:11434/v1",
+        requires_bearer_token=False,
+        timeout=2.5,
+    ) == ["model-a", "model-b"]
+    assert calls[-1] == ("http://127.0.0.1:11434/v1/models", None, 2.5)
 
 
 def test_model_discovery_rejects_invalid_or_failed_endpoints(

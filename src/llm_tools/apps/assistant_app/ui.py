@@ -730,8 +730,44 @@ def _provider_base_url_help_text() -> str:
 
 def _models_endpoint_url(base_url: str) -> str:
     """Return the OpenAI-compatible model listing URL for a base URL."""
-    trimmed = base_url.strip().rstrip("/")
+    trimmed = _normalized_provider_base_url(base_url) or ""
     return f"{trimmed}/models" if trimmed else ""
+
+
+def _normalized_provider_base_url(base_url: str | None) -> str | None:
+    """Return the normalized provider base URL used for connection identity."""
+    if base_url is None:
+        return None
+    cleaned = base_url.strip().rstrip("/")
+    return cleaned or None
+
+
+def _provider_connection_identity(
+    *,
+    provider_protocol: ProviderProtocol,
+    base_url: str | None,
+    requires_bearer_token: bool,
+) -> tuple[str, str | None, bool]:
+    """Return the non-secret identity for provider credential scoping."""
+    return (
+        provider_protocol.value,
+        _normalized_provider_base_url(base_url),
+        requires_bearer_token,
+    )
+
+
+def _selected_model_unavailable_message(
+    *,
+    selected_model: str | None,
+    discovered_models: Sequence[str],
+) -> str | None:
+    """Return a blocking Apply message when discovery disproves the model."""
+    if selected_model and discovered_models and selected_model not in discovered_models:
+        return (
+            f"Model '{selected_model}' was not found for the configured provider "
+            "connection."
+        )
+    return None
 
 
 def _extract_model_names_from_models_payload(payload: object) -> list[str]:
@@ -2726,15 +2762,40 @@ def build_assistant_ui(  # noqa: C901
         except ValueError as exc:
             ui.notify(str(exc), type="negative")
             return False
-        runtime.provider_protocol = ProviderProtocol(str(provider_select.value))
-        runtime.selected_model = str(model_input.value or "").strip() or None
-        runtime.response_mode_strategy = ResponseModeStrategy(str(mode_select.value))
-        runtime.provider_connection.api_base_url = (
-            str(base_url_input.value or "").strip() or None
+        old_provider_identity = _provider_connection_identity(
+            provider_protocol=runtime.provider_protocol,
+            base_url=runtime.provider_connection.api_base_url,
+            requires_bearer_token=runtime.provider_connection.requires_bearer_token,
         )
-        runtime.provider_connection.requires_bearer_token = bool(
-            bearer_token_required_switch.value
+        provider_protocol = ProviderProtocol(str(provider_select.value))
+        selected_model = str(model_input.value or "").strip() or None
+        response_mode_strategy = ResponseModeStrategy(str(mode_select.value))
+        base_url = _normalized_provider_base_url(str(base_url_input.value or ""))
+        requires_bearer_token = bool(bearer_token_required_switch.value)
+        new_provider_identity = _provider_connection_identity(
+            provider_protocol=provider_protocol,
+            base_url=base_url,
+            requires_bearer_token=requires_bearer_token,
         )
+        provider_api_key = str(provider_api_key_input.value or "").strip()
+        existing_provider_api_key = (
+            controller.provider_api_key(session_id=controller.active_session_id)
+            if old_provider_identity == new_provider_identity
+            else None
+        )
+        if not validate_selected_model_for_apply(
+            provider_protocol=provider_protocol,
+            base_url=base_url,
+            requires_bearer_token=requires_bearer_token,
+            selected_model=selected_model,
+            api_key=provider_api_key or existing_provider_api_key,
+        ):
+            return False
+        runtime.provider_protocol = provider_protocol
+        runtime.selected_model = selected_model
+        runtime.response_mode_strategy = response_mode_strategy
+        runtime.provider_connection.api_base_url = base_url
+        runtime.provider_connection.requires_bearer_token = requires_bearer_token
         runtime.temperature = updated_runtime.temperature
         runtime.timeout_seconds = updated_runtime.timeout_seconds
         runtime.show_token_usage = updated_runtime.show_token_usage
@@ -2743,9 +2804,12 @@ def build_assistant_ui(  # noqa: C901
         runtime.session_config = updated_runtime.session_config
         runtime.tool_limits = updated_runtime.tool_limits
         runtime.research = updated_runtime.research
-        provider_api_key = str(provider_api_key_input.value or "").strip()
+        update_provider_secret_for_connection(
+            old_identity=old_provider_identity,
+            new_identity=new_provider_identity,
+            provider_api_key=provider_api_key,
+        )
         if provider_api_key and secret_entry_enabled():
-            controller.set_session_secret(PROVIDER_API_KEY_FIELD, provider_api_key)
             provider_api_key_input.value = ""
         for secret_name, credential_input in tool_credential_inputs.items():
             secret_value = str(credential_input.value or "").strip()
@@ -2862,19 +2926,20 @@ def build_assistant_ui(  # noqa: C901
         provider_protocol = ProviderProtocol(
             str(provider_select.value or active_runtime().provider_protocol)
         )
-        base_url = str(
-            base_url_input.value
-            or active_runtime().provider_connection.api_base_url
-            or ""
+        base_url = _normalized_provider_base_url(
+            str(
+                base_url_input.value
+                or active_runtime().provider_connection.api_base_url
+                or ""
+            )
         )
         provider_api_key = str(provider_api_key_input.value or "").strip()
         current_model = str(model_input.value or active_runtime().selected_model or "")
+        requires_bearer_token = bool(bearer_token_required_switch.value)
         models = _discover_model_names(
             provider_protocol=provider_protocol,
             base_url=base_url,
-            requires_bearer_token=(
-                active_runtime().provider_connection.requires_bearer_token
-            ),
+            requires_bearer_token=requires_bearer_token,
             api_key=provider_api_key
             or controller.provider_api_key(session_id=controller.active_session_id),
         )
@@ -2886,6 +2951,47 @@ def build_assistant_ui(  # noqa: C901
         set_model_options(models, selected=current_model)
         if notify:
             ui.notify(f"Loaded {len(models)} models")
+
+    def validate_selected_model_for_apply(
+        *,
+        provider_protocol: ProviderProtocol,
+        base_url: str | None,
+        requires_bearer_token: bool,
+        selected_model: str | None,
+        api_key: str | None,
+    ) -> bool:
+        if not selected_model or not base_url:
+            return True
+        models = _discover_model_names(
+            provider_protocol=provider_protocol,
+            base_url=base_url,
+            requires_bearer_token=requires_bearer_token,
+            api_key=api_key,
+        )
+        message = _selected_model_unavailable_message(
+            selected_model=selected_model,
+            discovered_models=models,
+        )
+        if message is None:
+            if not models:
+                ui.notify(
+                    "Could not verify the selected model from the configured endpoint."
+                )
+            return True
+        ui.notify(message, type="negative")
+        return False
+
+    def update_provider_secret_for_connection(
+        *,
+        old_identity: tuple[str, str | None, bool],
+        new_identity: tuple[str, str | None, bool],
+        provider_api_key: str,
+    ) -> None:
+        if provider_api_key and secret_entry_enabled():
+            controller.set_session_secret(PROVIDER_API_KEY_FIELD, provider_api_key)
+            return
+        if old_identity != new_identity:
+            controller.clear_session_secret(PROVIDER_API_KEY_FIELD)
 
     def refresh_quick_model_options(*, notify: bool = True) -> None:
         runtime = active_runtime()
@@ -2909,16 +3015,42 @@ def build_assistant_ui(  # noqa: C901
 
     def apply_provider_settings_and_close() -> None:
         runtime = active_runtime()
-        runtime.provider_protocol = ProviderProtocol(str(provider_quick_select.value))
-        runtime.provider_connection.api_base_url = (
-            str(base_url_quick_input.value or "").strip() or None
+        old_provider_identity = _provider_connection_identity(
+            provider_protocol=runtime.provider_protocol,
+            base_url=runtime.provider_connection.api_base_url,
+            requires_bearer_token=runtime.provider_connection.requires_bearer_token,
         )
-        runtime.provider_connection.requires_bearer_token = bool(
-            bearer_token_required_quick_switch.value
+        provider_protocol = ProviderProtocol(str(provider_quick_select.value))
+        base_url = _normalized_provider_base_url(str(base_url_quick_input.value or ""))
+        requires_bearer_token = bool(bearer_token_required_quick_switch.value)
+        new_provider_identity = _provider_connection_identity(
+            provider_protocol=provider_protocol,
+            base_url=base_url,
+            requires_bearer_token=requires_bearer_token,
         )
         provider_api_key = str(provider_api_key_quick_input.value or "").strip()
+        existing_provider_api_key = (
+            controller.provider_api_key(session_id=controller.active_session_id)
+            if old_provider_identity == new_provider_identity
+            else None
+        )
+        if not validate_selected_model_for_apply(
+            provider_protocol=provider_protocol,
+            base_url=base_url,
+            requires_bearer_token=requires_bearer_token,
+            selected_model=runtime.selected_model,
+            api_key=provider_api_key or existing_provider_api_key,
+        ):
+            return
+        runtime.provider_protocol = provider_protocol
+        runtime.provider_connection.api_base_url = base_url
+        runtime.provider_connection.requires_bearer_token = requires_bearer_token
+        update_provider_secret_for_connection(
+            old_identity=old_provider_identity,
+            new_identity=new_provider_identity,
+            provider_api_key=provider_api_key,
+        )
         if provider_api_key and secret_entry_enabled():
-            controller.set_session_secret(PROVIDER_API_KEY_FIELD, provider_api_key)
             provider_api_key_quick_input.value = ""
         remember_recent_runtime_values(runtime)
         controller.save_active_session()
@@ -2927,7 +3059,18 @@ def build_assistant_ui(  # noqa: C901
 
     def apply_model_settings_and_close() -> None:
         runtime = active_runtime()
-        runtime.selected_model = str(model_quick_select.value or "").strip() or None
+        selected_model = str(model_quick_select.value or "").strip() or None
+        if not validate_selected_model_for_apply(
+            provider_protocol=runtime.provider_protocol,
+            base_url=runtime.provider_connection.api_base_url,
+            requires_bearer_token=runtime.provider_connection.requires_bearer_token,
+            selected_model=selected_model,
+            api_key=controller.provider_api_key(
+                session_id=controller.active_session_id
+            ),
+        ):
+            return
+        runtime.selected_model = selected_model
         remember_recent_runtime_values(runtime)
         controller.save_active_session()
         dialogs["model_settings"].close()
