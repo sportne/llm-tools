@@ -65,7 +65,7 @@ _CONTEXT_LIMIT_ERROR_MARKERS = (
 
 
 class ModelTurnProtocolProvider(Protocol):
-    """Provider surface used by the model-turn protocol runner."""
+    """Required native provider surface for the model-turn protocol runner."""
 
     def run(
         self,
@@ -77,6 +77,10 @@ class ModelTurnProtocolProvider(Protocol):
     ) -> ParsedModelResponse:
         """Return one parsed native structured response."""
 
+
+class AsyncModelTurnProtocolProvider(Protocol):
+    """Async native provider capability for the model-turn protocol runner."""
+
     async def run_async(
         self,
         *,
@@ -87,6 +91,10 @@ class ModelTurnProtocolProvider(Protocol):
     ) -> ParsedModelResponse:
         """Return one parsed async native structured response."""
 
+
+class StructuredModelTurnProtocolProvider(Protocol):
+    """Structured payload capability for staged model-turn protocols."""
+
     def run_structured(
         self,
         *,
@@ -95,6 +103,10 @@ class ModelTurnProtocolProvider(Protocol):
         request_params: dict[str, Any] | None = None,
     ) -> object:
         """Return one structured provider payload."""
+
+
+class AsyncStructuredModelTurnProtocolProvider(Protocol):
+    """Async structured payload capability for staged model-turn protocols."""
 
     async def run_structured_async(
         self,
@@ -105,6 +117,10 @@ class ModelTurnProtocolProvider(Protocol):
     ) -> object:
         """Return one async structured provider payload."""
 
+
+class TextModelTurnProtocolProvider(Protocol):
+    """Text transport capability for prompt-tool model-turn protocols."""
+
     def run_text(
         self,
         *,
@@ -112,6 +128,10 @@ class ModelTurnProtocolProvider(Protocol):
         request_params: dict[str, Any] | None = None,
     ) -> str:
         """Return one text provider response."""
+
+
+class AsyncTextModelTurnProtocolProvider(Protocol):
+    """Async text transport capability for prompt-tool model-turn protocols."""
 
     async def run_text_async(
         self,
@@ -121,6 +141,10 @@ class ModelTurnProtocolProvider(Protocol):
     ) -> str:
         """Return one async text provider response."""
 
+
+class ModelTurnProtocolPreferenceProvider(Protocol):
+    """Provider preference hooks detected by the model-turn protocol runner."""
+
     def uses_staged_schema_protocol(self) -> bool:
         """Return whether this provider should use staged schema turns."""
 
@@ -129,6 +153,10 @@ class ModelTurnProtocolProvider(Protocol):
 
     def can_fallback_to_prompt_tools(self, exc: Exception) -> bool:
         """Return whether this error can fall back to prompt tools."""
+
+
+class ModelTurnJsonStrategyProvider(Protocol):
+    """Callable JSON strategy preference hook for staged model-turn protocols."""
 
     def json_agent_strategy(self) -> str:
         """Return the provider-preferred JSON agent strategy."""
@@ -2133,6 +2161,11 @@ def _iter_exception_chain(error: Exception) -> list[BaseException]:
 
 
 __all__ = [
+    "AsyncModelTurnProtocolProvider",
+    "AsyncStructuredModelTurnProtocolProvider",
+    "AsyncTextModelTurnProtocolProvider",
+    "ModelTurnJsonStrategyProvider",
+    "ModelTurnProtocolPreferenceProvider",
     "ModelTurnProtocolEvent",
     "ModelTurnProtocolEventKind",
     "ModelTurnProtocolKind",
@@ -2142,4 +2175,6 @@ __all__ = [
     "ModelTurnProtocolRequest",
     "ModelTurnProtocolRunner",
     "ModelTurnProtectionContext",
+    "StructuredModelTurnProtocolProvider",
+    "TextModelTurnProtocolProvider",
 ]

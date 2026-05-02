@@ -11,11 +11,18 @@ from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import ProtectionProvenanceSnapshot, ToolSpec
 from llm_tools.workflow_api.executor import PreparedModelInteraction
 from llm_tools.workflow_api.model_turn_protocol import (
+    AsyncModelTurnProtocolProvider,
+    AsyncStructuredModelTurnProtocolProvider,
+    AsyncTextModelTurnProtocolProvider,
+    ModelTurnJsonStrategyProvider,
     ModelTurnProtectionContext,
     ModelTurnProtocolEvent,
+    ModelTurnProtocolPreferenceProvider,
     ModelTurnProtocolProvider,
     ModelTurnProtocolRequest,
     ModelTurnProtocolRunner,
+    StructuredModelTurnProtocolProvider,
+    TextModelTurnProtocolProvider,
 )
 from llm_tools.workflow_api.protection import (
     PromptProtectionDecision,
@@ -581,9 +588,9 @@ def test_protocol_parsed_response_events_use_actual_protocol(
     assert _parsed_event(protection_events).protocol == "protection"
 
 
-def test_protocol_provider_protocol_advertises_runtime_detected_surface() -> None:
-    expected_methods = {
-        "run",
+def test_protocol_provider_protocol_surface_is_split_by_capability() -> None:
+    assert callable(getattr(ModelTurnProtocolProvider, "run", None))
+    optional_methods = {
         "run_async",
         "run_structured",
         "run_structured_async",
@@ -594,9 +601,44 @@ def test_protocol_provider_protocol_advertises_runtime_detected_surface() -> Non
         "can_fallback_to_prompt_tools",
         "json_agent_strategy",
     }
+    for method_name in optional_methods:
+        assert getattr(ModelTurnProtocolProvider, method_name, None) is None
 
-    for method_name in expected_methods:
-        assert callable(getattr(ModelTurnProtocolProvider, method_name, None))
+    capability_methods = {
+        AsyncModelTurnProtocolProvider: {"run_async"},
+        StructuredModelTurnProtocolProvider: {"run_structured"},
+        AsyncStructuredModelTurnProtocolProvider: {"run_structured_async"},
+        TextModelTurnProtocolProvider: {"run_text"},
+        AsyncTextModelTurnProtocolProvider: {"run_text_async"},
+        ModelTurnProtocolPreferenceProvider: {
+            "uses_staged_schema_protocol",
+            "uses_prompt_tool_protocol",
+            "can_fallback_to_prompt_tools",
+        },
+        ModelTurnJsonStrategyProvider: {"json_agent_strategy"},
+    }
+
+    for protocol, expected_methods in capability_methods.items():
+        for method_name in expected_methods:
+            assert callable(getattr(protocol, method_name, None))
+
+
+def test_workflow_api_exports_model_turn_protocol_capability_types() -> None:
+    import llm_tools.workflow_api as workflow_api
+
+    expected_names = {
+        "AsyncModelTurnProtocolProvider",
+        "AsyncStructuredModelTurnProtocolProvider",
+        "AsyncTextModelTurnProtocolProvider",
+        "ModelTurnJsonStrategyProvider",
+        "ModelTurnProtocolPreferenceProvider",
+        "StructuredModelTurnProtocolProvider",
+        "TextModelTurnProtocolProvider",
+    }
+
+    assert workflow_api.ModelTurnProtocolProvider is ModelTurnProtocolProvider
+    for name in expected_names:
+        assert getattr(workflow_api, name) is not None
 
 
 def test_protocol_events_do_not_expose_raw_provider_payloads(
