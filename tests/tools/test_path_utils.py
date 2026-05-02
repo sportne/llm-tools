@@ -9,7 +9,6 @@ import pytest
 from llm_tools.tool_api import ToolContext
 from llm_tools.tools._path_utils import (
     get_workspace_root,
-    is_hidden_path,
     relative_display_path,
     resolve_workspace_path,
 )
@@ -99,16 +98,3 @@ def test_relative_display_path_returns_relative_posix_path(tmp_path: Path) -> No
     target.write_text("x", encoding="utf-8")
 
     assert relative_display_path(tmp_path.resolve(), target) == "nested/file.txt"
-
-
-def test_is_hidden_path_detects_hidden_relative_parts(tmp_path: Path) -> None:
-    hidden_dir = tmp_path / ".hidden"
-    hidden_dir.mkdir()
-    hidden_file = hidden_dir / "note.txt"
-    hidden_file.write_text("secret", encoding="utf-8")
-
-    assert is_hidden_path(tmp_path.resolve(), hidden_file.resolve()) is True
-    assert (
-        is_hidden_path(tmp_path.resolve(), (tmp_path / "visible.txt").resolve())
-        is False
-    )

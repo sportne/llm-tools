@@ -6,8 +6,6 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
-
 from llm_tools.harness_api.context import HarnessContextBuilder
 from llm_tools.harness_api.defaults import (
     DefaultHarnessTurnDriver,
@@ -15,7 +13,6 @@ from llm_tools.harness_api.defaults import (
     MinimalHarnessTurnApplier,
 )
 from llm_tools.harness_api.executor import (
-    ApprovalResolution,
     HarnessExecutionResult,
     HarnessExecutor,
     HarnessRetryPolicy,
@@ -23,23 +20,47 @@ from llm_tools.harness_api.executor import (
     HarnessTurnDriver,
 )
 from llm_tools.harness_api.models import (
-    BudgetPolicy,
     HarnessState,
-    HarnessStopReason,
     TurnDecision,
     TurnDecisionAction,
     sanitize_pending_approval_context,
 )
 from llm_tools.harness_api.planning import HarnessPlanner
 from llm_tools.harness_api.replay import (
-    HarnessReplayResult,
     HarnessSessionSummary,
     build_canonical_artifacts,
     build_stored_artifacts,
     build_turn_trace,
     replay_session,
 )
-from llm_tools.harness_api.resume import ResumedHarnessSession, resume_session
+from llm_tools.harness_api.resume import resume_session
+from llm_tools.harness_api.session_service_models import (
+    HarnessSessionCreateRequest as HarnessSessionCreateRequest,
+)
+from llm_tools.harness_api.session_service_models import (
+    HarnessSessionInspection as HarnessSessionInspection,
+)
+from llm_tools.harness_api.session_service_models import (
+    HarnessSessionInspectRequest as HarnessSessionInspectRequest,
+)
+from llm_tools.harness_api.session_service_models import (
+    HarnessSessionListItem as HarnessSessionListItem,
+)
+from llm_tools.harness_api.session_service_models import (
+    HarnessSessionListRequest as HarnessSessionListRequest,
+)
+from llm_tools.harness_api.session_service_models import (
+    HarnessSessionListResult as HarnessSessionListResult,
+)
+from llm_tools.harness_api.session_service_models import (
+    HarnessSessionResumeRequest as HarnessSessionResumeRequest,
+)
+from llm_tools.harness_api.session_service_models import (
+    HarnessSessionRunRequest as HarnessSessionRunRequest,
+)
+from llm_tools.harness_api.session_service_models import (
+    HarnessSessionStopRequest as HarnessSessionStopRequest,
+)
 from llm_tools.harness_api.store import (
     CURRENT_HARNESS_STATE_SCHEMA_VERSION,
     HarnessStateStore,
@@ -47,77 +68,6 @@ from llm_tools.harness_api.store import (
 )
 from llm_tools.harness_api.tasks import create_root_task
 from llm_tools.workflow_api import WorkflowExecutor
-
-
-class HarnessSessionCreateRequest(BaseModel):
-    """Create a new persisted root-task harness session."""
-
-    title: str = Field(min_length=1)
-    intent: str = Field(min_length=1)
-    budget_policy: BudgetPolicy
-    session_id: str | None = None
-    root_task_id: str = "task-1"
-    started_at: str | None = None
-
-
-class HarnessSessionRunRequest(BaseModel):
-    """Run a persisted harness session to its next durable stop."""
-
-    session_id: str = Field(min_length=1)
-    expected_revision: str | None = None
-    allow_interrupted_turn_replay: bool = False
-
-
-class HarnessSessionResumeRequest(BaseModel):
-    """Resume a persisted harness session, optionally resolving approval."""
-
-    session_id: str = Field(min_length=1)
-    approval_resolution: ApprovalResolution | None = None
-    allow_interrupted_turn_replay: bool = False
-
-
-class HarnessSessionStopRequest(BaseModel):
-    """Stop a persisted harness session without further execution."""
-
-    session_id: str = Field(min_length=1)
-    stop_reason: HarnessStopReason = HarnessStopReason.CANCELED
-
-
-class HarnessSessionInspectRequest(BaseModel):
-    """Inspect one persisted harness session."""
-
-    session_id: str = Field(min_length=1)
-    include_replay: bool = False
-
-
-class HarnessSessionListRequest(BaseModel):
-    """List recent persisted harness sessions."""
-
-    limit: int | None = Field(default=None, ge=1)
-    include_replay: bool = False
-
-
-class HarnessSessionInspection(BaseModel):
-    """Typed inspection payload for one stored harness session."""
-
-    snapshot: StoredHarnessState
-    resumed: ResumedHarnessSession
-    summary: HarnessSessionSummary
-    replay: HarnessReplayResult | None = None
-
-
-class HarnessSessionListItem(BaseModel):
-    """One recent persisted harness session."""
-
-    snapshot: StoredHarnessState
-    summary: HarnessSessionSummary
-    replay: HarnessReplayResult | None = None
-
-
-class HarnessSessionListResult(BaseModel):
-    """Recent stored harness sessions in newest-first order."""
-
-    sessions: list[HarnessSessionListItem] = Field(default_factory=list)
 
 
 class HarnessSessionService:
@@ -258,9 +208,7 @@ class HarnessSessionService:
                 context = sanitize_pending_approval_context(
                     snapshot.state.pending_approvals[0].base_context
                 )
-            turn_trace = build_turn_trace(
-                turn=tail_turn, context=context, tasks_state=state
-            )
+            turn_trace = build_turn_trace(turn=tail_turn, context=context)
         session = state.session.model_copy(
             update={"ended_at": now, "stop_reason": request.stop_reason}
         )

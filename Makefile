@@ -4,11 +4,12 @@ PYTHON := $(VENV)/bin/python
 SRC_DIR := src
 TEST_DIR := tests
 PACKAGE := llm_tools
+PYTEST_FLAGS ?= -s
 
 .PHONY: \
 	help setup-venv install-dev \
 	format format-check \
-	lint typecheck \
+	lint typecheck dead-code reachability \
 	test coverage coverage-report \
 	package clean ci
 
@@ -20,12 +21,14 @@ help:
 	@echo "  make format-check - Check Ruff formatting"
 	@echo "  make lint         - Run Ruff linting"
 	@echo "  make typecheck    - Run mypy static checks"
+	@echo "  make dead-code    - Run Vulture dead-code checks"
+	@echo "  make reachability - Run mypy and Vulture reachability checks"
 	@echo "  make test         - Run the test suite"
 	@echo "  make coverage     - Run tests and enforce 90% per-file coverage"
 	@echo "  make coverage-report - Run tests with terminal and JSON coverage reporting"
 	@echo "  make package      - Build source and wheel distributions"
 	@echo "  make clean        - Remove local build and test artifacts"
-	@echo "  make ci           - Run format-check, lint, typecheck, and coverage gates"
+	@echo "  make ci           - Run format-check, lint, reachability, and coverage gates"
 
 $(PYTHON):
 	mkdir -p "$(dir $(VENV))"
@@ -49,11 +52,16 @@ lint:
 typecheck:
 	"$(PYTHON)" -m mypy $(SRC_DIR)
 
+dead-code:
+	"$(PYTHON)" -m vulture
+
+reachability: typecheck dead-code
+
 test:
-	"$(PYTHON)" -m pytest
+	"$(PYTHON)" -m pytest $(PYTEST_FLAGS)
 
 coverage-report:
-	"$(PYTHON)" -m pytest --cov=$(PACKAGE) --cov-report=term-missing --cov-report=json:coverage.json
+	"$(PYTHON)" -m pytest $(PYTEST_FLAGS) --cov=$(PACKAGE) --cov-report=term-missing --cov-report=json:coverage.json
 
 coverage: coverage-report
 	"$(PYTHON)" scripts/check_coverage.py --input coverage.json --threshold 90
@@ -65,4 +73,4 @@ clean:
 	rm -rf build dist .coverage .mypy_cache .pytest_cache .ruff_cache *.egg-info src/*.egg-info coverage.json
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
 
-ci: format-check lint typecheck coverage
+ci: format-check lint reachability coverage

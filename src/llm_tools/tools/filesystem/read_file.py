@@ -2,25 +2,18 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
-
 from llm_tools.tool_api import SideEffectClass, Tool, ToolExecutionContext, ToolSpec
 from llm_tools.tools.filesystem._ops import read_file_impl
 from llm_tools.tools.filesystem._shared import (
     append_local_source_provenance,
     require_repository_metadata,
 )
-from llm_tools.tools.filesystem.models import FileReadResult
-
-
-class ReadFileInput(BaseModel):
-    path: str
-    start_char: int | None = Field(default=None, ge=0)
-    end_char: int | None = Field(default=None, ge=0)
-
-
-class ReadFileOutput(FileReadResult):
-    pass
+from llm_tools.tools.filesystem.read_file_models import (
+    ReadFileInput as ReadFileInput,
+)
+from llm_tools.tools.filesystem.read_file_models import (
+    ReadFileOutput as ReadFileOutput,
+)
 
 
 class ReadFileTool(Tool[ReadFileInput, ReadFileOutput]):

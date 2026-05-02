@@ -115,12 +115,10 @@ class DefaultHarnessTurnDriver:
         self._context_builder = context_builder or DefaultHarnessContextBuilder()
         self._workspace = workspace
         self._adapter = ActionEnvelopeAdapter()
-        self._last_selection: list[str] = []
         self._last_state: HarnessState | None = None
 
     def select_task_ids(self, *, state: HarnessState) -> list[str]:
         selection = self._planner.select_tasks(state=state)
-        self._last_selection = list(selection.selected_task_ids)
         return list(selection.selected_task_ids)
 
     def build_context(

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import cast
 
-from pydantic import BaseModel, Field
-
 from llm_tools.tool_api import SideEffectClass, Tool, ToolExecutionContext, ToolSpec
 from llm_tools.tools.atlassian._shared import (
     _CONFLUENCE_ENV_KEYS,
@@ -18,21 +16,12 @@ from llm_tools.tools.atlassian._shared import (
     _get_value,
     _normalize_remote_exception,
 )
-from llm_tools.tools.filesystem.models import FileReadResult
-
-
-class ReadConfluencePageInput(BaseModel):
-    page_id: str
-    start_char: int | None = Field(default=None, ge=0)
-    end_char: int | None = Field(default=None, ge=0)
-
-
-class ReadConfluencePageOutput(FileReadResult):
-    page_id: str
-    title: str | None = None
-    space_key: str | None = None
-    web_url: str | None = None
-    representation: str | None = None
+from llm_tools.tools.atlassian.read_confluence_page_models import (
+    ReadConfluencePageInput as ReadConfluencePageInput,
+)
+from llm_tools.tools.atlassian.read_confluence_page_models import (
+    ReadConfluencePageOutput as ReadConfluencePageOutput,
+)
 
 
 class ReadConfluencePageTool(Tool[ReadConfluencePageInput, ReadConfluencePageOutput]):

@@ -51,6 +51,7 @@ dev = [
   "pytest-cov>=5,<7",
   "ruff>=0.6,<1",
   "setuptools>=82,<83",
+  "vulture>=2.16,<3",
   "wheel>=0.46,<0.47",
 ]
 
@@ -94,6 +95,7 @@ mypy_path = ["src"]
 packages = ["llm_tools"]
 strict = true
 warn_unused_configs = true
+warn_unreachable = true
 pretty = true
 show_error_codes = true
 
@@ -108,6 +110,11 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["gitlab"]
 ignore_missing_imports = true
+
+[tool.vulture]
+paths = ["src", "vulture_whitelist.py"]
+exclude = ["*/models.py", "*_models.py"]
+ignore_decorators = ["@ui.page", "@event.listens_for"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

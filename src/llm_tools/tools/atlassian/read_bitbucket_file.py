@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
-
 from llm_tools.tool_api import SideEffectClass, Tool, ToolExecutionContext, ToolSpec
 from llm_tools.tools.atlassian._shared import (
     _BITBUCKET_ENV_KEYS,
@@ -14,22 +12,12 @@ from llm_tools.tools.atlassian._shared import (
     _get_tool_limits,
     _normalize_remote_exception,
 )
-from llm_tools.tools.filesystem.models import FileReadResult
-
-
-class ReadBitbucketFileInput(BaseModel):
-    project_key: str
-    repository_slug: str
-    path: str
-    ref: str | None = None
-    start_char: int | None = Field(default=None, ge=0)
-    end_char: int | None = Field(default=None, ge=0)
-
-
-class ReadBitbucketFileOutput(FileReadResult):
-    project_key: str
-    repository_slug: str
-    ref: str
+from llm_tools.tools.atlassian.read_bitbucket_file_models import (
+    ReadBitbucketFileInput as ReadBitbucketFileInput,
+)
+from llm_tools.tools.atlassian.read_bitbucket_file_models import (
+    ReadBitbucketFileOutput as ReadBitbucketFileOutput,
+)
 
 
 class ReadBitbucketFileTool(Tool[ReadBitbucketFileInput, ReadBitbucketFileOutput]):

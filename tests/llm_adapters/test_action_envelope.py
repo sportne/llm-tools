@@ -322,6 +322,30 @@ def test_parse_model_output_normalizes_simplified_json_final_response_model() ->
     }
 
 
+def test_simplified_json_response_model_rejects_invalid_mode_combinations() -> None:
+    adapter = ActionEnvelopeAdapter()
+    response_model = adapter.build_response_model(
+        _specs(),
+        _input_models(),
+        simplify_json_schema=True,
+    )
+
+    with pytest.raises(ValueError):
+        adapter.parse_model_output(
+            {"mode": "actions", "actions": [], "final_response": None},
+            response_model=response_model,
+        )
+    with pytest.raises(ValueError):
+        adapter.parse_model_output(
+            {
+                "mode": "final",
+                "actions": [{"tool_name": "echo", "arguments": {"value": "x"}}],
+                "final_response": None,
+            },
+            response_model=response_model,
+        )
+
+
 def test_build_decision_step_model_constrains_tool_names() -> None:
     adapter = ActionEnvelopeAdapter()
     response_model = adapter.build_decision_step_model(_specs())
@@ -514,6 +538,40 @@ def test_single_action_step_rejects_mixed_or_invalid_tool_payloads() -> None:
             tool_specs=_specs(),
             input_models=_input_models(),
         )
+
+
+def test_single_action_step_rejects_invalid_tool_or_finalize_mode_combinations() -> (
+    None
+):
+    adapter = ActionEnvelopeAdapter()
+    response_model = adapter.build_single_action_step_model(
+        _specs(),
+        final_response_model=ChatFinalResponse,
+    )
+
+    invalid_payloads: list[dict[str, object]] = [
+        {"mode": "tool", "arguments": {"value": "x"}},
+        {
+            "mode": "finalize",
+            "tool_name": "echo",
+            "final_response": {"answer": "done", "citations": []},
+        },
+        {
+            "mode": "finalize",
+            "arguments": {"value": "x"},
+            "final_response": {"answer": "done", "citations": []},
+        },
+        {"mode": "finalize"},
+    ]
+
+    for payload in invalid_payloads:
+        with pytest.raises(ValueError):
+            adapter.parse_single_action_step(
+                payload,
+                response_model=response_model,
+                tool_specs=_specs(),
+                input_models=_input_models(),
+            )
 
 
 class _LooseAnythingEnvelope(BaseModel):

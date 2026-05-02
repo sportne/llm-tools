@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
-
 from llm_tools.tool_api import SideEffectClass, Tool, ToolExecutionContext, ToolSpec
 from llm_tools.tools.filesystem._ops import get_file_info_impl
 from llm_tools.tools.filesystem._shared import require_repository_metadata
-from llm_tools.tools.filesystem.models import FileInfoResult, GetFileInfoInputShape
-
-
-class GetFileInfoInput(GetFileInfoInputShape):
-    pass
-
-
-class GetFileInfoOutput(BaseModel):
-    results: list[FileInfoResult] = Field(default_factory=list)
+from llm_tools.tools.filesystem.get_file_info_models import (
+    GetFileInfoInput as GetFileInfoInput,
+)
+from llm_tools.tools.filesystem.get_file_info_models import (
+    GetFileInfoOutput as GetFileInfoOutput,
+)
+from llm_tools.tools.filesystem.models import FileInfoResult
 
 
 class GetFileInfoTool(Tool[GetFileInfoInput, GetFileInfoOutput]):

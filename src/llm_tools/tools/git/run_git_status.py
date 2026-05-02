@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
-
 from llm_tools.tool_api import (
     RiskLevel,
     SideEffectClass,
@@ -15,12 +13,9 @@ from llm_tools.tools.git._shared import (
     GIT_COMMAND_TIMEOUT_SECONDS,
     GitCommandInput,
 )
-
-
-class RunGitStatusOutput(BaseModel):
-    resolved_root: str
-    status_text: str
-    truncated: bool = False
+from llm_tools.tools.git.run_git_status_models import (
+    RunGitStatusOutput as RunGitStatusOutput,
+)
 
 
 class RunGitStatusTool(Tool[GitCommandInput, RunGitStatusOutput]):

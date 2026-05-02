@@ -49,6 +49,7 @@ from llm_tools.workflow_api.models import (
     WorkflowInvocationStatus,
     WorkflowTurnResult,
 )
+from llm_tools.workflow_api.staged_structured import repair_stage_guidance
 
 
 class _FakeProvider:
@@ -1561,11 +1562,9 @@ def test_chat_session_runner_stage_helpers_cover_remaining_edges(
     )
 
     assert runner._validation_error_summary(RuntimeError("")) == "RuntimeError"
-    assert runner._repair_stage_guidance("tool:read_file").startswith(
-        "Tool stage rules:"
-    )
+    assert repair_stage_guidance("tool:read_file").startswith("Tool stage rules:")
     assert (
-        runner._repair_stage_guidance("mystery")
+        repair_stage_guidance("mystery")
         == "Return only the fields required for this stage."
     )
     assert runner._format_invalid_payload(None) == "(unavailable)"

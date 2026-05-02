@@ -7,12 +7,13 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
-from pydantic import BaseModel
-
 import llm_tools.harness_api.executor as executor_api
 from llm_tools.harness_api.executor_approvals import (
     ApprovalResolution,
     HarnessRetryPolicy,
+)
+from llm_tools.harness_api.executor_loop_models import (
+    HarnessExecutionResult as HarnessExecutionResult,
 )
 from llm_tools.harness_api.executor_persistence import (
     load_required_snapshot,
@@ -49,13 +50,6 @@ from llm_tools.workflow_api import (
     WorkflowInvocationStatus,
     WorkflowTurnResult,
 )
-
-
-class HarnessExecutionResult(BaseModel):
-    """Final stored snapshot and resume view after executor work stops."""
-
-    snapshot: StoredHarnessState
-    resumed: ResumedHarnessSession
 
 
 @runtime_checkable
@@ -391,7 +385,6 @@ class HarnessExecutor:
                 turn_trace=build_turn_trace(
                     turn=checkpoint_turn,
                     context=context,
-                    tasks_state=checkpoint_state,
                 ),
             ),
         )
@@ -523,7 +516,6 @@ class HarnessExecutor:
                         turn_trace=build_turn_trace(
                             turn=waiting_turn,
                             context=context,
-                            tasks_state=waiting_state,
                         ),
                     ),
                 )
@@ -689,7 +681,6 @@ class HarnessExecutor:
                 turn_trace=build_turn_trace(
                     turn=checkpoint_turn,
                     context=context,
-                    tasks_state=checkpoint_state,
                 ),
             ),
         )
@@ -823,7 +814,6 @@ class HarnessExecutor:
                         turn_trace=build_turn_trace(
                             turn=waiting_turn,
                             context=context,
-                            tasks_state=waiting_state,
                         ),
                     ),
                 )
@@ -1155,7 +1145,6 @@ class HarnessExecutor:
                 turn_trace=build_turn_trace(
                     turn=finalized_turn,
                     context=context,
-                    tasks_state=new_state,
                 ),
             ),
         )
@@ -1224,7 +1213,6 @@ class HarnessExecutor:
                 turn_trace=build_turn_trace(
                     turn=finalized_turn,
                     context=context,
-                    tasks_state=new_state,
                 ),
             ),
         )

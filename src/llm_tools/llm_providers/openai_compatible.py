@@ -9,9 +9,18 @@ from enum import Enum
 from typing import Any, cast
 
 from openai import AsyncOpenAI, OpenAI
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
+from llm_tools.llm_providers.openai_compatible_models import (
+    ProviderModeStrategy as ProviderModeStrategy,
+)
+from llm_tools.llm_providers.openai_compatible_models import (
+    ProviderPreflightResult as ProviderPreflightResult,
+)
+from llm_tools.llm_providers.openai_compatible_models import (
+    _ProviderPreflightResponse as _ProviderPreflightResponse,
+)
 
 try:
     import instructor as _instructor
@@ -36,33 +45,6 @@ class _InstructorShim:
 
 
 _INSTRUCTOR_FALLBACK = _InstructorShim()
-
-
-class ProviderModeStrategy(str, Enum):  # noqa: UP042
-    """Instructor mode strategy for provider calls."""
-
-    AUTO = "auto"
-    TOOLS = "tools"
-    JSON = "json"
-    PROMPT_TOOLS = "prompt_tools"
-
-
-class ProviderPreflightResult(BaseModel):
-    """Typed result for one provider connectivity and mode probe."""
-
-    ok: bool
-    connection_succeeded: bool = False
-    model_accepted: bool = False
-    selected_mode_supported: bool = False
-    model_listing_supported: bool = False
-    available_models: list[str] = Field(default_factory=list)
-    resolved_mode: ProviderModeStrategy | None = None
-    actionable_message: str
-    error_message: str | None = None
-
-
-class _ProviderPreflightResponse(BaseModel):
-    status: str
 
 
 class StructuredOutputValidationError(ValueError):

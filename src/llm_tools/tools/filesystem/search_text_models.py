@@ -22,3 +22,21 @@ class TextSearchResult(BaseModel):
     query: str
     matches: list[TextSearchMatch] = Field(default_factory=list)
     truncated: bool = False
+
+
+class SearchTextInput(BaseModel):
+    path: str = "."
+    query: str
+    include_hidden: bool = False
+
+
+class SearchTextOutput(TextSearchResult):
+    pass
+
+
+__all__ = [
+    "SearchTextInput",
+    "TextSearchMatch",
+    "TextSearchResult",
+    "SearchTextOutput",
+]

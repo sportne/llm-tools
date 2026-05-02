@@ -63,6 +63,14 @@ class _AsyncProvider:
         return ParsedModelResponse(final_response="async")
 
 
+def test_task_selection_rejects_duplicate_or_blank_diagnostics() -> None:
+    with pytest.raises(ValueError, match="selected_task_ids must be unique"):
+        TaskSelection(selected_task_ids=["task-1", "task-1"])
+
+    with pytest.raises(ValueError, match="blocked_reasons must not contain empty"):
+        TaskSelection(blocked_reasons=[" "])
+
+
 def test_scripted_provider_run_async_and_exhaustion() -> None:
     provider = ScriptedParsedResponseProvider(
         [ParsedModelResponse(final_response="done")]

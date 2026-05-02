@@ -4,35 +4,23 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from pydantic import BaseModel, Field
-
 from llm_tools.tool_api import SideEffectClass, Tool, ToolExecutionContext, ToolSpec
 from llm_tools.tools.atlassian._shared import (
     _JIRA_ENV_KEYS,
-    _REMOTE_COLLECTION_LIMIT,
     _REMOTE_TOOL_TIMEOUT_SECONDS,
     _extract_issue_fields,
     _normalize_remote_exception,
     _search_fetch_limit,
 )
-
-
-class JiraIssueSummary(BaseModel):
-    key: str
-    summary: str | None = None
-    status: str | None = None
-    issue_type: str | None = None
-    assignee: str | None = None
-
-
-class SearchJiraInput(BaseModel):
-    jql: str
-    limit: int = Field(default=20, ge=1, le=_REMOTE_COLLECTION_LIMIT)
-
-
-class SearchJiraOutput(BaseModel):
-    issues: list[JiraIssueSummary] = Field(default_factory=list)
-    truncated: bool = False
+from llm_tools.tools.atlassian.search_jira_models import (
+    JiraIssueSummary as JiraIssueSummary,
+)
+from llm_tools.tools.atlassian.search_jira_models import (
+    SearchJiraInput as SearchJiraInput,
+)
+from llm_tools.tools.atlassian.search_jira_models import (
+    SearchJiraOutput as SearchJiraOutput,
+)
 
 
 class SearchJiraTool(Tool[SearchJiraInput, SearchJiraOutput]):

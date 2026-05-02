@@ -56,9 +56,3 @@ def relative_display_path(root: Path, target: Path) -> str:
     if target == root:
         return "."
     return target.relative_to(root).as_posix()
-
-
-def is_hidden_path(root: Path, target: Path) -> bool:
-    """Return whether a path is hidden relative to the workspace root."""
-    relative = target.relative_to(root)
-    return any(part.startswith(".") for part in relative.parts)

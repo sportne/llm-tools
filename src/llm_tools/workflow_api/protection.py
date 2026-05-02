@@ -7,20 +7,49 @@ from llm_tools.workflow_api.protection_controller import (
     _sanitize_payload,
 )
 from llm_tools.workflow_api.protection_models import (
-    EnvironmentComparator,
-    PromptProtectionDecision,
-    ProtectionAction,
-    ProtectionAssessment,
-    ProtectionCategory,
-    ProtectionConfig,
-    ProtectionCorpus,
-    ProtectionDocument,
-    ProtectionEnvironment,
-    ProtectionFeedbackEntry,
-    ProtectionFeedbackPrompt,
-    ProtectionPendingPrompt,
-    ResponseProtectionDecision,
-    SensitivityClassifier,
+    EnvironmentComparator as EnvironmentComparator,
+)
+from llm_tools.workflow_api.protection_models import (
+    PromptProtectionDecision as PromptProtectionDecision,
+)
+from llm_tools.workflow_api.protection_models import (
+    ProtectionAction as ProtectionAction,
+)
+from llm_tools.workflow_api.protection_models import (
+    ProtectionAssessment as ProtectionAssessment,
+)
+from llm_tools.workflow_api.protection_models import (
+    ProtectionCategory as ProtectionCategory,
+)
+from llm_tools.workflow_api.protection_models import (
+    ProtectionConfig as ProtectionConfig,
+)
+from llm_tools.workflow_api.protection_models import (
+    ProtectionCorpus as ProtectionCorpus,
+)
+from llm_tools.workflow_api.protection_models import (
+    ProtectionDocument as ProtectionDocument,
+)
+from llm_tools.workflow_api.protection_models import (
+    ProtectionEnvironment as ProtectionEnvironment,
+)
+from llm_tools.workflow_api.protection_models import (
+    ProtectionFeedbackEntry as ProtectionFeedbackEntry,
+)
+from llm_tools.workflow_api.protection_models import (
+    ProtectionFeedbackFile as ProtectionFeedbackFile,
+)
+from llm_tools.workflow_api.protection_models import (
+    ProtectionFeedbackPrompt as ProtectionFeedbackPrompt,
+)
+from llm_tools.workflow_api.protection_models import (
+    ProtectionPendingPrompt as ProtectionPendingPrompt,
+)
+from llm_tools.workflow_api.protection_models import (
+    ResponseProtectionDecision as ResponseProtectionDecision,
+)
+from llm_tools.workflow_api.protection_models import (
+    SensitivityClassifier as SensitivityClassifier,
 )
 from llm_tools.workflow_api.protection_provenance import (
     collect_provenance_from_tool_results,

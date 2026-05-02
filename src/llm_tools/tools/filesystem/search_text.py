@@ -2,26 +2,25 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
-
 from llm_tools.tool_api import SideEffectClass, Tool, ToolExecutionContext, ToolSpec
 from llm_tools.tool_api.execution import get_workspace_root
 from llm_tools.tools.filesystem._shared import (
     require_repository_metadata,
     source_filters_for_call,
 )
-from llm_tools.tools.filesystem.search_text_models import TextSearchResult
+from llm_tools.tools.filesystem.search_text_models import (
+    SearchTextInput as SearchTextInput,
+)
+from llm_tools.tools.filesystem.search_text_models import (
+    SearchTextOutput as SearchTextOutput,
+)
+from llm_tools.tools.filesystem.search_text_models import (
+    TextSearchMatch as TextSearchMatch,
+)
+from llm_tools.tools.filesystem.search_text_models import (
+    TextSearchResult as TextSearchResult,
+)
 from llm_tools.tools.filesystem.search_text_ops import search_text_impl
-
-
-class SearchTextInput(BaseModel):
-    path: str = "."
-    query: str
-    include_hidden: bool = False
-
-
-class SearchTextOutput(TextSearchResult):
-    pass
 
 
 class SearchTextTool(Tool[SearchTextInput, SearchTextOutput]):

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
-
 from llm_tools.tool_api import (
     RiskLevel,
     SideEffectClass,
@@ -13,19 +11,13 @@ from llm_tools.tool_api import (
 )
 from llm_tools.tools.git._shared import (
     GIT_COMMAND_TIMEOUT_SECONDS,
-    MAX_GIT_LOG_LIMIT,
 )
-
-
-class RunGitLogInput(BaseModel):
-    path: str = "."
-    limit: int = Field(default=10, ge=1, le=MAX_GIT_LOG_LIMIT)
-
-
-class RunGitLogOutput(BaseModel):
-    resolved_root: str
-    log_text: str
-    truncated: bool = False
+from llm_tools.tools.git.run_git_log_models import (
+    RunGitLogInput as RunGitLogInput,
+)
+from llm_tools.tools.git.run_git_log_models import (
+    RunGitLogOutput as RunGitLogOutput,
+)
 
 
 class RunGitLogTool(Tool[RunGitLogInput, RunGitLogOutput]):

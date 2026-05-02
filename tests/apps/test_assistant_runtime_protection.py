@@ -45,6 +45,7 @@ from llm_tools.workflow_api import (
     WorkflowTurnResult,
 )
 from llm_tools.workflow_api.executor import PreparedModelInteraction
+from llm_tools.workflow_api.staged_structured import repair_stage_guidance
 
 
 class _Provider:
@@ -845,12 +846,12 @@ def test_direct_research_provider_repairs_invalid_sync_stage_and_exposes_helpers
         bad_keys
     ) == str(bad_keys)
     assert (
-        provider_module.AssistantHarnessTurnProvider._repair_stage_guidance("other")
+        repair_stage_guidance("other")
         == "Return only the fields required for this stage."
     )
-    assert provider_module.AssistantHarnessTurnProvider._repair_stage_guidance(
-        "final_response"
-    ).startswith("Finalization stage rules:")
+    assert repair_stage_guidance("final_response").startswith(
+        "Finalization stage rules:"
+    )
     try:
         provider_module.AssistantHarnessTurnProvider._tool_spec([], "missing")
     except ValueError as exc:

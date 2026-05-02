@@ -5,8 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import cast
 
-from pydantic import BaseModel, Field
-
 from llm_tools.tool_api import SideEffectClass, Tool, ToolExecutionContext, ToolSpec
 from llm_tools.tools.gitlab._shared import (
     GITLAB_ENV_KEYS,
@@ -17,30 +15,15 @@ from llm_tools.tools.gitlab._shared import (
     search_fetch_limit,
     search_project_code,
 )
-
-
-class SearchGitLabCodeInput(BaseModel):
-    project: str
-    query: str
-    ref: str | None = None
-    limit: int = Field(default=20, ge=1, le=100)
-
-
-class GitLabCodeSearchMatch(BaseModel):
-    project: str
-    path: str
-    name: str
-    ref: str | None = None
-    start_line: int | None = None
-    snippet: str | None = None
-
-
-class SearchGitLabCodeOutput(BaseModel):
-    project: str
-    query: str
-    ref: str | None = None
-    matches: list[GitLabCodeSearchMatch] = Field(default_factory=list)
-    truncated: bool = False
+from llm_tools.tools.gitlab.search_gitlab_code_models import (
+    GitLabCodeSearchMatch as GitLabCodeSearchMatch,
+)
+from llm_tools.tools.gitlab.search_gitlab_code_models import (
+    SearchGitLabCodeInput as SearchGitLabCodeInput,
+)
+from llm_tools.tools.gitlab.search_gitlab_code_models import (
+    SearchGitLabCodeOutput as SearchGitLabCodeOutput,
+)
 
 
 class SearchGitLabCodeTool(Tool[SearchGitLabCodeInput, SearchGitLabCodeOutput]):

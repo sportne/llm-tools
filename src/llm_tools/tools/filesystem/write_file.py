@@ -2,27 +2,16 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
-
 from llm_tools.tool_api import SideEffectClass, Tool, ToolExecutionContext, ToolSpec
 from llm_tools.tool_api.execution import get_workspace_root
 from llm_tools.tools._path_utils import relative_display_path
 from llm_tools.tools.filesystem._paths import resolve_writable_file_path
-
-
-class WriteFileInput(BaseModel):
-    path: str
-    content: str
-    encoding: str = "utf-8"
-    overwrite: bool = False
-    create_parents: bool = False
-
-
-class WriteFileOutput(BaseModel):
-    path: str
-    resolved_path: str
-    bytes_written: int
-    created: bool
+from llm_tools.tools.filesystem.write_file_models import (
+    WriteFileInput as WriteFileInput,
+)
+from llm_tools.tools.filesystem.write_file_models import (
+    WriteFileOutput as WriteFileOutput,
+)
 
 
 class WriteFileTool(Tool[WriteFileInput, WriteFileOutput]):

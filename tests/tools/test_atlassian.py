@@ -211,6 +211,14 @@ def test_read_jira_issue_tool_maps_issue_payload(
     assert result.requested_fields["priority"]["name"] == "High"
 
 
+def test_read_jira_issue_input_rejects_duplicate_or_blank_requested_fields() -> None:
+    with pytest.raises(ValueError, match="requested_fields must be unique"):
+        ReadJiraIssueTool.input_model(issue_key="DEMO-2", requested_fields=["a", "a"])
+
+    with pytest.raises(ValueError, match="requested_fields must not contain empty"):
+        ReadJiraIssueTool.input_model(issue_key="DEMO-2", requested_fields=[" "])
+
+
 def test_jira_tools_require_context_env_credentials() -> None:
     result = _execute_tool(
         "search_jira",

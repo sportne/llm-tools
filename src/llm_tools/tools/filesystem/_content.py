@@ -229,7 +229,7 @@ def convert_with_markitdown(path: Path) -> str:
     """Convert a supported non-text document into markdown text."""
     from markitdown import MarkItDown
 
-    result = MarkItDown().convert(str(path))
+    result: object = MarkItDown().convert(str(path))
     if isinstance(result, str):
         return result
     for attribute in ("text_content", "markdown", "text"):
@@ -250,12 +250,14 @@ def _get_mpxj_reader_class() -> Any:
     """Return the MPXJ reader class after starting the JVM once."""
     global _MPXJ_JVM_READY, _MPXJ_READER_CLASS
 
-    if _MPXJ_READER_CLASS is not None:
-        return _MPXJ_READER_CLASS
+    reader_class = _MPXJ_READER_CLASS
+    if reader_class is not None:
+        return reader_class
 
     with _MPXJ_JVM_LOCK:
-        if _MPXJ_READER_CLASS is not None:
-            return _MPXJ_READER_CLASS
+        reader_class = _MPXJ_READER_CLASS
+        if reader_class is not None:
+            return reader_class
 
         try:
             jpype = _import_mpxj_runtime()
@@ -759,8 +761,3 @@ def build_file_info_result(
         and character_count <= full_read_char_limit,
         error_message=loaded_content.error_message,
     )
-
-
-def dump_json(payload: object) -> str:
-    """Return a stable compact JSON string."""
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))

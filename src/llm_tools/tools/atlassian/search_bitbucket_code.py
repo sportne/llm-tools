@@ -4,38 +4,24 @@ from __future__ import annotations
 
 from typing import cast
 
-from pydantic import BaseModel, Field
-
 from llm_tools.tool_api import SideEffectClass, Tool, ToolExecutionContext, ToolSpec
 from llm_tools.tools.atlassian._shared import (
     _BITBUCKET_ENV_KEYS,
-    _REMOTE_COLLECTION_LIMIT,
     _REMOTE_TOOL_TIMEOUT_SECONDS,
     _extract_collection,
     _get_value,
     _normalize_remote_exception,
     _search_fetch_limit,
 )
-
-
-class SearchBitbucketCodeInput(BaseModel):
-    project_key: str
-    query: str
-    limit: int = Field(default=20, ge=1, le=_REMOTE_COLLECTION_LIMIT)
-
-
-class BitbucketCodeMatch(BaseModel):
-    repository_slug: str | None = None
-    path: str
-    line_number: int | None = None
-    snippet: str | None = None
-
-
-class SearchBitbucketCodeOutput(BaseModel):
-    project_key: str
-    query: str
-    matches: list[BitbucketCodeMatch] = Field(default_factory=list)
-    truncated: bool = False
+from llm_tools.tools.atlassian.search_bitbucket_code_models import (
+    BitbucketCodeMatch as BitbucketCodeMatch,
+)
+from llm_tools.tools.atlassian.search_bitbucket_code_models import (
+    SearchBitbucketCodeInput as SearchBitbucketCodeInput,
+)
+from llm_tools.tools.atlassian.search_bitbucket_code_models import (
+    SearchBitbucketCodeOutput as SearchBitbucketCodeOutput,
+)
 
 
 class SearchBitbucketCodeTool(

@@ -108,7 +108,6 @@ class NiceGUITurnState:
     status_text: str = ""
     status_history: list[str] = field(default_factory=list)
     pending_approval: ChatWorkflowApprovalState | None = None
-    approval_decision_in_flight: bool = False
     active_turn_number: int = 0
     active_turn_started_at: str | None = None
     last_workbench_entry_at: str | None = None
@@ -728,7 +727,6 @@ class NiceGUIChatController:
         turn_state.active_turn_started_at = _now_iso()
         turn_state.last_workbench_entry_at = turn_state.active_turn_started_at
         turn_state.pending_approval = None
-        turn_state.approval_decision_in_flight = False
         turn_state.active_turn_number += 1
         handle = NiceGUIActiveTurnHandle(
             session_id=session_id,
@@ -796,7 +794,6 @@ class NiceGUIChatController:
         turn_state.active_turn_started_at = _now_iso()
         turn_state.last_workbench_entry_at = turn_state.active_turn_started_at
         turn_state.pending_approval = None
-        turn_state.approval_decision_in_flight = False
         turn_state.active_turn_number += 1
         handle = NiceGUIActiveTurnHandle(
             session_id=session_id,
@@ -844,7 +841,6 @@ class NiceGUIChatController:
         turn_state.cancelling = False
         turn_state.status_text = "resuming deep task"
         _remember_status(turn_state, "resuming deep task")
-        turn_state.approval_decision_in_flight = True
         turn_state.active_turn_started_at = _now_iso()
         turn_state.last_workbench_entry_at = turn_state.active_turn_started_at
         turn_state.active_turn_number += 1
@@ -928,8 +924,8 @@ class NiceGUIChatController:
             return False
         resolved = handle.runner.resolve_pending_approval(approved)
         if resolved:
-            turn_state.approval_decision_in_flight = True
-        return resolved
+            return resolved
+        return False
 
     def cancel_active_turn(self) -> bool:
         """Request cancellation for the active turn."""
@@ -1327,7 +1323,6 @@ class NiceGUIChatController:
         if event.kind == "approval_requested":
             approval_event = ChatWorkflowApprovalEvent.model_validate(event.payload)
             turn_state.pending_approval = approval_event.approval
-            turn_state.approval_decision_in_flight = False
             turn_state.status_text = "approval required"
             _remember_status(turn_state, "approval required")
             record.transcript.append(
@@ -1344,7 +1339,6 @@ class NiceGUIChatController:
                 event.payload
             )
             turn_state.pending_approval = None
-            turn_state.approval_decision_in_flight = False
             record.transcript.append(
                 NiceGUITranscriptEntry(
                     role="system",
@@ -1451,7 +1445,6 @@ class NiceGUIChatController:
         )
         record.token_usage = result.token_usage
         turn_state.pending_approval = None
-        turn_state.approval_decision_in_flight = False
         if result.context_warning:
             record.transcript.append(
                 NiceGUITranscriptEntry(
@@ -1517,7 +1510,6 @@ class NiceGUIChatController:
         turn_state = self.turn_state_for(session_id)
         pending_approval = inspection.resumed.pending_approval
         turn_state.pending_approval = None
-        turn_state.approval_decision_in_flight = False
         turn_state.pending_harness_session_id = None
         if pending_approval is not None:
             approval_request = pending_approval.approval_request
@@ -1606,7 +1598,6 @@ class NiceGUIChatController:
         turn_state.last_workbench_entry_at = None
         turn_state.pending_approval = None
         turn_state.pending_harness_session_id = None
-        turn_state.approval_decision_in_flight = False
         turn_state.queued_follow_up_prompt = pending
         turn_state.cancelling = False
 

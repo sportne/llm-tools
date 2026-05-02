@@ -2,26 +2,18 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
-
 from llm_tools.tool_api import SideEffectClass, Tool, ToolExecutionContext, ToolSpec
 from llm_tools.tools.filesystem._ops import list_directory_impl
 from llm_tools.tools.filesystem._shared import (
     require_repository_metadata,
     source_filters_for_call,
 )
-from llm_tools.tools.filesystem.models import DirectoryListingResult
-
-
-class ListDirectoryInput(BaseModel):
-    path: str = "."
-    recursive: bool = False
-    max_depth: int | None = Field(default=None, gt=0)
-    include_hidden: bool = False
-
-
-class ListDirectoryOutput(DirectoryListingResult):
-    pass
+from llm_tools.tools.filesystem.list_directory_models import (
+    ListDirectoryInput as ListDirectoryInput,
+)
+from llm_tools.tools.filesystem.list_directory_models import (
+    ListDirectoryOutput as ListDirectoryOutput,
+)
 
 
 class ListDirectoryTool(Tool[ListDirectoryInput, ListDirectoryOutput]):

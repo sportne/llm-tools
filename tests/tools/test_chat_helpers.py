@@ -13,7 +13,6 @@ from llm_tools.tools.filesystem._content import (
     _get_cached_conversion_paths,
     build_file_info_result,
     count_lines,
-    dump_json,
     effective_full_read_char_limit,
     estimate_token_count,
     is_within_character_limit,
@@ -92,7 +91,6 @@ def test_content_helpers_cover_text_binary_markitdown_and_limits(
         normalize_range(start_char=2, end_char=2, character_count=5)
     with pytest.raises(ValueError):
         normalize_range(start_char=6, end_char=None, character_count=5)
-    assert dump_json({"b": 2, "a": 1}) == '{"a":1,"b":2}'
 
 
 def test_build_file_info_result_and_ops_edge_cases(tmp_path: Path) -> None:

@@ -32,7 +32,6 @@ from llm_tools.workflow_api.staged_structured import (
     StagedStructuredToolRunner,
     format_invalid_payload,
     is_repairable_stage_error,
-    repair_stage_guidance,
     tool_spec_by_name,
     validation_error_summary,
 )
@@ -781,10 +780,6 @@ class AssistantHarnessTurnProvider:
     @staticmethod
     def _validation_error_summary(error: Exception) -> str:
         return validation_error_summary(error)
-
-    @staticmethod
-    def _repair_stage_guidance(stage_name: str) -> str:
-        return repair_stage_guidance(stage_name)
 
     @staticmethod
     def _format_invalid_payload(invalid_payload: object | None) -> str:

@@ -11,10 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from pydantic import BaseModel
-
 from llm_tools.tool_api import ToolExecutionContext
 from llm_tools.tool_api.execution import get_workspace_root, resolve_workspace_path
+from llm_tools.tools.git._shared_models import (
+    GitCommandInput as GitCommandInput,
+)
 
 GIT_COMMAND_TIMEOUT_SECONDS = 10
 GIT_COMMAND_OUTPUT_CHAR_LIMIT = 16_000
@@ -36,10 +37,6 @@ class _GitProcessResult:
 class GitCommandResult:
     text: str
     truncated: bool
-
-
-class GitCommandInput(BaseModel):
-    path: str = "."
 
 
 def _build_git_env() -> dict[str, str]:

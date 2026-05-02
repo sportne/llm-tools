@@ -4,12 +4,9 @@ from __future__ import annotations
 
 from typing import cast
 
-from pydantic import BaseModel, Field
-
 from llm_tools.tool_api import SideEffectClass, Tool, ToolExecutionContext, ToolSpec
 from llm_tools.tools.atlassian._shared import (
     _CONFLUENCE_ENV_KEYS,
-    _REMOTE_COLLECTION_LIMIT,
     _REMOTE_TOOL_TIMEOUT_SECONDS,
     _absolute_url,
     _extract_collection,
@@ -17,26 +14,15 @@ from llm_tools.tools.atlassian._shared import (
     _normalize_remote_exception,
     _search_fetch_limit,
 )
-
-
-class SearchConfluenceInput(BaseModel):
-    cql: str
-    limit: int = Field(default=20, ge=1, le=_REMOTE_COLLECTION_LIMIT)
-
-
-class ConfluenceSearchMatch(BaseModel):
-    content_id: str
-    title: str | None = None
-    content_type: str | None = None
-    space_key: str | None = None
-    excerpt: str | None = None
-    web_url: str | None = None
-
-
-class SearchConfluenceOutput(BaseModel):
-    cql: str
-    matches: list[ConfluenceSearchMatch] = Field(default_factory=list)
-    truncated: bool = False
+from llm_tools.tools.atlassian.search_confluence_models import (
+    ConfluenceSearchMatch as ConfluenceSearchMatch,
+)
+from llm_tools.tools.atlassian.search_confluence_models import (
+    SearchConfluenceInput as SearchConfluenceInput,
+)
+from llm_tools.tools.atlassian.search_confluence_models import (
+    SearchConfluenceOutput as SearchConfluenceOutput,
+)
 
 
 class SearchConfluenceTool(Tool[SearchConfluenceInput, SearchConfluenceOutput]):

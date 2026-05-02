@@ -216,7 +216,6 @@ def test_build_turn_trace_preserves_pending_approval_without_workflow_result() -
     trace = build_turn_trace(
         turn=turn,
         context=None,
-        tasks_state=None,
     )
 
     assert turn.pending_approval_request is not None

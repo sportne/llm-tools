@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import cast
 
-from pydantic import BaseModel, Field
-
 from llm_tools.tool_api import SideEffectClass, Tool, ToolExecutionContext, ToolSpec
 from llm_tools.tools.filesystem._content import (
     effective_full_read_char_limit,
@@ -13,7 +11,6 @@ from llm_tools.tools.filesystem._content import (
     is_within_character_limit,
     normalize_range,
 )
-from llm_tools.tools.filesystem.models import FileReadResult
 from llm_tools.tools.gitlab._shared import (
     GITLAB_ENV_KEYS,
     REMOTE_TOOL_TIMEOUT_SECONDS,
@@ -25,19 +22,12 @@ from llm_tools.tools.gitlab._shared import (
     get_value,
     normalize_project_name,
 )
-
-
-class ReadGitLabFileInput(BaseModel):
-    project: str
-    file_path: str
-    ref: str | None = None
-    start_char: int | None = Field(default=None, ge=0)
-    end_char: int | None = Field(default=None, ge=0)
-
-
-class ReadGitLabFileOutput(FileReadResult):
-    project: str
-    ref: str
+from llm_tools.tools.gitlab.read_gitlab_file_models import (
+    ReadGitLabFileInput as ReadGitLabFileInput,
+)
+from llm_tools.tools.gitlab.read_gitlab_file_models import (
+    ReadGitLabFileOutput as ReadGitLabFileOutput,
+)
 
 
 class ReadGitLabFileTool(Tool[ReadGitLabFileInput, ReadGitLabFileOutput]):

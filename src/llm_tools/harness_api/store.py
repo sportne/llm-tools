@@ -8,10 +8,16 @@ from typing import Protocol
 from urllib.parse import quote
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import ValidationError
 
 from llm_tools.harness_api.models import HarnessState
 from llm_tools.harness_api.replay import StoredHarnessArtifacts
+from llm_tools.harness_api.store_models import (
+    StoredHarnessState as StoredHarnessState,
+)
+from llm_tools.harness_api.store_models import (
+    _timestamp as _timestamp,
+)
 
 CURRENT_HARNESS_STATE_SCHEMA_VERSION = "3"
 SUPPORTED_HARNESS_STATE_SCHEMA_VERSIONS = frozenset(
@@ -33,42 +39,6 @@ class HarnessStateCorruptionError(ValueError):
     def __init__(self, path: Path, message: str) -> None:
         self.path = path
         super().__init__(f"{message}: {path}")
-
-
-class StoredHarnessState(BaseModel):
-    """A versioned store snapshot for one persisted harness session."""
-
-    session_id: str
-    revision: str
-    saved_at: str = Field(
-        default_factory=lambda: _timestamp(datetime.now(UTC)),
-        min_length=1,
-    )
-    state: HarnessState
-    artifacts: StoredHarnessArtifacts = Field(default_factory=StoredHarnessArtifacts)
-
-    @model_validator(mode="after")
-    def validate_session_binding(self) -> StoredHarnessState:
-        """Bind the store snapshot identity to the canonical inner state."""
-        if self.session_id != self.state.session.session_id:
-            raise ValueError(
-                "StoredHarnessState session_id must match state.session.session_id."
-            )
-        if (
-            self.artifacts.trace is not None
-            and self.artifacts.trace.session_id != self.session_id
-        ):
-            raise ValueError(
-                "StoredHarnessState trace.session_id must match session_id."
-            )
-        if (
-            self.artifacts.summary is not None
-            and self.artifacts.summary.session_id != self.session_id
-        ):
-            raise ValueError(
-                "StoredHarnessState summary.session_id must match session_id."
-            )
-        return self
 
 
 class HarnessStateStore(Protocol):
@@ -268,7 +238,3 @@ def _resolved_artifacts(
     if current is None:
         return StoredHarnessArtifacts()
     return current.artifacts.model_copy(deep=True)
-
-
-def _timestamp(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")

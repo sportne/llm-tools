@@ -72,7 +72,6 @@ from llm_tools.workflow_api.staged_structured import (
     StagedStructuredToolRunner,
     format_invalid_payload,
     is_repairable_stage_error,
-    repair_stage_guidance,
     tool_spec_by_name,
     validation_error_summary,
 )
@@ -247,7 +246,7 @@ class ChatSessionTurnRunner:
             temperature=self._temperature,
         )
         self._approval_condition = Condition()
-        self._cancel_requested = False
+        self._cancel_requested: bool = False
         self._pending_approval: ChatWorkflowApprovalState | None = None
         self._pending_approval_decision: bool | None = None
         self._grounding_retry_used = False
@@ -258,6 +257,9 @@ class ChatSessionTurnRunner:
         with self._approval_condition:
             self._cancel_requested = True
             self._approval_condition.notify_all()
+
+    def _is_cancel_requested(self) -> bool:
+        return self._cancel_requested
 
     def resolve_pending_approval(self, approved: bool) -> bool:
         """Resolve the currently pending approval request, when present."""
@@ -315,7 +317,7 @@ class ChatSessionTurnRunner:
             return
 
         while True:
-            if self._cancel_requested:
+            if self._is_cancel_requested():
                 yield self._interrupted_event(
                     new_messages=new_messages,
                     tool_results=tool_results,
@@ -1760,10 +1762,6 @@ class ChatSessionTurnRunner:
     @staticmethod
     def _validation_error_summary(error: Exception) -> str:
         return validation_error_summary(error)
-
-    @staticmethod
-    def _repair_stage_guidance(stage_name: str) -> str:
-        return repair_stage_guidance(stage_name)
 
     @staticmethod
     def _format_invalid_payload(invalid_payload: object | None) -> str:

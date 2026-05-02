@@ -4,12 +4,9 @@ from __future__ import annotations
 
 from typing import cast
 
-from pydantic import BaseModel, Field
-
 from llm_tools.tool_api import SideEffectClass, Tool, ToolExecutionContext, ToolSpec
 from llm_tools.tools.atlassian._shared import (
     _BITBUCKET_ENV_KEYS,
-    _REMOTE_COLLECTION_LIMIT,
     _REMOTE_TOOL_TIMEOUT_SECONDS,
     _extract_bitbucket_path,
     _extract_collection,
@@ -17,45 +14,18 @@ from llm_tools.tools.atlassian._shared import (
     _get_value,
     _normalize_remote_exception,
 )
-
-
-class BitbucketPullRequestCommit(BaseModel):
-    id: str | None = None
-    display_id: str | None = None
-    message: str | None = None
-    author_name: str | None = None
-
-
-class BitbucketPullRequestChange(BaseModel):
-    old_path: str | None = None
-    new_path: str | None = None
-    change_type: str | None = None
-    executable: bool | None = None
-
-
-class ReadBitbucketPullRequestInput(BaseModel):
-    project_key: str
-    repository_slug: str
-    pull_request_id: int = Field(ge=1)
-    commit_limit: int = Field(default=20, ge=1, le=_REMOTE_COLLECTION_LIMIT)
-    change_limit: int = Field(default=20, ge=1, le=_REMOTE_COLLECTION_LIMIT)
-
-
-class ReadBitbucketPullRequestOutput(BaseModel):
-    project_key: str
-    repository_slug: str
-    pull_request_id: int
-    title: str | None = None
-    description: str | None = None
-    state: str | None = None
-    author: str | None = None
-    source_branch: str | None = None
-    target_branch: str | None = None
-    web_url: str | None = None
-    commits: list[BitbucketPullRequestCommit] = Field(default_factory=list)
-    commits_truncated: bool = False
-    changed_files: list[BitbucketPullRequestChange] = Field(default_factory=list)
-    changed_files_truncated: bool = False
+from llm_tools.tools.atlassian.read_bitbucket_pull_request_models import (
+    BitbucketPullRequestChange as BitbucketPullRequestChange,
+)
+from llm_tools.tools.atlassian.read_bitbucket_pull_request_models import (
+    BitbucketPullRequestCommit as BitbucketPullRequestCommit,
+)
+from llm_tools.tools.atlassian.read_bitbucket_pull_request_models import (
+    ReadBitbucketPullRequestInput as ReadBitbucketPullRequestInput,
+)
+from llm_tools.tools.atlassian.read_bitbucket_pull_request_models import (
+    ReadBitbucketPullRequestOutput as ReadBitbucketPullRequestOutput,
+)
 
 
 class ReadBitbucketPullRequestTool(

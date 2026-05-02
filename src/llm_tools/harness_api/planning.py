@@ -6,8 +6,6 @@ from collections.abc import Sequence
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from pydantic import BaseModel, Field, model_validator
-
 from llm_tools.harness_api.models import (
     HarnessState,
     TaskLifecycleStatus,
@@ -15,6 +13,9 @@ from llm_tools.harness_api.models import (
     TaskRecord,
     TurnDecision,
     TurnDecisionAction,
+)
+from llm_tools.harness_api.planning_models import (
+    TaskSelection as TaskSelection,
 )
 
 _TERMINAL_TASK_STATUSES = frozenset(
@@ -35,22 +36,6 @@ class ReplanningTrigger(str, Enum):  # noqa: UP042
     SELECTED_TASK_TERMINAL = "selected_task_terminal"
     NEW_DERIVED_TASK_CREATED = "new_derived_task_created"
     NO_ACTIONABLE_TASKS_REMAINING = "no_actionable_tasks_remaining"
-
-
-class TaskSelection(BaseModel):
-    """Deterministic planner output for one harness turn."""
-
-    selected_task_ids: list[str] = Field(default_factory=list)
-    blocked_reasons: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def validate_selection(self) -> TaskSelection:
-        """Require stable unique task ids and diagnostic entries."""
-        if len(set(self.selected_task_ids)) != len(self.selected_task_ids):
-            raise ValueError("selected_task_ids must be unique.")
-        if any(reason.strip() == "" for reason in self.blocked_reasons):
-            raise ValueError("blocked_reasons must not contain empty entries.")
-        return self
 
 
 @runtime_checkable
