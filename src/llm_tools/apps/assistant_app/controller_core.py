@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import queue
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
+from llm_tools.apps import assistant_runtime as _assistant_runtime
 from llm_tools.apps.assistant_app.auth import LocalAuthProvider
 from llm_tools.apps.assistant_app.features import (
     filter_assistant_tool_specs_for_features,
-    visible_enabled_tool_names,
 )
 from llm_tools.apps.assistant_app.models import (
     AssistantBranding,
@@ -33,26 +33,14 @@ from llm_tools.apps.assistant_app.store import (
     remember_default_db_path,
 )
 from llm_tools.apps.assistant_config import AssistantConfig
-from llm_tools.apps.assistant_prompts import (
-    build_assistant_system_prompt,
-    build_research_system_prompt,
-)
-from llm_tools.apps.assistant_research_provider import AssistantHarnessTurnProvider
 from llm_tools.apps.assistant_runtime import (
     build_assistant_available_tool_specs,
-    build_assistant_context,
-    build_assistant_executor,
-    build_assistant_policy,
-    build_protection_controller,
-    build_protection_environment,
-    build_tool_capabilities,
+    build_assistant_runtime_bundle,
     resolve_assistant_default_enabled_tools,
 )
-from llm_tools.apps.chat_runtime import create_provider
 from llm_tools.harness_api import (
     ApprovalResolution,
     BudgetPolicy,
-    DefaultHarnessContextBuilder,
     HarnessSessionCreateRequest,
     HarnessSessionInspection,
     HarnessSessionInspectRequest,
@@ -63,7 +51,6 @@ from llm_tools.harness_api import (
     ResumeDisposition,
     resume_session,
 )
-from llm_tools.harness_api.context import TurnContextBundle
 from llm_tools.tool_api import ToolSpec
 from llm_tools.workflow_api import (
     ChatSessionState,
@@ -76,10 +63,7 @@ from llm_tools.workflow_api import (
     ChatWorkflowStatusEvent,
     ChatWorkflowTurnResult,
     ModelTurnProvider,
-    ProtectionConfig,
     ProtectionPendingPrompt,
-    inspect_protection_corpus,
-    run_interactive_chat_session_turn,
 )
 
 TurnEventKind = Literal[
@@ -98,6 +82,12 @@ INSPECTOR_WORKBENCH_LABELS = {
     "parsed_response": "Parsed LLM Response",
     "tool_execution": "Tool To LLM",
 }
+_effective_assistant_config = _assistant_runtime._effective_assistant_config
+_exposed_tool_names_for_runtime = _assistant_runtime._exposed_tool_names_for_runtime
+_interaction_protocol = _assistant_runtime._interaction_protocol
+_is_staged_schema_protocol = _assistant_runtime._is_staged_schema_protocol
+_nicegui_protection_is_ready = _assistant_runtime._nicegui_protection_is_ready
+build_protection_controller = _assistant_runtime.build_protection_controller
 
 
 @dataclass
@@ -177,32 +167,6 @@ def _remember_status(turn_state: NiceGUITurnState, status: str) -> None:
     turn_state.status_history = turn_state.status_history[-8:]
 
 
-def _is_staged_schema_protocol(provider: ModelTurnProvider) -> bool:
-    preference = getattr(provider, "uses_staged_schema_protocol", None)
-    return bool(callable(preference) and preference())
-
-
-def _interaction_protocol(provider: ModelTurnProvider) -> str:
-    prompt_tool_preference = getattr(provider, "uses_prompt_tool_protocol", None)
-    if callable(prompt_tool_preference) and bool(prompt_tool_preference()):
-        return "prompt_tools"
-    if _is_staged_schema_protocol(provider):
-        return "staged_json"
-    return "native_tools"
-
-
-def _nicegui_protection_is_ready(config: ProtectionConfig) -> bool:
-    """Return whether NiceGUI should engage workflow protection for a turn."""
-    if (
-        not config.enabled
-        or not config.allowed_sensitivity_labels
-        or not config.document_paths
-    ):
-        return False
-    report = inspect_protection_corpus(config)
-    return report.usable_document_count > 0
-
-
 def _protection_feedback_message(
     *,
     analysis_is_correct: bool,
@@ -232,90 +196,6 @@ def _deep_task_summary_text(summary: Any) -> str:
     if summary.latest_decision_summary:
         lines.append(f"Latest decision: {summary.latest_decision_summary}")
     return "\n".join(lines)
-
-
-class NiceGUIHarnessContextBuilder:
-    """Harness context builder that uses NiceGUI session-scoped tool values."""
-
-    def __init__(self, *, env_overrides: dict[str, str] | None = None) -> None:
-        self._delegate = DefaultHarnessContextBuilder()
-        self._env_overrides = dict(env_overrides or {})
-
-    def build(
-        self,
-        *,
-        state: Any,
-        selected_task_ids: Sequence[str],
-        turn_index: int,
-        workspace: str | None = None,
-    ) -> TurnContextBundle:
-        bundle = self._delegate.build(
-            state=state,
-            selected_task_ids=selected_task_ids,
-            turn_index=turn_index,
-            workspace=workspace,
-        )
-        metadata = dict(bundle.tool_context.metadata)
-        metadata["assistant_mode"] = "assistant_app_deep_task"
-        return bundle.model_copy(
-            update={
-                "tool_context": bundle.tool_context.model_copy(
-                    update={
-                        "env": dict(self._env_overrides),
-                        "metadata": metadata,
-                    }
-                )
-            },
-            deep=True,
-        )
-
-
-def _effective_assistant_config(
-    *,
-    config: AssistantConfig,
-    runtime: NiceGUIRuntimeConfig,
-) -> AssistantConfig:
-    workspace_default_root = runtime.default_workspace_root
-    if workspace_default_root is None:
-        workspace_default_root = config.workspace.default_root
-    return config.model_copy(
-        deep=True,
-        update={
-            "llm": config.llm.model_copy(
-                update={
-                    "provider": runtime.provider,
-                    "provider_mode_strategy": runtime.provider_mode_strategy,
-                    "model_name": runtime.model_name,
-                    "api_base_url": runtime.api_base_url,
-                    "api_key_env_var": runtime.api_key_env_var,
-                    "temperature": runtime.temperature,
-                    "timeout_seconds": runtime.timeout_seconds,
-                }
-            ),
-            "session": runtime.session_config.model_copy(deep=True),
-            "tool_limits": runtime.tool_limits.model_copy(deep=True),
-            "policy": config.policy.model_copy(
-                update={
-                    "enabled_tools": list(runtime.enabled_tools),
-                    "require_approval_for": set(runtime.require_approval_for),
-                }
-            ),
-            "workspace": config.workspace.model_copy(
-                update={"default_root": workspace_default_root}
-            ),
-            "ui": config.ui.model_copy(
-                update={
-                    "show_token_usage": runtime.show_token_usage,
-                    "show_footer_help": runtime.show_footer_help,
-                    "inspector_open_by_default": runtime.inspector_open,
-                }
-            ),
-            "protection": runtime.protection.model_copy(deep=True),
-            "research": config.research.model_copy(
-                update=runtime.research.model_dump(mode="python", exclude_unset=True)
-            ),
-        },
-    )
 
 
 def default_runtime_config(
@@ -702,11 +582,9 @@ class NiceGUIChatController:
                 prompt=cleaned,
             )
         try:
-            provider = self._create_provider(record.runtime, session_id=session_id)
             runner = self._build_runner(
                 session_id=session_id,
                 runtime=record.runtime,
-                provider=provider,
                 session_state=record.workflow_session_state,
                 user_message=cleaned,
             )
@@ -1104,208 +982,59 @@ class NiceGUIChatController:
             set(runtime.enabled_tools).intersection(visible_specs)
         )
 
-    def _create_provider(
-        self, runtime: NiceGUIRuntimeConfig, *, session_id: str
-    ) -> ModelTurnProvider:
-        if self.provider_factory is None:  # pragma: no cover
-            llm_config = _effective_assistant_config(
-                config=self.config, runtime=runtime
-            ).llm
-            api_key = self.provider_api_key(session_id=session_id)
-            return create_provider(
-                llm_config,
-                api_key=api_key,
-                model_name=runtime.model_name,
-                mode_strategy=runtime.provider_mode_strategy,
-                allow_env_api_key=False,
-            )
-        return self.provider_factory(runtime)
-
     def _build_runner(
         self,
         *,
         session_id: str,
         runtime: NiceGUIRuntimeConfig,
-        provider: ModelTurnProvider,
         session_state: ChatSessionState,
         user_message: str,
     ) -> ChatSessionTurnRunner:
-        effective_config = _effective_assistant_config(
-            config=self.config, runtime=runtime
-        )
-        tool_specs = self.visible_tool_specs()
-        root = Path(runtime.root_path) if runtime.root_path is not None else None
-        enabled_tools = visible_enabled_tool_names(
-            runtime.enabled_tools,
-            tool_specs,
-            self.admin_settings,
-        )
-        policy = build_assistant_policy(
-            enabled_tools=enabled_tools,
-            tool_specs=tool_specs,
-            require_approval_for=set(runtime.require_approval_for),
-            allow_network=runtime.allow_network,
-            allow_filesystem=runtime.allow_filesystem and root is not None,
-            allow_subprocess=runtime.allow_subprocess and root is not None,
-            redaction_config=effective_config.policy.redaction,
-        )
-        registry, executor = build_assistant_executor(policy=policy)
-        exposed_tool_names = _exposed_tool_names_for_runtime(
-            tool_specs=tool_specs,
+        bundle = build_assistant_runtime_bundle(
+            config=self.config,
             runtime=runtime,
-            root=root,
-            env=self.effective_tool_env(runtime=runtime, session_id=session_id),
+            admin_settings=self.admin_settings,
+            session_id=session_id,
+            provider_factory=self.provider_factory,
+            provider_api_key=self.provider_api_key(session_id=session_id),
+            env_overrides=self.tool_env_overrides(
+                runtime=runtime,
+                session_id=session_id,
+            ),
+            protection_controller_factory=build_protection_controller,
+            information_protection_enabled=self.information_protection_enabled(),
+            chat_has_pending_protection_prompt=(
+                session_state.pending_protection_prompt is not None
+            ),
         )
-        protection_controller = None
-        protection_is_ready = (
-            self.information_protection_enabled()
-            and _nicegui_protection_is_ready(runtime.protection)
-        )
-        has_pending_protection_prompt = (
-            self.information_protection_enabled()
-            and session_state.pending_protection_prompt is not None
-        )
-        if protection_is_ready or has_pending_protection_prompt:
-            protection_config = (
-                runtime.protection
-                if runtime.protection.enabled
-                else runtime.protection.model_copy(update={"enabled": True})
-            )
-            protection_environment = build_protection_environment(
-                app_name="assistant_app",
-                model_name=runtime.model_name,
-                workspace=runtime.root_path,
-                enabled_tools=sorted(exposed_tool_names),
-                allow_network=runtime.allow_network,
-                allow_filesystem=runtime.allow_filesystem and root is not None,
-                allow_subprocess=runtime.allow_subprocess and root is not None,
-            )
-            protection_environment["allowed_sensitivity_labels"] = list(
-                runtime.protection.allowed_sensitivity_labels
-            )
-            protection_environment["sensitivity_categories"] = [
-                category.model_dump(mode="json")
-                for category in runtime.protection.sensitivity_categories
-            ]
-            protection_controller = build_protection_controller(
-                config=protection_config,
-                provider=provider,
-                environment=protection_environment,
-            )
-        return run_interactive_chat_session_turn(
-            user_message=user_message,
+        return bundle.build_chat_runner(
             session_state=session_state,
-            executor=executor,
-            provider=provider,
-            system_prompt=build_assistant_system_prompt(
-                tool_registry=registry,
-                tool_limits=effective_config.tool_limits,
-                enabled_tool_names=exposed_tool_names,
-                workspace_enabled=root is not None,
-                staged_schema_protocol=_is_staged_schema_protocol(provider),
-                interaction_protocol=_interaction_protocol(provider),
-            ),
-            base_context=build_assistant_context(
-                root_path=root,
-                config=effective_config,
-                app_name=f"assistant-app-{session_id}",
-                env_overrides=self.tool_env_overrides(
-                    runtime=runtime,
-                    session_id=session_id,
-                ),
-                include_process_env=False,
-            ),
-            session_config=effective_config.session,
-            tool_limits=effective_config.tool_limits,
-            redaction_config=effective_config.policy.redaction,
-            temperature=effective_config.llm.temperature,
-            protection_controller=protection_controller,
-            enabled_tool_names=exposed_tool_names,
+            user_message=user_message,
         )
 
     def _build_harness_service(
         self, *, session_id: str, record: NiceGUISessionRecord
     ) -> HarnessSessionService:
         """Build the shared harness service for a NiceGUI deep task."""
-        runtime = record.runtime
-        effective_config = _effective_assistant_config(
-            config=self.config, runtime=runtime
-        )
-        provider = self._create_provider(runtime, session_id=session_id)
-        tool_specs = self.visible_tool_specs()
-        root = Path(runtime.root_path) if runtime.root_path is not None else None
-        enabled_tools = visible_enabled_tool_names(
-            runtime.enabled_tools,
-            tool_specs,
-            self.admin_settings,
-        )
-        policy = build_assistant_policy(
-            enabled_tools=enabled_tools,
-            tool_specs=tool_specs,
-            require_approval_for=set(runtime.require_approval_for),
-            allow_network=runtime.allow_network,
-            allow_filesystem=runtime.allow_filesystem and root is not None,
-            allow_subprocess=runtime.allow_subprocess and root is not None,
-            redaction_config=effective_config.policy.redaction,
-        )
-        registry, workflow_executor = build_assistant_executor(policy=policy)
-        env_overrides = self.tool_env_overrides(
-            runtime=runtime,
+        bundle = build_assistant_runtime_bundle(
+            config=self.config,
+            runtime=record.runtime,
+            admin_settings=self.admin_settings,
             session_id=session_id,
-        )
-        exposed_tool_names = _exposed_tool_names_for_runtime(
-            tool_specs=tool_specs,
-            runtime=runtime,
-            root=root,
-            env=env_overrides,
-        )
-        protection_controller = None
-        if self.information_protection_enabled() and _nicegui_protection_is_ready(
-            runtime.protection
-        ):
-            protection_environment = build_protection_environment(
-                app_name="assistant_app_deep_task",
-                model_name=runtime.model_name,
-                workspace=runtime.root_path,
-                enabled_tools=sorted(exposed_tool_names),
-                allow_network=runtime.allow_network,
-                allow_filesystem=runtime.allow_filesystem and root is not None,
-                allow_subprocess=runtime.allow_subprocess and root is not None,
-            )
-            protection_environment["allowed_sensitivity_labels"] = list(
-                runtime.protection.allowed_sensitivity_labels
-            )
-            protection_environment["sensitivity_categories"] = [
-                category.model_dump(mode="json")
-                for category in runtime.protection.sensitivity_categories
-            ]
-            protection_controller = build_protection_controller(
-                config=runtime.protection,
-                provider=provider,
-                environment=protection_environment,
-            )
-        harness_provider = AssistantHarnessTurnProvider(
-            provider=provider,  # type: ignore[arg-type]
-            temperature=effective_config.llm.temperature,
-            system_prompt=build_research_system_prompt(
-                tool_registry=registry,
-                tool_limits=effective_config.tool_limits,
-                enabled_tool_names=exposed_tool_names,
-                workspace_enabled=root is not None,
-                staged_schema_protocol=_is_staged_schema_protocol(provider),
+            provider_factory=self.provider_factory,
+            provider_api_key=self.provider_api_key(session_id=session_id),
+            env_overrides=self.tool_env_overrides(
+                runtime=record.runtime,
+                session_id=session_id,
             ),
-            protection_controller=protection_controller,
+            protection_controller_factory=build_protection_controller,
+            information_protection_enabled=self.information_protection_enabled(),
         )
-        return HarnessSessionService(
+        return bundle.build_harness_service(
             store=self.store.harness_store(
                 chat_session_id=session_id,
                 owner_user_id=record.summary.owner_user_id,
-            ),
-            workflow_executor=workflow_executor,
-            provider=harness_provider,
-            context_builder=NiceGUIHarnessContextBuilder(env_overrides=env_overrides),
-            approval_context_env=env_overrides,
-            workspace=str(root) if root is not None else None,
+            )
         )
 
     def _apply_queued_event(self, event: NiceGUIQueuedEvent) -> str | None:
@@ -1600,31 +1329,6 @@ class NiceGUIChatController:
         turn_state.pending_harness_session_id = None
         turn_state.queued_follow_up_prompt = pending
         turn_state.cancelling = False
-
-
-def _exposed_tool_names_for_runtime(
-    *,
-    tool_specs: dict[str, ToolSpec],
-    runtime: NiceGUIRuntimeConfig,
-    root: Path | None,
-    env: dict[str, str],
-) -> set[str]:
-    capability_groups = build_tool_capabilities(
-        tool_specs=tool_specs,
-        enabled_tools=set(runtime.enabled_tools),
-        root_path=runtime.root_path,
-        env=env,
-        allow_network=runtime.allow_network,
-        allow_filesystem=runtime.allow_filesystem and root is not None,
-        allow_subprocess=runtime.allow_subprocess and root is not None,
-        require_approval_for=set(runtime.require_approval_for),
-    )
-    return {
-        tool.tool_name
-        for group in capability_groups.values()
-        for tool in group
-        if tool.exposed_to_model
-    }
 
 
 def _serialize_workflow_event(
