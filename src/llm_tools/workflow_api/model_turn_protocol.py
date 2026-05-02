@@ -77,6 +77,62 @@ class ModelTurnProtocolProvider(Protocol):
     ) -> ParsedModelResponse:
         """Return one parsed native structured response."""
 
+    async def run_async(
+        self,
+        *,
+        adapter: ActionEnvelopeAdapter,
+        messages: list[dict[str, Any]],
+        response_model: type[BaseModel],
+        request_params: dict[str, Any] | None = None,
+    ) -> ParsedModelResponse:
+        """Return one parsed async native structured response."""
+
+    def run_structured(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        response_model: object,
+        request_params: dict[str, Any] | None = None,
+    ) -> object:
+        """Return one structured provider payload."""
+
+    async def run_structured_async(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        response_model: object,
+        request_params: dict[str, Any] | None = None,
+    ) -> object:
+        """Return one async structured provider payload."""
+
+    def run_text(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        request_params: dict[str, Any] | None = None,
+    ) -> str:
+        """Return one text provider response."""
+
+    async def run_text_async(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        request_params: dict[str, Any] | None = None,
+    ) -> str:
+        """Return one async text provider response."""
+
+    def uses_staged_schema_protocol(self) -> bool:
+        """Return whether this provider should use staged schema turns."""
+
+    def uses_prompt_tool_protocol(self) -> bool:
+        """Return whether this provider should use prompt-tool turns."""
+
+    def can_fallback_to_prompt_tools(self, exc: Exception) -> bool:
+        """Return whether this error can fall back to prompt tools."""
+
+    def json_agent_strategy(self) -> str:
+        """Return the provider-preferred JSON agent strategy."""
+
 
 @dataclass(slots=True, frozen=True)
 class ModelTurnProtocolEvent:
@@ -119,6 +175,12 @@ class ModelTurnProtocolRequest:
 ModelTurnProtocolObserver = Callable[[ModelTurnProtocolEvent], object]
 
 
+@dataclass(slots=True, frozen=True)
+class _ProtocolRunResult:
+    parsed: ParsedModelResponse
+    protocol: ModelTurnProtocolKind
+
+
 class ModelTurnProtocolRunner:
     """Run one provider-facing model-turn protocol and return one parsed turn."""
 
@@ -134,19 +196,27 @@ class ModelTurnProtocolRunner:
         """Run one synchronous model-turn protocol."""
         messages = self._apply_prompt_protection(request, observer=observer)
         if isinstance(messages, ParsedModelResponse):
-            self._emit_parsed_response(messages, observer=observer)
+            self._emit_parsed_response(
+                messages,
+                protocol="protection",
+                observer=observer,
+            )
             return messages
-        parsed = self._run_unprotected(
+        result = self._run_unprotected(
             request,
             messages=messages,
             observer=observer,
         )
         parsed = self._apply_response_protection(
             request,
-            parsed=parsed,
+            parsed=result.parsed,
             observer=observer,
         )
-        self._emit_parsed_response(parsed, observer=observer)
+        self._emit_parsed_response(
+            parsed,
+            protocol="protection" if parsed is not result.parsed else result.protocol,
+            observer=observer,
+        )
         return parsed
 
     async def run_async(
@@ -158,19 +228,27 @@ class ModelTurnProtocolRunner:
         """Run one asynchronous model-turn protocol."""
         messages = await self._apply_prompt_protection_async(request, observer=observer)
         if isinstance(messages, ParsedModelResponse):
-            self._emit_parsed_response(messages, observer=observer)
+            self._emit_parsed_response(
+                messages,
+                protocol="protection",
+                observer=observer,
+            )
             return messages
-        parsed = await self._run_unprotected_async(
+        result = await self._run_unprotected_async(
             request,
             messages=messages,
             observer=observer,
         )
         parsed = await self._apply_response_protection_async(
             request,
-            parsed=parsed,
+            parsed=result.parsed,
             observer=observer,
         )
-        self._emit_parsed_response(parsed, observer=observer)
+        self._emit_parsed_response(
+            parsed,
+            protocol="protection" if parsed is not result.parsed else result.protocol,
+            observer=observer,
+        )
         return parsed
 
     def _run_unprotected(
@@ -179,19 +257,25 @@ class ModelTurnProtocolRunner:
         *,
         messages: list[dict[str, Any]],
         observer: ModelTurnProtocolObserver | None,
-    ) -> ParsedModelResponse:
+    ) -> _ProtocolRunResult:
         if self._uses_prompt_tool_protocol(request.provider):
-            return self._run_prompt_tool(
-                request,
-                messages=messages,
-                observer=observer,
-            )
-        if self._uses_staged_schema_protocol(request.provider):
-            try:
-                return self._run_staged(
+            return _ProtocolRunResult(
+                self._run_prompt_tool(
                     request,
                     messages=messages,
                     observer=observer,
+                ),
+                "prompt_tools",
+            )
+        if self._uses_staged_schema_protocol(request.provider):
+            try:
+                return _ProtocolRunResult(
+                    self._run_staged(
+                        request,
+                        messages=messages,
+                        observer=observer,
+                    ),
+                    "staged",
                 )
             except Exception as exc:
                 if not self._can_fallback_to_prompt_tools(request.provider, exc):
@@ -210,10 +294,13 @@ class ModelTurnProtocolRunner:
                     observer=observer,
                     redaction_config=request.redaction_config,
                 )
-                return self._run_prompt_tool(
-                    request,
-                    messages=self._prompt_tool_base_messages(messages),
-                    observer=observer,
+                return _ProtocolRunResult(
+                    self._run_prompt_tool(
+                        request,
+                        messages=self._prompt_tool_base_messages(messages),
+                        observer=observer,
+                    ),
+                    "prompt_tools",
                 )
         return self._run_native(request, messages=messages, observer=observer)
 
@@ -223,22 +310,28 @@ class ModelTurnProtocolRunner:
         *,
         messages: list[dict[str, Any]],
         observer: ModelTurnProtocolObserver | None,
-    ) -> ParsedModelResponse:
+    ) -> _ProtocolRunResult:
         if self._uses_prompt_tool_protocol(request.provider):
-            return await self._run_prompt_tool_async(
-                request,
-                messages=messages,
-                observer=observer,
-            )
-        if self._uses_staged_schema_protocol(request.provider):
-            try:
-                return await self._run_staged_async(
+            return _ProtocolRunResult(
+                await self._run_prompt_tool_async(
                     request,
                     messages=messages,
                     observer=observer,
+                ),
+                "prompt_tools",
+            )
+        if self._uses_staged_schema_protocol(request.provider):
+            try:
+                return _ProtocolRunResult(
+                    await self._run_staged_async(
+                        request,
+                        messages=messages,
+                        observer=observer,
+                    ),
+                    "staged",
                 )
             except Exception as exc:
-                if not self._can_fallback_to_prompt_tools(request.provider, exc):
+                if not self._can_fallback_to_prompt_tools_async(request.provider, exc):
                     raise
                 self._emit(
                     "fallback",
@@ -254,10 +347,13 @@ class ModelTurnProtocolRunner:
                     observer=observer,
                     redaction_config=request.redaction_config,
                 )
-                return await self._run_prompt_tool_async(
-                    request,
-                    messages=self._prompt_tool_base_messages(messages),
-                    observer=observer,
+                return _ProtocolRunResult(
+                    await self._run_prompt_tool_async(
+                        request,
+                        messages=self._prompt_tool_base_messages(messages),
+                        observer=observer,
+                    ),
+                    "prompt_tools",
                 )
         return await self._run_native_async(
             request, messages=messages, observer=observer
@@ -269,12 +365,15 @@ class ModelTurnProtocolRunner:
         *,
         messages: list[dict[str, Any]],
         observer: ModelTurnProtocolObserver | None,
-    ) -> ParsedModelResponse:
+    ) -> _ProtocolRunResult:
         if request.mode == "final_response":
-            return self._run_native_final_response(
-                request,
-                messages=messages,
-                observer=observer,
+            return _ProtocolRunResult(
+                self._run_native_final_response(
+                    request,
+                    messages=messages,
+                    observer=observer,
+                ),
+                "native",
             )
         native_messages = self._native_tool_round_messages(
             messages=messages,
@@ -313,10 +412,13 @@ class ModelTurnProtocolRunner:
                 observer=observer,
                 redaction_config=request.redaction_config,
             )
-            return self._run_prompt_tool(
-                request,
-                messages=self._prompt_tool_base_messages(messages),
-                observer=observer,
+            return _ProtocolRunResult(
+                self._run_prompt_tool(
+                    request,
+                    messages=self._prompt_tool_base_messages(messages),
+                    observer=observer,
+                ),
+                "prompt_tools",
             )
         self._emit_provider_call_complete(
             "native",
@@ -324,7 +426,7 @@ class ModelTurnProtocolRunner:
             observer=observer,
             redaction_config=request.redaction_config,
         )
-        return cast(ParsedModelResponse, parsed)
+        return _ProtocolRunResult(cast(ParsedModelResponse, parsed), "native")
 
     async def _run_native_async(
         self,
@@ -332,12 +434,15 @@ class ModelTurnProtocolRunner:
         *,
         messages: list[dict[str, Any]],
         observer: ModelTurnProtocolObserver | None,
-    ) -> ParsedModelResponse:
+    ) -> _ProtocolRunResult:
         if request.mode == "final_response":
-            return await self._run_native_final_response_async(
-                request,
-                messages=messages,
-                observer=observer,
+            return _ProtocolRunResult(
+                await self._run_native_final_response_async(
+                    request,
+                    messages=messages,
+                    observer=observer,
+                ),
+                "native",
             )
         native_messages = self._native_tool_round_messages(
             messages=messages,
@@ -360,7 +465,7 @@ class ModelTurnProtocolRunner:
                 request_params={"temperature": request.temperature},
             )
         except Exception as exc:
-            if not self._can_fallback_to_prompt_tools(request.provider, exc):
+            if not self._can_fallback_to_prompt_tools_async(request.provider, exc):
                 raise
             self._emit(
                 "fallback",
@@ -376,10 +481,13 @@ class ModelTurnProtocolRunner:
                 observer=observer,
                 redaction_config=request.redaction_config,
             )
-            return await self._run_prompt_tool_async(
-                request,
-                messages=self._prompt_tool_base_messages(messages),
-                observer=observer,
+            return _ProtocolRunResult(
+                await self._run_prompt_tool_async(
+                    request,
+                    messages=self._prompt_tool_base_messages(messages),
+                    observer=observer,
+                ),
+                "prompt_tools",
             )
         self._emit_provider_call_complete(
             "native",
@@ -387,7 +495,7 @@ class ModelTurnProtocolRunner:
             observer=observer,
             redaction_config=request.redaction_config,
         )
-        return cast(ParsedModelResponse, parsed)
+        return _ProtocolRunResult(cast(ParsedModelResponse, parsed), "native")
 
     def _run_native_final_response(
         self,
@@ -1766,11 +1874,12 @@ class ModelTurnProtocolRunner:
         self,
         parsed: ParsedModelResponse,
         *,
+        protocol: ModelTurnProtocolKind,
         observer: ModelTurnProtocolObserver | None,
     ) -> None:
         self._emit(
             "parsed_response",
-            "native",
+            protocol,
             payload=_parsed_response_summary(parsed),
             observer=observer,
             redaction_config=None,
@@ -1832,6 +1941,18 @@ class ModelTurnProtocolRunner:
             return False
         run_text = getattr(provider, "run_text", None)
         if not callable(run_text):
+            return False
+        can_fallback = getattr(provider, "can_fallback_to_prompt_tools", None)
+        if not callable(can_fallback):
+            return False
+        return bool(can_fallback(exc))
+
+    @staticmethod
+    def _can_fallback_to_prompt_tools_async(provider: object, exc: Exception) -> bool:
+        if _is_context_limit_error(exc):
+            return False
+        run_text_async = getattr(provider, "run_text_async", None)
+        if not callable(run_text_async):
             return False
         can_fallback = getattr(provider, "can_fallback_to_prompt_tools", None)
         if not callable(can_fallback):

@@ -13,6 +13,7 @@ from llm_tools.workflow_api.executor import PreparedModelInteraction
 from llm_tools.workflow_api.model_turn_protocol import (
     ModelTurnProtectionContext,
     ModelTurnProtocolEvent,
+    ModelTurnProtocolProvider,
     ModelTurnProtocolRequest,
     ModelTurnProtocolRunner,
 )
@@ -114,6 +115,18 @@ class _MissingAsyncFinalTransportProvider(_ProtocolProvider):
     run_text_async = None
 
 
+class _AsyncPromptFallbackProvider(_ProtocolProvider):
+    run_text = None
+
+    async def run_text_async(self, **kwargs: object) -> str:
+        self.text_messages.append(_copied_messages(kwargs))
+        response = self.text.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        assert isinstance(response, str)
+        return response
+
+
 class _ProtectionController:
     def __init__(
         self,
@@ -148,6 +161,12 @@ def _copied_messages(kwargs: dict[str, object]) -> list[dict[str, object]]:
     messages = kwargs["messages"]
     assert isinstance(messages, list)
     return [dict(message) for message in messages]
+
+
+def _parsed_event(events: list[ModelTurnProtocolEvent]) -> ModelTurnProtocolEvent:
+    parsed_events = [event for event in events if event.kind == "parsed_response"]
+    assert len(parsed_events) == 1
+    return parsed_events[0]
 
 
 def _prepared(adapter: ActionEnvelopeAdapter) -> PreparedModelInteraction:
@@ -493,6 +512,91 @@ def test_protocol_falls_back_and_skips_context_limit_fallback(
     with pytest.raises(RuntimeError, match="maximum context length"):
         ModelTurnProtocolRunner().run(_request(context_limit))
     assert context_limit.text_messages == []
+
+
+def test_protocol_async_fallback_uses_async_text_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "split")
+    provider = _AsyncPromptFallbackProvider(
+        native=[RuntimeError("unsupported parameter: tools")],
+        text=[
+            "```decision\nMODE: finalize\n```",
+            "```final\nANSWER:\nAsync fallback.\n```",
+        ],
+        fallback=True,
+    )
+
+    parsed = asyncio.run(ModelTurnProtocolRunner().run_async(_request(provider)))
+
+    assert parsed.final_response == {"answer": "Async fallback."}
+    assert len(provider.text_messages) == 2
+
+
+def test_protocol_parsed_response_events_use_actual_protocol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_TOOLS_PROMPT_TOOL_STRATEGY", "single_action")
+    prompt_provider = _ProtocolProvider(
+        text=["```final\nANSWER:\nPrompt.\n```"],
+        prompt_tools=True,
+    )
+    prompt_events: list[ModelTurnProtocolEvent] = []
+    ModelTurnProtocolRunner().run(
+        _request(prompt_provider), observer=prompt_events.append
+    )
+    assert _parsed_event(prompt_events).protocol == "prompt_tools"
+
+    staged_provider = _ProtocolProvider(
+        structured=[
+            {"mode": "finalize", "final_response": {"answer": "staged"}},
+        ],
+        staged=True,
+    )
+    staged_events: list[ModelTurnProtocolEvent] = []
+    ModelTurnProtocolRunner().run(
+        _request(staged_provider, use_json_single_action_strategy=True),
+        observer=staged_events.append,
+    )
+    assert _parsed_event(staged_events).protocol == "staged"
+
+    protection_provider = _ProtocolProvider(
+        native=[ParsedModelResponse(final_response={"answer": "unused"})]
+    )
+    protection = ModelTurnProtectionContext(
+        controller=_ProtectionController(
+            prompt=PromptProtectionDecision(
+                action=ProtectionAction.BLOCK,
+                challenge_message="Blocked.",
+            ),
+            response=ResponseProtectionDecision(action=ProtectionAction.ALLOW),
+        ),  # type: ignore[arg-type]
+        provenance=ProtectionProvenanceSnapshot(),
+    )
+    protection_events: list[ModelTurnProtocolEvent] = []
+    ModelTurnProtocolRunner().run(
+        _request(protection_provider, protection=protection),
+        observer=protection_events.append,
+    )
+    assert _parsed_event(protection_events).protocol == "protection"
+
+
+def test_protocol_provider_protocol_advertises_runtime_detected_surface() -> None:
+    expected_methods = {
+        "run",
+        "run_async",
+        "run_structured",
+        "run_structured_async",
+        "run_text",
+        "run_text_async",
+        "uses_staged_schema_protocol",
+        "uses_prompt_tool_protocol",
+        "can_fallback_to_prompt_tools",
+        "json_agent_strategy",
+    }
+
+    for method_name in expected_methods:
+        assert callable(getattr(ModelTurnProtocolProvider, method_name, None))
 
 
 def test_protocol_events_do_not_expose_raw_provider_payloads(
