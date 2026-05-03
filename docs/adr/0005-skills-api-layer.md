@@ -7,9 +7,10 @@ Accepted
 ## Context
 
 `llm-tools` is adding Codex-style **Skills** as reusable agent instruction
-packages. A skill is not an executable **Tool**, an app-only prompt snippet, or
-a plugin. It is a local `SKILL.md` package that can teach an agent a repeatable
-workflow and may reference supporting files.
+packages. A skill is not an executable **Tool**, an app-only prompt snippet, a
+plugin, or a hidden runtime capability. It is a local `SKILL.md` package that
+can teach an agent a repeatable workflow and may reference supporting files,
+scripts, examples, assets, or existing tools.
 
 Without a dedicated layer, skill parsing and validation would likely be owned
 by the assistant app or harness code first. That would make the canonical skill
@@ -31,7 +32,10 @@ The layer owns:
 
 `skills_api` may reference tool names or specs as metadata, but it does not
 execute tools, run scripts, install dependencies, own app UI, persist
-enablement choices, or perform heuristic skill selection.
+enablement choices, or perform heuristic skill selection. Loading a skill
+contributes instructions and metadata; it must not grant filesystem, shell,
+network, credential, or approval authority outside the existing runtime and
+policy layers.
 
 ## Consequences
 
