@@ -87,6 +87,24 @@ def run_skill_probe(
             invocation_type=SkillInvocationType.EXPLICIT,
             contents=loaded_context.contents,
         )
+        rendered_messages = _messages_for_skill_probe(
+            available_context=available_context.rendered_text
+            if available_context is not None
+            else "",
+            loaded_skill_context=rendered_skill,
+            marker=marker,
+        )
+    except Exception as exc:
+        result.update(
+            {
+                "status": common.SCENARIO_STATUS_FAILED,
+                "summary": "Local skill setup failed before the Ollama call.",
+                "failure": common.failure_payload(exc),
+            }
+        )
+        return result
+
+    try:
         provider = OpenAICompatibleProvider.for_ollama(
             model=model,
             base_url=ollama_base_url,
@@ -96,32 +114,13 @@ def run_skill_probe(
             },
         )
         response_text = provider.run_text(
-            messages=_messages_for_skill_probe(
-                available_context=available_context.rendered_text
-                if available_context is not None
-                else "",
-                loaded_skill_context=rendered_skill,
-                marker=marker,
-            ),
+            messages=rendered_messages,
             request_params={"temperature": 0},
         )
-        checks = _evaluate_skill_response(response_text, marker)
         result.update(
             {
                 "loaded_skill_context": common.dump_model(loaded_context),
                 "usage_record": common.dump_model(usage_record),
-                "response_text": response_text,
-                "checks": checks,
-                "status": (
-                    common.SCENARIO_STATUS_PASSED
-                    if all(checks.values())
-                    else common.SCENARIO_STATUS_FAILED
-                ),
-                "summary": (
-                    "Ollama followed the loaded skill instructions."
-                    if all(checks.values())
-                    else "Ollama did not return the skill marker as instructed."
-                ),
             }
         )
     except Exception as exc:
@@ -132,6 +131,25 @@ def run_skill_probe(
                 "failure": common.failure_payload(exc),
             }
         )
+        return result
+
+    checks = _evaluate_skill_response(response_text, marker)
+    result.update(
+        {
+            "response_text": response_text,
+            "checks": checks,
+            "status": (
+                common.SCENARIO_STATUS_PASSED
+                if all(checks.values())
+                else common.SCENARIO_STATUS_FAILED
+            ),
+            "summary": (
+                "Ollama followed the loaded skill instructions."
+                if all(checks.values())
+                else "Ollama did not return the skill marker as instructed."
+            ),
+        }
+    )
     return result
 
 

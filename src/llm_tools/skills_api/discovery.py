@@ -89,14 +89,14 @@ def _iter_skill_files(root: Path, options: SkillDiscoveryOptions) -> Iterable[Pa
             continue
 
         for child in children:
+            if child.is_symlink() and not options.follow_symlinks:
+                continue
             if child.name == SKILL_FILENAME and child.is_file():
                 yield child
                 continue
             if depth >= options.max_depth:
                 continue
             if options.ignore_hidden_directories and child.name.startswith("."):
-                continue
-            if child.is_symlink() and not options.follow_symlinks:
                 continue
             if child.is_dir():
                 stack.append((child, depth + 1))
