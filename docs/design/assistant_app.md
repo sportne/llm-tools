@@ -105,7 +105,9 @@ the database file as shared storage.
 Provider API keys and tool credentials are not read from environment variables in
 hosted mode. They are typed into the app and held in server memory for the
 current browser/app session only, matching local loopback mode. Non-secret URLs
-remain normal runtime configuration.
+remain normal runtime configuration. In-memory credentials expire after 2 hours
+by default and are re-entered through a focused prompt the next time the expired
+credential is needed.
 
 The SQLCipher database key and per-user key wrapping key are local server files.
 They must be protected and backed up; deleting them makes encrypted NiceGUI data

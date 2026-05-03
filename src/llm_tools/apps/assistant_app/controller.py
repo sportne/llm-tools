@@ -6,11 +6,14 @@ import sys
 
 from llm_tools.apps.assistant_app import controller_core as _controller_core
 from llm_tools.apps.assistant_app.controller_core import (
+    DEFAULT_SESSION_SECRET_TTL_SECONDS,
     PROVIDER_API_KEY_FIELD,
     NiceGUIActiveTurnHandle,
     NiceGUIChatController,
     NiceGUIQueuedEvent,
+    NiceGUISessionSecret,
     NiceGUITurnState,
+    SessionSecretState,
     _effective_assistant_config,
     _exposed_tool_names_for_runtime,
     _interaction_protocol,
@@ -26,11 +29,14 @@ from llm_tools.apps.assistant_app.controller_core import (
 )
 
 __all__ = [
+    "DEFAULT_SESSION_SECRET_TTL_SECONDS",
     "PROVIDER_API_KEY_FIELD",
     "NiceGUIActiveTurnHandle",
     "NiceGUIChatController",
     "NiceGUIQueuedEvent",
+    "NiceGUISessionSecret",
     "NiceGUITurnState",
+    "SessionSecretState",
     "default_runtime_config",
     "_effective_assistant_config",
     "_exposed_tool_names_for_runtime",

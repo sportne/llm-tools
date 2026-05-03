@@ -4,6 +4,7 @@ import queue
 import runpy
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
@@ -26,6 +27,7 @@ from llm_tools.apps.assistant_app.app import (
     _can_admin_disable_user,
     _composer_action_icon,
     _context_capacity_meter_state,
+    _credential_display_name,
     _default_protection_corrections_path,
     _discover_model_names,
     _ensure_information_security_category_catalog,
@@ -65,6 +67,7 @@ from llm_tools.apps.assistant_app.app import (
     _settings_section_default_open,
     _sidebar_container_classes,
     _tool_capability_tooltip,
+    _tool_credential_placeholder,
     _workbench_container_classes,
     build_assistant_ui,
     build_parser,
@@ -75,6 +78,7 @@ from llm_tools.apps.assistant_app.app import (
 )
 from llm_tools.apps.assistant_app.auth import LocalAuthProvider, validate_hosted_startup
 from llm_tools.apps.assistant_app.controller import (
+    DEFAULT_SESSION_SECRET_TTL_SECONDS,
     PROVIDER_API_KEY_FIELD,
     NiceGUIActiveTurnHandle,
     NiceGUIChatController,
@@ -740,6 +744,11 @@ def test_ui_helper_edge_branches(
     assert "JIRA_API_TOKEN" in _tool_capability_tooltip(blocked)
     assert _selected_tool_chip_classes(blocked).endswith("llmt-tool-chip-blocked")
     assert _selected_tool_icon(blocked) == "block"
+    assert _credential_display_name(PROVIDER_API_KEY_FIELD) == "Provider API key"
+    assert _credential_display_name("JIRA_API_TOKEN") == "JIRA_API_TOKEN"
+    assert _tool_credential_placeholder("present") == "Stored for this session"
+    assert _tool_credential_placeholder("expired") == "Expired; paste value"
+    assert _tool_credential_placeholder("missing") == "Paste value"
 
     rendered: list[object] = []
     controller = object()
@@ -2048,6 +2057,85 @@ def test_controller_session_secrets_are_in_memory_and_session_scoped(
     assert reloaded.provider_api_key() is None
     assert reloaded.session_tool_env() == {}
     assert second.summary.session_id in controller.sessions
+
+
+def test_controller_session_secrets_expire_after_default_ttl(tmp_path: Path) -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    store = _chat_store(tmp_path)
+    store.initialize()
+    controller = NiceGUIChatController(
+        store=store,
+        config=AssistantConfig(),
+        root_path=tmp_path,
+        provider_factory=lambda _runtime: _FakeProvider([]),
+        credential_clock=lambda: now,
+    )
+
+    controller.set_session_secret(PROVIDER_API_KEY_FIELD, "provider-token")
+    controller.set_session_secret("GITLAB_API_TOKEN", "tool-token")
+
+    assert controller.session_secret_state(PROVIDER_API_KEY_FIELD) == "present"
+    assert controller.provider_api_key() == "provider-token"
+    assert controller.session_tool_env() == {"GITLAB_API_TOKEN": "tool-token"}
+
+    now += timedelta(seconds=DEFAULT_SESSION_SECRET_TTL_SECONDS - 1)
+    assert controller.provider_api_key() == "provider-token"
+
+    now += timedelta(seconds=1)
+    assert controller.provider_api_key() is None
+    assert controller.session_secret_state(PROVIDER_API_KEY_FIELD) == "expired"
+    assert controller.session_tool_env() == {}
+    assert controller.tool_env_overrides() == {}
+    assert controller.session_secret_state("GITLAB_API_TOKEN") == "expired"
+    assert (
+        controller.session_secrets[controller.active_session_id][
+            PROVIDER_API_KEY_FIELD
+        ].value
+        is None
+    )
+
+    controller.set_session_secret(PROVIDER_API_KEY_FIELD, "provider-token-2")
+
+    assert controller.provider_api_key() == "provider-token-2"
+    assert controller.session_secret_state(PROVIDER_API_KEY_FIELD) == "present"
+
+
+def test_expired_provider_credential_blocks_without_transcript_mutation(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    store = _chat_store(tmp_path)
+    store.initialize()
+    controller = NiceGUIChatController(
+        store=store,
+        config=AssistantConfig(),
+        root_path=tmp_path,
+        provider_factory=lambda _runtime: _FakeProvider([]),
+        credential_clock=lambda: now,
+    )
+    controller.active_record.runtime.provider_connection.api_base_url = (
+        "http://127.0.0.1:11434/v1"
+    )
+    controller.active_record.runtime.provider_connection.auth_scheme = (
+        ProviderAuthScheme.BEARER
+    )
+    controller.active_record.runtime.selected_model = "test-model"
+    controller.set_session_secret(PROVIDER_API_KEY_FIELD, "provider-token")
+    now += timedelta(seconds=DEFAULT_SESSION_SECRET_TTL_SECONDS)
+
+    error = controller.submit_prompt("hello")
+
+    assert error == "Enter provider credentials before running a model turn."
+    assert controller.session_secret_state(PROVIDER_API_KEY_FIELD) == "expired"
+    assert controller.active_record.transcript == []
+
+    controller.clear_session_secret(PROVIDER_API_KEY_FIELD)
+
+    assert controller.submit_prompt("hello") == (
+        "Enter provider credentials before running a model turn."
+    )
+    assert controller.session_secret_state(PROVIDER_API_KEY_FIELD) == "missing"
+    assert controller.active_record.transcript == []
 
 
 def test_controller_hosted_secrets_are_memory_only_and_env_isolated(
