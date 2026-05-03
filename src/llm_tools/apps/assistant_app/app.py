@@ -22,6 +22,7 @@ from llm_tools.apps.assistant_app.controller import (
     default_runtime_config,
 )
 from llm_tools.apps.assistant_app.paths import expand_app_path
+from llm_tools.apps.assistant_app.project_defaults import PROJECT_DEFAULTS
 from llm_tools.apps.assistant_app.store import SQLiteNiceGUIChatStore, default_db_path
 from llm_tools.apps.assistant_app.ui import (
     NICEGUI_APPROVAL_LABELS,
@@ -38,6 +39,7 @@ from llm_tools.apps.assistant_app.ui import (
     _can_admin_disable_user,
     _composer_action_icon,
     _context_capacity_meter_state,
+    _credential_display_name,
     _default_protection_corrections_path,
     _ensure_information_security_category_catalog,
     _event_payload_text,
@@ -62,6 +64,7 @@ from llm_tools.apps.assistant_app.ui import (
     _provider_base_url_help_text,
     _provider_connection_identity,
     _provider_endpoint_menu_rows,
+    _provider_preset_apply_values,
     _referenced_document_text,
     _runtime_summary_parts,
     _runtime_summary_text,
@@ -75,6 +78,7 @@ from llm_tools.apps.assistant_app.ui import (
     _settings_section_default_open,
     _sidebar_container_classes,
     _tool_capability_tooltip,
+    _tool_credential_placeholder,
     _workbench_container_classes,
     build_assistant_ui,
     render_first_admin_page,
@@ -182,9 +186,9 @@ def build_parser() -> argparse.ArgumentParser:
 def resolve_assistant_config(args: argparse.Namespace) -> AssistantConfig:
     """Resolve config file and CLI overrides."""
     base_config = (
-        load_assistant_config(args.config)
+        load_assistant_config(args.config, base_config=PROJECT_DEFAULTS.config)
         if args.config is not None
-        else AssistantConfig()
+        else PROJECT_DEFAULTS.config.model_copy(deep=True)
     )
     raw = base_config.model_dump(mode="python")
     raw.setdefault("llm", {})
@@ -273,7 +277,9 @@ def run_assistant_app(
         ),
     )
     store.initialize()
-    branding = store.load_admin_settings().branding
+    branding = store.load_admin_settings(
+        defaults=PROJECT_DEFAULTS.admin_settings
+    ).branding
     startup = validate_hosted_startup(
         auth_mode=auth_mode,
         host=host,
@@ -390,6 +396,7 @@ __all__ = [
     "_format_information_security_level",
     "_format_transcript_time",
     "_format_workbench_duration",
+    "_credential_display_name",
     "_hosted_storage_values",
     "_is_admin_user",
     "_is_tool_url_setting",
@@ -405,6 +412,7 @@ __all__ = [
     "_provider_base_url_help_text",
     "_provider_connection_identity",
     "_provider_endpoint_menu_rows",
+    "_provider_preset_apply_values",
     "_referenced_document_text",
     "_runtime_summary_parts",
     "_runtime_summary_text",
@@ -419,6 +427,7 @@ __all__ = [
     "_settings_section_default_open",
     "_sidebar_container_classes",
     "_tool_capability_tooltip",
+    "_tool_credential_placeholder",
     "_workbench_container_classes",
     "build_assistant_ui",
     "build_parser",

@@ -76,10 +76,11 @@ must be typed into the app for the active browser/app session. In both normal
 local loopback use and hosted use those values are held in server memory only.
 They are not written to SQLite, config files, browser storage, or provider
 connection presets, and are not restored after a server restart, browser session
-reset, or logout. Credential input fields for provider and tool credentials
-should be cleared as soon as values are submitted to the backend so secrets do
-not remain in browser UI longer than needed, while the submitted values remain
-available in Python backend memory for the active app session.
+reset, or logout. They expire after 2 hours by default and must be re-entered
+when next needed. Credential input fields for provider and tool credentials should
+be cleared as soon as values are submitted to the backend so secrets do not
+remain in browser UI longer than needed, while the submitted values remain
+available in Python backend memory for the active app session until expiry.
 
 Non-secret service URLs, such as Atlassian or GitLab base URLs, are runtime
 configuration and may be persisted as normal chat settings. Keep bearer tokens,

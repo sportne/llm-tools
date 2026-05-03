@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from llm_tools.apps.assistant_config import AssistantResearchConfig
+from llm_tools.apps.assistant_config import AssistantConfig, AssistantResearchConfig
 from llm_tools.apps.chat_config import ProviderConnectionConfig, ProviderProtocol
 from llm_tools.llm_providers import ResponseModeStrategy
 from llm_tools.tool_api import SideEffectClass
@@ -106,6 +106,75 @@ class NiceGUIAdminSettings(BaseModel):
     atlassian_tools_enabled: bool = False
     gitlab_tools_enabled: bool = False
     branding: AssistantBranding = Field(default_factory=AssistantBranding)
+
+
+class ProviderConnectionPreset(BaseModel):
+    """One non-secret provider connection preset entry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    provider_protocol: ProviderProtocol = ProviderProtocol.OPENAI_API
+    provider_connection: ProviderConnectionConfig = Field(
+        default_factory=ProviderConnectionConfig
+    )
+    response_mode_strategy: ResponseModeStrategy | None = None
+    selected_model: str | None = None
+
+    @field_validator("id", "label")
+    @classmethod
+    def validate_required_text(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("provider preset text fields must not be empty")
+        return cleaned
+
+    @field_validator("selected_model")
+    @classmethod
+    def validate_selected_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    @property
+    def name(self) -> str:
+        """Return the legacy display name used by endpoint helpers."""
+        return self.label
+
+    @property
+    def url(self) -> str:
+        """Return the preset API base URL, or an empty string."""
+        return self.provider_connection.api_base_url or ""
+
+
+class AssistantProjectDefaults(BaseModel):
+    """Typed source-controlled defaults for the assistant app variant."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    config: AssistantConfig = Field(default_factory=AssistantConfig)
+    provider_connection_presets: tuple[ProviderConnectionPreset, ...] = ()
+    provider_base_url_help_text: str = (
+        "Use the provider's documented API base URL for the selected protocol."
+    )
+    admin_settings: NiceGUIAdminSettings = Field(default_factory=NiceGUIAdminSettings)
+
+    @field_validator("provider_base_url_help_text")
+    @classmethod
+    def validate_provider_base_url_help_text(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("provider_base_url_help_text must not be empty")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_provider_preset_ids(self) -> AssistantProjectDefaults:
+        ids = [preset.id for preset in self.provider_connection_presets]
+        if len(set(ids)) != len(ids):
+            raise ValueError("provider_connection_presets ids must be unique")
+        return self
 
 
 class NiceGUITranscriptEntry(BaseModel):
@@ -287,6 +356,7 @@ class NiceGUIPreferences(BaseModel):
 
 __all__ = [
     "AssistantBranding",
+    "AssistantProjectDefaults",
     "DEFAULT_ASSISTANT_FAVICON_SVG",
     "NiceGUIAdminSettings",
     "NiceGUIAuthMode",
@@ -303,4 +373,5 @@ __all__ = [
     "NiceGUIUser",
     "NiceGUIUserSession",
     "NiceGUIWorkbenchItem",
+    "ProviderConnectionPreset",
 ]

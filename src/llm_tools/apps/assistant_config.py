@@ -35,9 +35,18 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return raw
 
 
-def load_assistant_config(path: Path) -> AssistantConfig:
-    """Load and validate the LLM Tools Assistant configuration file."""
-    raw = _load_yaml(path)
+def _deep_overlay(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in overlay.items():
+        base_value = merged.get(key)
+        if isinstance(base_value, dict) and isinstance(value, dict):
+            merged[key] = _deep_overlay(base_value, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _validate_assistant_config_sections(raw: dict[str, Any]) -> None:
     for section_name in (
         "llm",
         "session",
@@ -51,6 +60,16 @@ def load_assistant_config(path: Path) -> AssistantConfig:
         section_value = raw.get(section_name)
         if section_value is not None and not isinstance(section_value, dict):
             raise ValueError(f"assistant config '{section_name}' must be a mapping")
+
+
+def load_assistant_config(
+    path: Path, *, base_config: AssistantConfig | None = None
+) -> AssistantConfig:
+    """Load and validate the LLM Tools Assistant configuration file."""
+    raw = _load_yaml(path)
+    _validate_assistant_config_sections(raw)
+    if base_config is not None:
+        raw = _deep_overlay(base_config.model_dump(mode="python"), raw)
     try:
         return AssistantConfig.model_validate(raw)
     except PydanticValidationError as exc:
