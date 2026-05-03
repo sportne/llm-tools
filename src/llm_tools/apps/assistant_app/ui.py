@@ -2025,12 +2025,11 @@ def build_assistant_ui(  # noqa: C901
                     icon = "check_box" if enabled else "check_box_outline_blank"
                     with ui.row().classes("w-full items-center gap-1 no-wrap"):
                         button = ui.button(
-                            skill.name,
                             icon=icon,
                             on_click=lambda _event, target=skill, state=enabled: (
                                 toggle_runtime_skill(target, not state)
                             ),
-                        ).props("flat dense no-caps align=left")
+                        ).props("flat round dense")
                         button.classes(
                             "llmt-tool-name "
                             + ("llmt-tool-chip-enabled" if enabled else "")
@@ -2038,6 +2037,12 @@ def build_assistant_ui(  # noqa: C901
                         with button:
                             ui.tooltip(_skill_tooltip(skill, enabled=enabled)).props(
                                 "delay=700"
+                            )
+                        with ui.column().classes("grow min-w-0 gap-0"):
+                            ui.label(skill.name).classes("text-sm")
+                            ui.label(skill.description).classes("text-xs llmt-muted")
+                            ui.label(f"{skill.scope.value} | {skill.path}").classes(
+                                "text-xs llmt-muted break-all"
                             )
                         invoke_button = ui.button(
                             icon="add_comment",

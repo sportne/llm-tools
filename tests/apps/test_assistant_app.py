@@ -1380,6 +1380,29 @@ def test_app_builder_renders_final_response_metadata(tmp_path: Path) -> None:
     assert "Select a root" in rendered_text
 
 
+def test_app_builder_renders_visible_skill_metadata(tmp_path: Path) -> None:
+    from nicegui import ui
+
+    skill_path = tmp_path / "demo" / "SKILL.md"
+    _write_skill(
+        skill_path,
+        name="demo-skill",
+        description="Visible demo description.",
+    )
+    controller = _controller(tmp_path, _FakeProvider([]))
+
+    build_assistant_ui(controller)
+
+    rendered_text = [
+        str(element.text)
+        for element in ui.context.client.elements.values()
+        if getattr(element, "text", None)
+    ]
+    assert "demo-skill" in rendered_text
+    assert "Visible demo description." in rendered_text
+    assert f"project | {skill_path}" in rendered_text
+
+
 def test_app_builder_applies_initial_layout_preferences(tmp_path: Path) -> None:
     from nicegui import ui
 
@@ -1492,6 +1515,26 @@ def test_controller_disabled_skill_is_not_invokable(tmp_path: Path) -> None:
 
     assert error is not None
     assert "skill not found: demo-skill" in error
+
+
+def test_controller_enable_skill_clears_matching_name_disable(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path / "demo" / "SKILL.md",
+        name="demo-skill",
+        description="Use the demo skill.",
+    )
+    controller = _controller(tmp_path, _FakeProvider([]))
+    controller.active_record.runtime.disabled_skill_names = ["demo-skill"]
+    skill = next(
+        skill for skill in controller.visible_skills() if skill.name == "demo-skill"
+    )
+
+    assert controller.skill_enabled(skill) is False
+
+    controller.set_skill_enabled(skill, True)
+
+    assert controller.active_record.runtime.disabled_skill_names == []
+    assert controller.skill_enabled(skill) is True
 
 
 def test_controller_interaction_mode_locks_after_first_message(

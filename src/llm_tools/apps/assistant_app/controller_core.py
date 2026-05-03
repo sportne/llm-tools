@@ -543,6 +543,9 @@ class NiceGUIChatController:
         skill_path = str(Path(skill.path).expanduser().resolve(strict=False))
         if enabled:
             disabled_paths.discard(skill_path)
+            runtime.disabled_skill_names = [
+                name for name in runtime.disabled_skill_names if name != skill.name
+            ]
         else:
             disabled_paths.add(skill_path)
         runtime.disabled_skill_paths = sorted(disabled_paths)
