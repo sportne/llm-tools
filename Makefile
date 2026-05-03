@@ -13,6 +13,7 @@ PYTEST_FLAGS ?= -s
 	format format-check \
 	lint typecheck dead-code reachability \
 	test coverage coverage-report \
+	dependency-inventory sbom \
 	package clean ci
 
 help:
@@ -28,6 +29,8 @@ help:
 	@echo "  make test         - Run the test suite"
 	@echo "  make coverage     - Run tests and enforce 90% per-file coverage"
 	@echo "  make coverage-report - Run tests with terminal and JSON coverage reporting"
+	@echo "  make dependency-inventory - Print the dependency inventory Markdown table"
+	@echo "  make sbom         - Generate a CycloneDX JSON dependency SBOM"
 	@echo "  make package      - Build source and wheel distributions"
 	@echo "  make clean        - Remove local build and test artifacts"
 	@echo "  make ci           - Run format-check, lint, reachability, and coverage gates"
@@ -67,6 +70,12 @@ coverage-report:
 
 coverage: coverage-report
 	"$(PYTHON)" scripts/check_coverage.py --input coverage.json --threshold 90
+
+dependency-inventory:
+	"$(PYTHON)" scripts/generate_dependency_inventory.py --format markdown
+
+sbom:
+	"$(PYTHON)" scripts/generate_dependency_inventory.py --format cyclonedx-json $(if $(OUTPUT),--output "$(OUTPUT)",)
 
 package:
 	"$(PYTHON)" -m build --no-isolation

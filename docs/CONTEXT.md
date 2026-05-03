@@ -182,6 +182,10 @@ _Avoid_: failure, timeout
 The interactive product flow that keeps conversational state while executing **Workflow Turn** results.
 _Avoid_: chat UI, nicegui chat
 
+**Assistant User Guide**:
+The future end-user documentation for operating the assistant app.
+_Avoid_: system design, architecture document
+
 **Assistant Workbench**:
 The assistant product surface for inspecting runtime, execution, approval, protection, provider, and deep-task details.
 _Avoid_: canvas, artifact editor
@@ -217,6 +221,30 @@ _Avoid_: provider, provider protocol
 **Provider Auth Scheme**:
 The non-secret credential shape required by a **Provider Connection**, such as no credential, bearer token, or `x-access-tokens` header.
 _Avoid_: bearer-token requirement
+
+**System Design Document**:
+The single current-system technical design document that describes implemented architecture, cybersecurity-relevant controls, algorithmic behavior, subsystem boundaries, contracts, dependencies, LLM interaction design, and built-in capabilities.
+_Avoid_: target architecture, aspirational design, stale design notes
+
+**Dependency Inventory**:
+A reproducible project artifact that lists package dependencies, provenance, license metadata, and their design-level purpose.
+_Avoid_: hand-written SBOM dump, dependency notes
+
+**Runtime Dependency**:
+A package required for installed `llm-tools` behavior, including library APIs, built-in integrations, assistant app runtime, persistence, provider transport, or CLI entrypoints.
+_Avoid_: dev tool, test dependency
+
+**Development Dependency**:
+A package required for local development, testing, linting, type checking, dead-code review, coverage, or packaging workflows.
+_Avoid_: runtime dependency, shipped capability
+
+**Software Bill of Materials**:
+A generated full transitive CycloneDX JSON dependency artifact for the project environment.
+_Avoid_: curated dependency table, design dependency summary
+
+**Feature-Gated Capability**:
+An implemented system behavior that may be disabled, hidden, or restricted by runtime configuration, administrator settings, or feature flags.
+_Avoid_: backlog item, planned feature
 
 ## Relationships
 
@@ -332,6 +360,37 @@ _Avoid_: bearer-token requirement
 - Structured-output and fallback behavior should be explicit **Model-Turn Protocol** capability configuration, not inferred from vendor identity.
 - The initial **Provider Protocol** selector should expose one option, "OpenAI API"; native Gemini, Ollama, and Ask Sage protocols can be added later.
 - **Provider Connection Presets** may populate provider fields, but tokens are not persisted to disk as part of a preset.
+- The **System Design Document** describes current implemented behavior and references ADRs for decision rationale.
+- The canonical **System Design Document** lives at `docs/system-design.md`.
+- A **Dependency Inventory** supports the **System Design Document** rather than replacing its narrative design sections.
+- The **System Design Document** documents public architectural contracts rather than every implementation field or function signature.
+- The **System Design Document** includes **Feature-Gated Capabilities** because they are implemented system behavior.
+- **Feature-Gated Capabilities** are documented in the owning subsystem section, not in a backlog section.
+- The **System Design Document** includes an **Implementation Source Map** appendix that links design areas to primary modules and tests; it is package/module traceability, not line-level source commentary.
+- The **System Design Document** uses a consolidated top-level structure: purpose and truth model, system architecture, subsystem designs, cross-cutting designs, built-in capabilities, dependency and supply-chain inventory, and verification and decision records.
+- The **System Design Document** contains a full security design section intended to supersede `docs/security.md` later, excluding active hardening backlog and dated review-log content.
+- A **Software Bill of Materials** is generated as a full transitive artifact, while the **System Design Document** includes a curated Markdown dependency table.
+- The **Software Bill of Materials** generator is committed, but generated full transitive SBOM files are produced on demand rather than committed without a lockfile.
+- Curated direct-dependency purpose text lives in `docs/dependency-purposes.toml` and is consumed by the **Dependency Inventory** generator.
+- The **Dependency Inventory** distinguishes **Runtime Dependencies** from **Development Dependencies**.
+- The **System Design Document** describes individual built-in **Tools** at architectural and security depth, not full input/output schema-reference depth.
+- The **System Design Document** is written for a wider technical audience including maintainers, contributors, security reviewers, auditors, and advanced integrators, not end users.
+- The **System Design Document** is simultaneously an architecture document, cybersecurity design document, and algorithm description document.
+- Built-in **Tool** and **Protection** sections in the **System Design Document** use a consistent assurance template: purpose, inputs and trust boundaries, algorithm, required capabilities, security-relevant controls, persistence/cache/logs/provenance, failure behavior, residual risks, and test evidence.
+- **Protection** is a distinctive first-class subsystem in the **System Design Document**, not merely a short security-control note.
+- The **Protection** section in the **System Design Document** is organized by algorithms: corpus loading, prompt assessment and decision, prompt challenge and feedback, response review and sanitization/blocking, source provenance and single-source allowance, persistence/caches/scrubbing, assistant integration, controls, risks, and test evidence.
+- The **Assistant App** section in the **System Design Document** covers app runtime assembly, chat turn flow, Deep Task integration, workbench/inspector behavior, admin settings, hosted mode, and feature-gate enforcement.
+- The **LLM Interaction Design** section in the **System Design Document** describes model-turn protocol selection and the native, staged structured JSON, prompt-tool, protection, fallback, repair, and event-redaction paths as algorithms.
+- The **Persistence Design** section in the **System Design Document** covers assistant table responsibilities, encrypted field envelopes, key hierarchy, save/load algorithms, harness persistence, caches, and corruption behavior.
+- The **Provider** section in the **System Design Document** covers provider connection identity, support matrix, preflight algorithm, response-mode support, trust boundaries, and feature-gated native protocols.
+- The **Skills** section in the **System Design Document** covers bounded discovery, deterministic resolution, assistant prompt-context construction, explicit invocation, and the trust model that skills influence prompts without granting capabilities.
+- The **Harness** section in the **System Design Document** covers canonical state, session lifecycle, checkpoint/commit behavior, resume classifications, durable approvals, retry/stop behavior, replay/summaries, verification, and Assistant Deep Task wrapping.
+- The **Tool API** and **Workflow API** sections in the **System Design Document** cover tool abstractions, policy evaluation, runtime execution, scoped services, action-envelope parsing, model-facing schema preparation, parsed-response execution, approval semantics, and normalized workflow observability.
+- The **Security Design** section in the **System Design Document** is a threat-model-oriented section with assets, trust boundaries, attacker assumptions, control matrix, deployment modes, residual risks, and non-goals.
+- The **System Design Document** covers Assistant app architecture, while the **Assistant User Guide** covers end-user operating instructions.
+- The **System Design Document** may reference ADRs for rationale but should not depend on ADRs as its primary structure.
+- The **Dependency Inventory** generator is tolerant by default and strict on request.
+- The **Dependency Inventory** generator has Makefile convenience targets but is not part of the required CI gate without a lockfile.
 - **Provider Connection Presets** should have stable ids separate from display labels so later user- or administrator-managed overrides can target them.
 - The initial **Provider Protocol** should be named `openai_api` internally and "OpenAI API" in the app.
 - OpenAI API protocol endpoints should be entered and stored as actual API base URLs, including path prefixes such as `/v1` when required by the endpoint.
@@ -458,3 +517,9 @@ _Avoid_: bearer-token requirement
 - The skills API owns reusable skill mechanics; **Assistant Runtime Assembly** owns app-session skill composition.
 - Assistant app inspector/debug UI should expose turn-visible **Available Skills Context**, **Loaded Skill Context**, **Skill Usage Records**, and skill validation or enablement warnings.
 - Supporting files should not be shown in inspector/debug UI unless the user explicitly opens or loads them.
+- The new **System Design Document** and future **Assistant User Guide** will eventually replace the old `docs/design/*` and `docs/security.md` documents, while `docs/CONTEXT.md` and `docs/adr/*` remain supporting records.
+- Old `docs/design/*` and `docs/security.md` artifacts remain until both replacement major documents are complete.
+- The first **System Design Document** pass includes `docs/system-design.md`, `docs/dependency-purposes.toml`, a dependency inventory generator, and supporting tests where practical.
+- The **System Design Document** is hand-authored, with generated dependency tables used as supporting content rather than generated system narrative.
+- The first **System Design Document** draft should be dense and section-complete, while avoiding source-code reference depth.
+- The **System Design Document** should not contain the active backlog or general known-gaps list.
