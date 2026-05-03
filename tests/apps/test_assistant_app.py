@@ -20,6 +20,7 @@ from llm_tools.apps.assistant_app.app import (
     AssistantUIRenderer,
     _account_menu_action_labels,
     _account_menu_identity_labels,
+    _assistant_help_markdown,
     _available_windows_drive_roots,
     _branding_favicon_href,
     _branding_favicon_javascript,
@@ -1395,6 +1396,30 @@ def test_app_builder_renders_with_temporary_sqlite_db(tmp_path: Path) -> None:
     assert composer_row_index < meter_index < selected_tools_index
     assert meter_index < runtime_summary_index
     assert any("llmt-context-meter-fill" in element.classes for element in elements)
+
+
+def test_app_builder_renders_help_entry_point(tmp_path: Path) -> None:
+    from nicegui import ui
+
+    controller = _controller(tmp_path, _FakeProvider([]))
+
+    build_assistant_ui(controller)
+
+    elements = list(ui.context.client.elements.values())
+    assert any(
+        "help_outline" in str(getattr(element, "_props", {})) for element in elements
+    )
+    assert "LLM Tools Assistant User Guide" in _assistant_help_markdown()
+
+
+def test_assistant_help_markdown_uses_packaged_resource_images() -> None:
+    from llm_tools.apps.assistant_app import ui as assistant_ui_module
+
+    markdown = assistant_ui_module._assistant_help_markdown()
+
+    assert "LLM Tools Assistant User Guide" in markdown
+    assert "data:image/png;base64," in markdown
+    assert "screenshot is available in the repository guide" not in markdown
 
 
 def test_app_builder_renders_final_response_metadata(tmp_path: Path) -> None:

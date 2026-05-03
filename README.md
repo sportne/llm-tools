@@ -64,12 +64,13 @@ the lower library layers unless they intentionally target app behavior.
 ## Design Documentation
 
 - `docs/system-design.md` is the current consolidated system design.
+- `docs/assistant-user-guide.md` points to the packaged Assistant user guide.
 - `docs/CONTEXT.md` defines the project domain language.
 - `docs/adr/` records architectural decisions and rationale.
 
 Older `docs/design/*` and `docs/security.md` artifacts remain during the
-documentation transition and will be removed only after the replacement system
-design and assistant user guide are both complete.
+documentation transition until a dedicated cleanup removes the superseded
+artifacts.
 
 ## Install
 
@@ -466,6 +467,7 @@ python scripts/e2e_assistant/run_ollama_skill_eval.py \
 ## Documentation
 
 - [System Design](docs/system-design.md)
+- [Assistant User Guide](docs/assistant-user-guide.md)
 - [Domain Context](docs/CONTEXT.md)
 - [Architecture Decision Records](docs/adr/)
 - Legacy transition docs:

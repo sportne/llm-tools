@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
+from base64 import b64encode
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from importlib import resources
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -93,6 +96,76 @@ INTERACTION_MODE_TOOLTIPS: dict[NiceGUIInteractionMode, str] = {
         "Durable multi-step work with task state, approvals, trace, and summary."
     ),
 }
+ASSISTANT_USER_GUIDE_FILENAME = "assistant-user-guide.md"
+ASSISTANT_USER_GUIDE_RESOURCE_PACKAGE = "llm_tools.apps.assistant_app.resources"
+ASSISTANT_USER_GUIDE_IMAGE_PATTERN = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+
+
+def _assistant_help_markdown() -> str:
+    """Return Markdown content for the in-app help dialog."""
+    try:
+        text = (
+            resources.files(ASSISTANT_USER_GUIDE_RESOURCE_PACKAGE)
+            .joinpath(ASSISTANT_USER_GUIDE_FILENAME)
+            .read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, ModuleNotFoundError):
+        return (
+            "# LLM Tools Assistant User Guide\n\n"
+            "The full user guide is not available from this installed app build. "
+            "In the source tree, open `docs/assistant-user-guide.md`."
+        )
+    return _inline_resource_markdown_images(text)
+
+
+def _inline_resource_markdown_images(markdown: str) -> str:
+    """Replace packaged local image links with data URIs for in-app rendering."""
+
+    def replace(match: re.Match[str]) -> str:
+        alt_text = match.group(1)
+        target = match.group(2).strip()
+        if _markdown_image_target_is_external(target):
+            return match.group(0)
+        data_uri = _assistant_resource_image_data_uri(target)
+        if data_uri is None:
+            return match.group(0)
+        return f"![{alt_text}]({data_uri})"
+
+    return ASSISTANT_USER_GUIDE_IMAGE_PATTERN.sub(replace, markdown)
+
+
+def _markdown_image_target_is_external(target: str) -> bool:
+    """Return whether a Markdown image target should not be loaded as a resource."""
+    normalized = target.lower()
+    return (
+        normalized.startswith(("http://", "https://", "data:"))
+        or target.startswith("/")
+        or ".." in Path(target).parts
+    )
+
+
+def _assistant_resource_image_data_uri(target: str) -> str | None:
+    """Return one packaged guide image as a browser data URI."""
+    suffix = Path(target).suffix.lower()
+    mime_type = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }.get(suffix)
+    if mime_type is None:
+        return None
+    try:
+        image_bytes = (
+            resources.files(ASSISTANT_USER_GUIDE_RESOURCE_PACKAGE)
+            .joinpath(*Path(target).parts)
+            .read_bytes()
+        )
+    except FileNotFoundError:
+        return None
+    encoded = b64encode(image_bytes).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
 
 
 def _branding_favicon_href(branding: AssistantBranding) -> str:
@@ -1421,6 +1494,35 @@ def build_assistant_ui(  # noqa: C901
         }
         .llmt-json-editor .jse-main { min-width: 0; }
         .llmt-json-editor .jse-contents { overflow: auto; }
+        .llmt-help-card {
+            width: min(920px, 94vw) !important;
+            height: min(840px, 92vh) !important;
+            max-width: 94vw !important; max-height: 92vh !important;
+            display: flex; flex-direction: column; overflow: hidden;
+        }
+        .llmt-help-body { flex: 1 1 auto; min-height: 0; }
+        .llmt-help-markdown {
+            max-width: 100%; font-size: 0.93rem; line-height: 1.48;
+            color: inherit; overflow-wrap: anywhere;
+        }
+        .llmt-help-markdown img {
+            max-width: 100%; height: auto; border: 1px solid #d8d6ce;
+            border-radius: 6px; margin: 0.45rem 0;
+        }
+        body.body--dark .llmt-help-markdown img { border-color: #3d4039; }
+        .llmt-help-markdown pre { white-space: pre-wrap; }
+        .llmt-help-markdown h1 { font-size: 1.45rem; margin: 0.2rem 0 0.8rem; }
+        .llmt-help-markdown h2 { font-size: 1.18rem; margin: 1.2rem 0 0.45rem; }
+        .llmt-help-markdown h3 { font-size: 1.02rem; margin: 1rem 0 0.35rem; }
+        .llmt-help-markdown table {
+            display: block; width: 100%; overflow-x: auto; border-collapse: collapse;
+        }
+        .llmt-help-markdown th, .llmt-help-markdown td {
+            border: 1px solid #d8d6ce; padding: 0.35rem 0.45rem;
+            vertical-align: top;
+        }
+        body.body--dark .llmt-help-markdown th,
+        body.body--dark .llmt-help-markdown td { border-color: #3d4039; }
         .llmt-action-button .q-btn__content { flex-wrap: nowrap; }
         .llmt-action-button .q-btn__content span {
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1949,6 +2051,9 @@ def build_assistant_ui(  # noqa: C901
     def open_settings_dialog() -> None:
         sync_settings_inputs()
         dialogs["settings"].open()
+
+    def open_help_dialog() -> None:
+        dialogs["help"].open()
 
     def sync_information_security_inputs() -> None:
         config = active_runtime().protection
@@ -2682,9 +2787,9 @@ def build_assistant_ui(  # noqa: C901
                 ui.button(icon="close", on_click=toggle_workbench).props("flat round")
             with ui.scroll_area().classes("llmt-workbench-body"):
                 if not record.workbench_items:
-                    ui.label(
-                        "Inspector and artifact records will appear here."
-                    ).classes("q-pa-md llmt-muted")
+                    ui.label("Inspector records will appear here.").classes(
+                        "q-pa-md llmt-muted"
+                    )
                     return
                 for item in reversed(record.workbench_items[-20:]):
                     with ui.expansion(item.title, icon="fact_check").classes("w-full"):
@@ -3684,6 +3789,11 @@ def build_assistant_ui(  # noqa: C901
                     )
                 with ui.row().classes("llmt-header-actions items-center gap-2"):
                     status_chip = ui.badge("ready").props("outline")
+                    with ui.button(
+                        icon="help_outline",
+                        on_click=open_help_dialog,
+                    ).props("flat round"):
+                        ui.tooltip("Help").props("delay=700")
                     with (
                         ui.button(icon="account_circle").props("flat round"),
                         ui.menu().classes("llmt-account-menu"),
@@ -3912,6 +4022,16 @@ def build_assistant_ui(  # noqa: C901
             .props("expand-separator")
             .classes("llmt-settings-expansion w-full")
         )
+
+    with ui.dialog() as help_dialog, ui.card().classes("llmt-help-card"):
+        dialogs["help"] = help_dialog
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label("Help").classes("text-lg")
+            ui.button(icon="close", on_click=help_dialog.close).props("flat round")
+        with ui.scroll_area().classes("llmt-help-body"):
+            ui.markdown(_assistant_help_markdown()).classes(
+                "llmt-help-markdown q-pr-sm"
+            )
 
     with ui.dialog() as settings_dialog, ui.card().classes("llmt-settings-card"):
         dialogs["settings"] = settings_dialog

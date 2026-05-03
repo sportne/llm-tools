@@ -28,7 +28,7 @@ The documentation truth model is:
 
 This document is written for maintainers, contributors, security reviewers, and
 advanced integrators. End-user operation of the assistant app belongs in the
-future Assistant User Guide.
+Assistant User Guide.
 
 ## System Architecture
 
