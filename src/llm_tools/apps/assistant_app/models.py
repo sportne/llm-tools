@@ -99,6 +99,9 @@ class NiceGUIAdminSettings(BaseModel):
 
     deep_task_mode_enabled: bool = False
     information_protection_enabled: bool = False
+    skills_enabled: bool = False
+    ollama_native_provider_enabled: bool = False
+    ask_sage_native_provider_enabled: bool = False
     write_file_tool_enabled: bool = False
     atlassian_tools_enabled: bool = False
     gitlab_tools_enabled: bool = False

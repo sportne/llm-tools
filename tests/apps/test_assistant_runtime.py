@@ -86,6 +86,9 @@ def _runtime(**overrides: object) -> SimpleNamespace:
 
 def _admin(**overrides: object) -> SimpleNamespace:
     values: dict[str, object] = {
+        "skills_enabled": False,
+        "ollama_native_provider_enabled": False,
+        "ask_sage_native_provider_enabled": False,
         "write_file_tool_enabled": False,
         "atlassian_tools_enabled": False,
         "gitlab_tools_enabled": False,
@@ -245,13 +248,35 @@ def test_assistant_runtime_bundle_loads_invoked_skills(tmp_path) -> None:
     )
     runtime = _runtime(root_path=str(tmp_path))
 
-    bundle = _bundle(runtime=runtime, skill_invocation_text="$demo-skill do this")
+    bundle = _bundle(
+        runtime=runtime,
+        admin_settings=_admin(skills_enabled=True),
+        skill_invocation_text="$demo-skill do this",
+    )
 
     assert bundle.available_skills_context is not None
     assert "- demo-skill:" in bundle.chat_system_prompt
     assert "<name>demo-skill</name>" in bundle.chat_system_prompt
     assert "SECRET SKILL BODY" in bundle.deep_task_system_prompt
     assert [usage.name for usage in bundle.skill_usage_records] == ["demo-skill"]
+
+
+def test_assistant_runtime_bundle_hides_skills_by_default(tmp_path) -> None:
+    _write_skill(
+        tmp_path / "demo" / "SKILL.md",
+        name="demo-skill",
+        description="Use the demo skill.",
+        body="SECRET SKILL BODY",
+    )
+    runtime = _runtime(root_path=str(tmp_path))
+
+    bundle = _bundle(runtime=runtime, skill_invocation_text="$demo-skill do this")
+
+    assert bundle.available_skills_context is None
+    assert bundle.loaded_skill_contexts == ()
+    assert bundle.skill_usage_records == ()
+    assert "demo-skill" not in bundle.chat_system_prompt
+    assert "SECRET SKILL BODY" not in bundle.deep_task_system_prompt
 
 
 def test_assistant_runtime_bundle_rejects_disabled_invoked_skills(tmp_path) -> None:
@@ -267,7 +292,11 @@ def test_assistant_runtime_bundle_rejects_disabled_invoked_skills(tmp_path) -> N
     )
 
     with pytest.raises(SkillNotFoundError):
-        _bundle(runtime=runtime, skill_invocation_text="$demo-skill do this")
+        _bundle(
+            runtime=runtime,
+            admin_settings=_admin(skills_enabled=True),
+            skill_invocation_text="$demo-skill do this",
+        )
 
 
 def test_assistant_runtime_bundle_wires_protection_when_ready(

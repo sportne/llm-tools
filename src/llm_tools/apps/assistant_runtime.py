@@ -257,9 +257,13 @@ def build_assistant_runtime_bundle(
         redaction_config=effective_config.policy.redaction,
     )
     registry, workflow_executor = build_assistant_executor(policy=policy)
-    skill_context = build_assistant_skill_context(
-        runtime=runtime,
-        invocation_text=skill_invocation_text,
+    skill_context = (
+        build_assistant_skill_context(
+            runtime=runtime,
+            invocation_text=skill_invocation_text,
+        )
+        if getattr(admin_settings, "skills_enabled", False)
+        else AssistantSkillContext.disabled()
     )
     chat_system_prompt = _prompt_with_skill_context(
         build_assistant_system_prompt(
@@ -345,6 +349,16 @@ class AssistantSkillContext:
     available_skills_context: AvailableSkillsContext | None
     loaded_skill_contexts: tuple[LoadedSkillContext, ...]
     usage_records: tuple[SkillUsageRecord, ...]
+
+    @classmethod
+    def disabled(cls) -> AssistantSkillContext:
+        """Return an empty skill context when the admin feature flag is disabled."""
+        return cls(
+            discovery=SkillDiscoveryResult(),
+            available_skills_context=None,
+            loaded_skill_contexts=(),
+            usage_records=(),
+        )
 
 
 def assistant_skill_roots(runtime: Any) -> tuple[SkillRoot, ...]:

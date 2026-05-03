@@ -88,9 +88,11 @@ from llm_tools.apps.assistant_app.controller import (
     _worker_resume_harness,
     _worker_run_harness,
     _worker_run_turn,
+    default_runtime_config,
 )
 from llm_tools.apps.assistant_app.features import (
     filter_assistant_tool_specs_for_features,
+    visible_provider_protocol_options,
 )
 from llm_tools.apps.assistant_app.models import (
     AssistantBranding,
@@ -107,7 +109,11 @@ from llm_tools.apps.assistant_app.store import SQLiteNiceGUIChatStore
 from llm_tools.apps.assistant_config import AssistantConfig
 from llm_tools.apps.assistant_tool_capabilities import AssistantToolCapability
 from llm_tools.apps.assistant_tool_registry import build_assistant_available_tool_specs
-from llm_tools.apps.chat_config import ProviderAuthScheme, ProviderProtocol
+from llm_tools.apps.chat_config import (
+    ChatLLMConfig,
+    ProviderAuthScheme,
+    ProviderProtocol,
+)
 from llm_tools.harness_api import ApprovalResolution
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import SideEffectClass, ToolInvocationRequest
@@ -1403,6 +1409,7 @@ def test_app_builder_renders_visible_skill_metadata(tmp_path: Path) -> None:
         description="Visible demo description.",
     )
     controller = _controller(tmp_path, _FakeProvider([]))
+    controller.set_beta_feature_flags(skills_enabled=True)
 
     build_assistant_ui(controller)
 
@@ -1488,6 +1495,7 @@ def test_controller_invokes_skill_and_records_usage_metadata(
         ]
     )
     controller = _controller(tmp_path, provider)
+    controller.set_beta_feature_flags(skills_enabled=True)
     skill = next(
         skill for skill in controller.visible_skills() if skill.name == "demo-skill"
     )
@@ -1517,6 +1525,7 @@ def test_controller_disabled_skill_is_not_invokable(tmp_path: Path) -> None:
         description="Use the demo skill.",
     )
     controller = _controller(tmp_path, _FakeProvider([]))
+    controller.set_beta_feature_flags(skills_enabled=True)
     skill = next(
         skill for skill in controller.visible_skills() if skill.name == "demo-skill"
     )
@@ -1537,6 +1546,7 @@ def test_controller_enable_skill_clears_matching_name_disable(tmp_path: Path) ->
         description="Use the demo skill.",
     )
     controller = _controller(tmp_path, _FakeProvider([]))
+    controller.set_beta_feature_flags(skills_enabled=True)
     controller.active_record.runtime.disabled_skill_names = ["demo-skill"]
     skill = next(
         skill for skill in controller.visible_skills() if skill.name == "demo-skill"
@@ -1591,9 +1601,13 @@ def test_admin_beta_feature_flags_default_to_hidden_tools() -> None:
 
     assert settings.deep_task_mode_enabled is False
     assert settings.information_protection_enabled is False
+    assert settings.skills_enabled is False
+    assert settings.ollama_native_provider_enabled is False
+    assert settings.ask_sage_native_provider_enabled is False
     assert settings.write_file_tool_enabled is False
     assert settings.atlassian_tools_enabled is False
     assert settings.gitlab_tools_enabled is False
+    assert visible_provider_protocol_options(settings) == ["openai_api"]
     assert "write_file" not in visible
     assert "search_gitlab_code" not in visible
     assert "search_jira" not in visible
@@ -1604,6 +1618,9 @@ def test_admin_beta_feature_flags_default_to_hidden_tools() -> None:
 
 def test_admin_beta_feature_flags_reveal_tool_families() -> None:
     settings = NiceGUIAdminSettings(
+        skills_enabled=True,
+        ollama_native_provider_enabled=True,
+        ask_sage_native_provider_enabled=True,
         write_file_tool_enabled=True,
         atlassian_tools_enabled=True,
         gitlab_tools_enabled=True,
@@ -1613,6 +1630,11 @@ def test_admin_beta_feature_flags_reveal_tool_families() -> None:
     visible = filter_assistant_tool_specs_for_features(tool_specs, settings)
 
     assert "write_file" in visible
+    assert visible_provider_protocol_options(settings) == [
+        "openai_api",
+        "ollama_native",
+        "ask_sage_native",
+    ]
     assert "search_gitlab_code" in visible
     assert "search_jira" in visible
     assert "read_confluence_page" in visible
@@ -1638,12 +1660,79 @@ def test_controller_filters_persisted_hidden_tools_from_exposure(
     assert "search_gitlab_code" not in controller.visible_tool_specs()
 
 
+def test_controller_filters_persisted_hidden_provider_protocol(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(tmp_path, _FakeProvider([]))
+    controller.active_record.runtime.provider_protocol = ProviderProtocol.OLLAMA_NATIVE
+
+    controller.save_active_session()
+
+    assert (
+        controller.active_record.runtime.provider_protocol
+        is ProviderProtocol.OPENAI_API
+    )
+    assert (
+        controller.active_record.summary.provider_protocol
+        is ProviderProtocol.OPENAI_API
+    )
+
+
+def test_controller_filters_hidden_provider_protocol_on_new_session(
+    tmp_path: Path,
+) -> None:
+    store = _chat_store(tmp_path)
+    store.initialize()
+    config = AssistantConfig(
+        llm=ChatLLMConfig(provider_protocol=ProviderProtocol.OLLAMA_NATIVE)
+    )
+
+    controller = NiceGUIChatController(
+        store=store,
+        config=config,
+        root_path=tmp_path,
+        provider_factory=lambda _runtime: _FakeProvider([]),
+    )
+
+    assert (
+        controller.active_record.runtime.provider_protocol
+        is ProviderProtocol.OPENAI_API
+    )
+    assert (
+        controller.active_record.summary.provider_protocol
+        is ProviderProtocol.OPENAI_API
+    )
+
+
+def test_controller_filters_hidden_provider_protocol_on_load(
+    tmp_path: Path,
+) -> None:
+    store = _chat_store(tmp_path)
+    store.initialize()
+    runtime = default_runtime_config(AssistantConfig(), root_path=tmp_path)
+    runtime.provider_protocol = ProviderProtocol.OLLAMA_NATIVE
+    created = store.create_session(runtime, temporary=False, owner_user_id=None)
+
+    controller = NiceGUIChatController(
+        store=store,
+        config=AssistantConfig(),
+        root_path=tmp_path,
+        provider_factory=lambda _runtime: _FakeProvider([]),
+    )
+
+    loaded = controller.sessions[created.summary.session_id]
+    assert loaded.runtime.provider_protocol is ProviderProtocol.OPENAI_API
+
+
 def test_controller_persists_beta_feature_flags(tmp_path: Path) -> None:
     controller = _controller(tmp_path, _FakeProvider([]))
 
     controller.set_beta_feature_flags(
         deep_task_mode_enabled=True,
         information_protection_enabled=True,
+        skills_enabled=True,
+        ollama_native_provider_enabled=True,
+        ask_sage_native_provider_enabled=True,
         write_file_tool_enabled=True,
         atlassian_tools_enabled=True,
         gitlab_tools_enabled=True,
@@ -1654,6 +1743,9 @@ def test_controller_persists_beta_feature_flags(tmp_path: Path) -> None:
     settings = store.load_admin_settings()
     assert settings.deep_task_mode_enabled is True
     assert settings.information_protection_enabled is True
+    assert settings.skills_enabled is True
+    assert settings.ollama_native_provider_enabled is True
+    assert settings.ask_sage_native_provider_enabled is True
     assert settings.write_file_tool_enabled is True
     assert settings.atlassian_tools_enabled is True
     assert settings.gitlab_tools_enabled is True

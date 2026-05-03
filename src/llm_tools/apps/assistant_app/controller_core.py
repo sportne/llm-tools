@@ -14,7 +14,9 @@ from uuid import uuid4
 from llm_tools.apps import assistant_runtime as _assistant_runtime
 from llm_tools.apps.assistant_app.auth import LocalAuthProvider
 from llm_tools.apps.assistant_app.features import (
+    assistant_provider_protocol_is_feature_visible,
     filter_assistant_tool_specs_for_features,
+    visible_provider_protocol_options,
 )
 from llm_tools.apps.assistant_app.models import (
     AssistantBranding,
@@ -41,6 +43,7 @@ from llm_tools.apps.assistant_runtime import (
     discover_assistant_skills,
     resolve_assistant_default_enabled_tools,
 )
+from llm_tools.apps.chat_config import ProviderProtocol
 from llm_tools.harness_api import (
     ApprovalResolution,
     BudgetPolicy,
@@ -315,6 +318,7 @@ class NiceGUIChatController:
         """Create and activate a new session."""
         runtime = default_runtime_config(self.config, root_path=self.root_path)
         self._filter_hidden_runtime_tools(runtime)
+        self._filter_hidden_runtime_provider(runtime)
         record = self.store.create_session(
             runtime, temporary=temporary, owner_user_id=self.owner_user_id
         )
@@ -492,6 +496,9 @@ class NiceGUIChatController:
         *,
         deep_task_mode_enabled: bool | None = None,
         information_protection_enabled: bool | None = None,
+        skills_enabled: bool | None = None,
+        ollama_native_provider_enabled: bool | None = None,
+        ask_sage_native_provider_enabled: bool | None = None,
         write_file_tool_enabled: bool | None = None,
         atlassian_tools_enabled: bool | None = None,
         gitlab_tools_enabled: bool | None = None,
@@ -503,6 +510,16 @@ class NiceGUIChatController:
         if information_protection_enabled is not None:
             update["information_protection_enabled"] = bool(
                 information_protection_enabled
+            )
+        if skills_enabled is not None:
+            update["skills_enabled"] = bool(skills_enabled)
+        if ollama_native_provider_enabled is not None:
+            update["ollama_native_provider_enabled"] = bool(
+                ollama_native_provider_enabled
+            )
+        if ask_sage_native_provider_enabled is not None:
+            update["ask_sage_native_provider_enabled"] = bool(
+                ask_sage_native_provider_enabled
             )
         if write_file_tool_enabled is not None:
             update["write_file_tool_enabled"] = bool(write_file_tool_enabled)
@@ -522,12 +539,20 @@ class NiceGUIChatController:
             build_assistant_available_tool_specs(), self.admin_settings
         )
 
+    def visible_provider_protocol_options(self) -> list[str]:
+        """Return provider protocols visible under current admin feature flags."""
+        return visible_provider_protocol_options(self.admin_settings)
+
     def visible_skills(self) -> tuple[SkillMetadata, ...]:
         """Return discovered skills visible to the active session."""
+        if not self.admin_settings.skills_enabled:
+            return ()
         return discover_assistant_skills(self.active_record.runtime).skills
 
     def visible_skill_errors(self) -> tuple[SkillError, ...]:
         """Return discovered skill validation errors for the active session."""
+        if not self.admin_settings.skills_enabled:
+            return ()
         return discover_assistant_skills(self.active_record.runtime).errors
 
     def skill_enabled(self, skill: SkillMetadata) -> bool:
@@ -570,6 +595,11 @@ class NiceGUIChatController:
             )
             if visible_tools != record.runtime.enabled_tools:
                 record.runtime.enabled_tools = visible_tools
+                changed_records.add(session_id)
+            if not assistant_provider_protocol_is_feature_visible(
+                record.runtime.provider_protocol, self.admin_settings
+            ):
+                self._filter_hidden_runtime_provider(record.runtime)
                 changed_records.add(session_id)
         for session_id in changed_records:
             self._persist_record(self.sessions[session_id])
@@ -973,6 +1003,7 @@ class NiceGUIChatController:
                 self.turn_states[summary.session_id] = NiceGUITurnState()
                 self.session_secrets.setdefault(summary.session_id, {})
                 self._filter_hidden_runtime_tools(loaded.runtime)
+                self._filter_hidden_runtime_provider(loaded.runtime)
                 self._restore_pending_harness_approval(loaded)
         active_id = self.preferences.active_session_id
         if active_id not in self.sessions:
@@ -1010,6 +1041,7 @@ class NiceGUIChatController:
 
     def _persist_record(self, record: NiceGUISessionRecord) -> None:
         self._filter_hidden_runtime_tools(record.runtime)
+        self._filter_hidden_runtime_provider(record.runtime)
         record.summary.root_path = record.runtime.root_path
         record.summary.owner_user_id = self.owner_user_id
         record.summary.provider_protocol = record.runtime.provider_protocol
@@ -1030,6 +1062,14 @@ class NiceGUIChatController:
         runtime.enabled_tools = sorted(
             set(runtime.enabled_tools).intersection(visible_specs)
         )
+
+    def _filter_hidden_runtime_provider(self, runtime: NiceGUIRuntimeConfig) -> None:
+        """Reset provider selections hidden by current admin feature flags."""
+        if assistant_provider_protocol_is_feature_visible(
+            runtime.provider_protocol, self.admin_settings
+        ):
+            return
+        runtime.provider_protocol = ProviderProtocol.OPENAI_API
 
     def _build_runner(
         self,

@@ -548,11 +548,15 @@ def test_admin_settings_round_trip(tmp_path: Path) -> None:
     store = _store(tmp_path)
 
     assert store.load_admin_settings().deep_task_mode_enabled is False
+    assert store.load_admin_settings().skills_enabled is False
     assert store.load_admin_settings().branding.app_name == "LLM Tools Assistant"
 
     store.save_admin_settings(
         NiceGUIAdminSettings(
             deep_task_mode_enabled=True,
+            skills_enabled=True,
+            ollama_native_provider_enabled=True,
+            ask_sage_native_provider_enabled=True,
             branding=AssistantBranding(
                 app_name="Custom Assistant",
                 short_name="Custom",
@@ -564,6 +568,9 @@ def test_admin_settings_round_trip(tmp_path: Path) -> None:
 
     loaded = store.load_admin_settings()
     assert loaded.deep_task_mode_enabled is True
+    assert loaded.skills_enabled is True
+    assert loaded.ollama_native_provider_enabled is True
+    assert loaded.ask_sage_native_provider_enabled is True
     assert loaded.branding.app_name == "Custom Assistant"
     assert loaded.branding.short_name == "Custom"
     assert loaded.branding.icon_name == "auto_awesome"

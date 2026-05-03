@@ -734,12 +734,16 @@ def _is_tool_url_setting(name: str) -> bool:
     return normalized.endswith("_BASE_URL") or normalized.endswith("_URL")
 
 
-def _provider_endpoint_menu_rows() -> list[tuple[str, str]]:
+def _provider_endpoint_menu_rows(
+    visible_protocols: Sequence[str] | None = None,
+) -> list[tuple[str, str]]:
     """Return copyable common provider endpoint rows."""
+    allowed = set(visible_protocols) if visible_protocols is not None else None
     return [
         (entry.name, entry.url)
         for entry in COMMON_PROVIDER_ENDPOINTS
         if entry.name.strip() and entry.url.strip()
+        if allowed is None or entry.provider_protocol.value in allowed
     ]
 
 
@@ -1494,6 +1498,9 @@ def build_assistant_ui(  # noqa: C901
     admin_create_role_select: Any = None
     admin_deep_task_switch: Any = None
     admin_information_protection_switch: Any = None
+    admin_skills_switch: Any = None
+    admin_ollama_native_provider_switch: Any = None
+    admin_ask_sage_native_provider_switch: Any = None
     admin_write_file_switch: Any = None
     admin_atlassian_switch: Any = None
     admin_gitlab_switch: Any = None
@@ -1603,6 +1610,9 @@ def build_assistant_ui(  # noqa: C901
             options.insert(0, runtime.provider_connection.api_base_url)
         return options
 
+    def provider_protocol_options() -> list[str]:
+        return controller.visible_provider_protocol_options()
+
     def apply_layout_state() -> None:
         dark_mode_control.value = controller.preferences.theme_mode == "dark"
         if session_column is not None:
@@ -1631,7 +1641,10 @@ def build_assistant_ui(  # noqa: C901
 
     def sync_connection_settings(runtime: NiceGUIRuntimeConfig) -> None:
         if provider_select is not None:
-            provider_select.value = runtime.provider_protocol.value
+            provider_select.set_options(
+                provider_protocol_options(),
+                value=runtime.provider_protocol.value,
+            )
         if model_input is not None:
             set_model_options(
                 model_options_state["values"], selected=runtime.selected_model
@@ -1828,7 +1841,10 @@ def build_assistant_ui(  # noqa: C901
 
     def open_provider_dialog() -> None:
         runtime = active_runtime()
-        provider_quick_select.value = runtime.provider_protocol.value
+        provider_quick_select.set_options(
+            provider_protocol_options(),
+            value=runtime.provider_protocol.value,
+        )
         base_url_quick_input.set_options(
             base_url_options(runtime),
             value=runtime.provider_connection.api_base_url or None,
@@ -2597,7 +2613,9 @@ def build_assistant_ui(  # noqa: C901
                 ui.label("Common OpenAI-compatible Base URLs").classes(
                     "text-sm llmt-muted q-px-md q-pt-sm"
                 )
-                for provider_name, endpoint_url in _provider_endpoint_menu_rows():
+                for provider_name, endpoint_url in _provider_endpoint_menu_rows(
+                    provider_protocol_options()
+                ):
                     with ui.row().classes(
                         "w-full items-center justify-between gap-2 no-wrap q-px-sm"
                     ):
@@ -2672,6 +2690,16 @@ def build_assistant_ui(  # noqa: C901
             admin_information_protection_switch.value = (
                 settings.information_protection_enabled
             )
+        if admin_skills_switch is not None:
+            admin_skills_switch.value = settings.skills_enabled
+        if admin_ollama_native_provider_switch is not None:
+            admin_ollama_native_provider_switch.value = (
+                settings.ollama_native_provider_enabled
+            )
+        if admin_ask_sage_native_provider_switch is not None:
+            admin_ask_sage_native_provider_switch.value = (
+                settings.ask_sage_native_provider_enabled
+            )
         if admin_write_file_switch is not None:
             admin_write_file_switch.value = settings.write_file_tool_enabled
         if admin_atlassian_switch is not None:
@@ -2736,6 +2764,12 @@ def build_assistant_ui(  # noqa: C901
             return
         if name == "information_protection_enabled":
             controller.set_beta_feature_flags(information_protection_enabled=value)
+        elif name == "skills_enabled":
+            controller.set_beta_feature_flags(skills_enabled=value)
+        elif name == "ollama_native_provider_enabled":
+            controller.set_beta_feature_flags(ollama_native_provider_enabled=value)
+        elif name == "ask_sage_native_provider_enabled":
+            controller.set_beta_feature_flags(ask_sage_native_provider_enabled=value)
         elif name == "write_file_tool_enabled":
             controller.set_beta_feature_flags(write_file_tool_enabled=value)
         elif name == "atlassian_tools_enabled":
@@ -2745,6 +2779,7 @@ def build_assistant_ui(  # noqa: C901
         else:
             raise ValueError(f"Unknown beta feature flag: {name}")
         render_header()
+        render_tool_menu()
         ui.notify("Feature flag updated.")
 
     def render_admin_user_list() -> None:
@@ -3459,6 +3494,39 @@ def build_assistant_ui(  # noqa: C901
                 ui.tooltip(
                     "Shows Information Security settings and enables protection checks."
                 ).props("delay=700")
+            admin_skills_switch = ui.switch(
+                "Local skills",
+                value=controller.admin_settings.skills_enabled,
+                on_change=lambda event: set_admin_beta_feature_flag(
+                    "skills_enabled", bool(event.value)
+                ),
+            ).classes("w-full")
+            with admin_skills_switch:
+                ui.tooltip(
+                    "Shows discovered local skills and permits explicit skill invocation."
+                ).props("delay=700")
+            admin_ollama_native_provider_switch = ui.switch(
+                "Native Ollama provider",
+                value=controller.admin_settings.ollama_native_provider_enabled,
+                on_change=lambda event: set_admin_beta_feature_flag(
+                    "ollama_native_provider_enabled", bool(event.value)
+                ),
+            ).classes("w-full")
+            with admin_ollama_native_provider_switch:
+                ui.tooltip("Shows the Ollama native provider protocol.").props(
+                    "delay=700"
+                )
+            admin_ask_sage_native_provider_switch = ui.switch(
+                "Native Ask Sage provider",
+                value=controller.admin_settings.ask_sage_native_provider_enabled,
+                on_change=lambda event: set_admin_beta_feature_flag(
+                    "ask_sage_native_provider_enabled", bool(event.value)
+                ),
+            ).classes("w-full")
+            with admin_ask_sage_native_provider_switch:
+                ui.tooltip("Shows the Ask Sage native provider protocol.").props(
+                    "delay=700"
+                )
             admin_write_file_switch = ui.switch(
                 "File write tool",
                 value=controller.admin_settings.write_file_tool_enabled,
@@ -3547,7 +3615,7 @@ def build_assistant_ui(  # noqa: C901
                 ui.column().classes("w-full gap-2 q-pt-sm"),
             ):
                 provider_select = ui.select(
-                    NICEGUI_PROVIDER_OPTIONS,
+                    provider_protocol_options(),
                     label="Provider",
                 ).classes("w-full")
                 with ui.row().classes("w-full items-end gap-2 no-wrap"):
@@ -3865,7 +3933,7 @@ def build_assistant_ui(  # noqa: C901
         dialogs["provider_settings"] = provider_settings_dialog
         ui.label("Provider").classes("text-lg")
         provider_quick_select = ui.select(
-            NICEGUI_PROVIDER_OPTIONS,
+            provider_protocol_options(),
             label="Provider",
         ).classes("w-full")
         with ui.row().classes("w-full items-end gap-2 no-wrap"):
