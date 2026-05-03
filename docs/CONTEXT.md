@@ -70,6 +70,42 @@ _Avoid_: loaded skill context, transcript copy
 The policy-aware execution substrate that validates, mediates, invokes, and normalizes **Tool** calls.
 _Avoid_: executor, runner
 
+**Tool Policy**:
+The session or runtime rules that determine whether a **Tool** may be exposed, executed, denied, or routed through approval.
+_Avoid_: permission flags, UI settings
+
+**Tool Exposure**:
+The act of making a registered **Tool** visible and callable by the model for the current session.
+_Avoid_: registration, installation, availability
+
+**Approval Request**:
+A workflow-level request for an operator decision before executing one policy-gated **Tool** invocation.
+_Avoid_: permission prompt, confirmation dialog
+
+**Execution Services**:
+The mediated host capabilities, credentials, filesystem access, subprocess access, and remote gateways supplied to **Tools** by the **Tool Runtime**.
+_Avoid_: dependencies, clients, service locator
+
+**Workspace**:
+The configured filesystem root that scopes model-visible local file operations for a session or tool invocation.
+_Avoid_: project, cwd, repository when the selected root may differ
+
+**Workspace-Relative Tool Path**:
+A POSIX-style path used in model-visible filesystem tool arguments and outputs, resolved relative to the **Workspace**.
+_Avoid_: absolute path, native path, Windows path
+
+**Discovery**:
+A broad listing or search operation that surfaces candidate files from a **Workspace**.
+_Avoid_: direct read, explicit access
+
+**Direct Access**:
+A focused file operation against a caller-provided **Workspace-Relative Tool Path**.
+_Avoid_: discovery, search result
+
+**Hidden/Ignored Path**:
+A dot-hidden or ignore-file-matched workspace path excluded from default **Discovery** but still eligible for policy-governed **Direct Access** when explicitly named.
+_Avoid_: forbidden path, inaccessible path
+
 **Model Turn**:
 One model response cycle that may produce a final response or one or more **Tool** invocations.
 _Avoid_: request, completion
@@ -82,6 +118,22 @@ _Avoid_: response mode, strategy
 A user- or operator-visible redacted progress record emitted while a **Model-Turn Protocol** is producing a **Model Turn**.
 _Avoid_: UI event, chat event
 
+**Protection**:
+Workflow-level handling of sensitive information before, during, and after **Model Turns**.
+_Avoid_: UI moderation, content filter
+
+**Sensitivity Category**:
+A configured label describing a kind of protected information that **Protection** decisions can detect and enforce.
+_Avoid_: tag, policy rule
+
+**Protection Decision**:
+A workflow decision to allow, constrain, challenge, sanitize, or block protected prompt or response content.
+_Avoid_: moderation result, classifier output
+
+**Source Provenance**:
+A structured reference to source material that was visible to tool execution or **Protection** checks.
+_Avoid_: citation, artifact
+
 **Workflow Turn**:
 One parsed **Model Turn** executed through the workflow layer against the **Tool Runtime**.
 _Avoid_: chat turn
@@ -90,9 +142,49 @@ _Avoid_: chat turn
 A durable, resumable record of multi-turn work built from persisted **Workflow Turn** results.
 _Avoid_: job, run
 
+**Harness State**:
+The canonical durable truth for one **Harness Session**, including session metadata, **Harness Tasks**, **Harness Turns**, verification evidence, and pending approvals.
+_Avoid_: trace, summary, replay artifact
+
+**Harness Turn**:
+One persisted orchestration step in a **Harness Session** that records selected **Harness Tasks**, the embedded **Workflow Turn** result, approval audit metadata, verification status, no-progress signals, and the next **Turn Decision**.
+_Avoid_: workflow turn, model turn, chat turn
+
+**Harness Task**:
+A durable unit of work tracked by the harness task graph, with lifecycle status, origin, dependencies, verification expectations, artifacts, and retry state.
+_Avoid_: todo, plan item, task record when speaking outside code
+
+**Turn Decision**:
+The harness-level decision after a **Harness Turn** completes, indicating whether to continue, select tasks, or stop with a reason.
+_Avoid_: model decision, tool result
+
+**Pending Approval**:
+A durable pause in a **Harness Session** waiting for an operator decision on one policy-gated tool invocation.
+_Avoid_: approval dialog, permission prompt
+
+**Resume Disposition**:
+The resume-time classification of a persisted **Harness State**, such as runnable, waiting for approval, interrupted, terminal, incompatible, or corrupt.
+_Avoid_: resume status, session status
+
+**Verification Expectation**:
+A task-level statement of what evidence or condition should be checked for a **Harness Task**.
+_Avoid_: acceptance criterion when referring to durable harness state
+
+**Verification Evidence**:
+A persisted record supporting the verification outcome for a **Harness Task**.
+_Avoid_: artifact, log
+
+**No-Progress Signal**:
+A structured indication that a **Harness Session** is stalled, repeating, or otherwise failing to advance.
+_Avoid_: failure, timeout
+
 **Assistant Chat**:
 The interactive product flow that keeps conversational state while executing **Workflow Turn** results.
 _Avoid_: chat UI, nicegui chat
+
+**Assistant Workbench**:
+The assistant product surface for inspecting runtime, execution, approval, protection, provider, and deep-task details.
+_Avoid_: canvas, artifact editor
 
 **Deep Task**:
 The assistant product flow that runs a user request through a durable **Harness Session**.
@@ -145,12 +237,38 @@ _Avoid_: bearer-token requirement
 - **Skill Enablement** gates whether discovered **Skills** are eligible for **Skill Selection** or **Skill Invocation**.
 - **Workflow Turns** and **Harness Sessions** may contain **Skill Usage Records**.
 - **Skills** are discovered, parsed, and validated by a reusable skills API before workflow, harness, or app layers consume them.
+- **Tool Policy** gates **Tool Exposure** and **Tool** execution.
+- **Tool Exposure** may include fewer **Tools** than are registered in the runtime.
+- A **Tool Policy** may produce an **Approval Request** for one **Tool** invocation.
+- An **Approval Request** may become a **Pending Approval** when persisted by a **Harness Session**.
+- **Execution Services** are supplied by the **Tool Runtime** to mediated **Tool** execution.
+- **Workspace-Relative Tool Paths** are resolved through the **Workspace** before host filesystem access.
+- **Discovery** may exclude **Hidden/Ignored Paths** by default.
+- **Direct Access** may target a **Hidden/Ignored Path** when the path is explicitly named and policy allows it.
 - A **Model-Turn Protocol** may emit zero or more **Model-Turn Events** before it produces a parsed **Model Turn**.
+- **Protection** may evaluate prompt content before a **Model Turn**.
+- **Protection** may evaluate final response content before it is retained or shown.
+- A **Sensitivity Category** may influence one or more **Protection Decisions**.
+- A **Protection Decision** may constrain, challenge, sanitize, or block a **Model Turn** or final response.
+- **Source Provenance** may be visible to **Protection** checks and tool execution.
 - A **Workflow Turn** executes one parsed **Model Turn** through the **Tool Runtime**.
 - A **Project Defaults Module** may provide startup defaults for **Assistant Chat**, **Deep Task**, and **Provider Connection Presets**.
 - An **Assistant Chat** contains one or more **Workflow Turn** results.
+- The **Assistant Workbench** may inspect **Assistant Chat** and **Deep Task** runtime details.
 - A **Deep Task** owns exactly one active **Harness Session** at a time.
-- A **Harness Session** persists one or more **Workflow Turn** results.
+- A **Harness Session** may persist zero or more **Workflow Turn** results.
+- A **Harness Session** has exactly one canonical **Harness State** at any persisted snapshot.
+- **Harness State** contains exactly one root user-requested **Harness Task**.
+- **Harness State** contains zero or more **Harness Turns** with contiguous turn indices.
+- A **Harness Turn** may embed exactly one **Workflow Turn** result.
+- A **Harness Turn** may contain one **Pending Approval** audit record.
+- **Harness State** may contain at most one active **Pending Approval**.
+- A **Pending Approval** references one tool invocation in one parsed **Model Turn**.
+- A **Harness Task** may depend on other **Harness Tasks**.
+- A **Harness Task** may have zero or more **Verification Expectations**.
+- **Verification Evidence** may support the verification outcome for exactly one **Harness Task**.
+- A **Resume Disposition** is derived from a persisted **Harness State** before execution continues.
+- A **No-Progress Signal** may cause a **Turn Decision** to stop a **Harness Session**.
 - **Assistant Runtime Assembly** prepares the app-layer objects used by **Assistant Chat** and **Deep Task**.
 - A **Model Turn** requires exactly one **Selected Model**.
 - An **Assistant Chat** or **Deep Task** may exist with no **Selected Model** until its first **Model Turn**.
@@ -167,6 +285,20 @@ _Avoid_: bearer-token requirement
 ## Flagged Ambiguities
 
 - "research session" and **Deep Task** have both been used for the assistant's durable harness-backed flow; prefer **Deep Task** for product behavior and **Harness Session** for durable state.
+- **Harness State** is the canonical durable truth; traces, summaries, replay results, and stored artifacts are derived observability views and must not redefine session truth.
+- **Harness Turn** and **Workflow Turn** are related but distinct: a **Harness Turn** is durable orchestration state and may embed the **Workflow Turn** result produced by one-turn execution.
+- **Harness Task** is the domain term for durable harness work; use `TaskRecord` only when referring to the implementation model.
+- A **Pending Approval** is a durable execution pause, not merely a UI prompt; denial, expiration, cancel, and interrupted recovery fail closed.
+- **Protection** is workflow-level behavior shared by **Assistant Chat** and **Deep Task**, not an app-only moderation feature.
+- **Protection Decision** is the canonical term for enforced prompt or response handling; classifier assessments are inputs, not the final decision.
+- **Source Provenance** is not the same as a user-facing citation; it records source visibility for runtime and protection decisions.
+- A registered **Tool** is not necessarily exposed to the model; **Tool Exposure** depends on session policy, credentials, features, and runtime readiness.
+- **Tool Policy** is broader than UI permission toggles; it is enforced by the runtime and workflow path.
+- An **Approval Request** is transient workflow state unless a durable harness pause turns it into a **Pending Approval**.
+- **Execution Services** are runtime-mediated capabilities, not objects that **Tools** should construct for themselves.
+- **Workspace-Relative Tool Paths** are the model-facing contract; native absolute paths belong at app settings and runtime boundaries.
+- **Discovery** visibility is not the same as access permission; a **Hidden/Ignored Path** can be hidden from broad search while still readable through explicit, policy-governed **Direct Access**.
+- **Assistant Workbench** is inspector-first; it is not yet a Canvas-style artifact editing surface.
 - "response mode" has been used for both transport configuration and the **Model-Turn Protocol**; use **Model-Turn Protocol** when discussing the model-facing parse contract.
 - **Model-Turn Event** payloads are redacted at the **Model-Turn Protocol** seam; raw provider messages and responses should not be emitted to callers.
 - The app must not invent a **Selected Model** before model discovery, but explicit user or config-provided model identifiers are valid without discovery.
