@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import runpy
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
@@ -247,7 +248,9 @@ def test_harness_cli_default_store_dir_is_user_scoped(
     assert Path(args.store_dir) == (tmp_path / ".llm-tools" / "harness").resolve()
 
 
-def test_harness_cli_module_entrypoint(tmp_path: Path, monkeypatch) -> None:
+def test_harness_cli_module_entrypoint(
+    tmp_path: Path, monkeypatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     monkeypatch.chdir(tmp_path)
     _patch_home(monkeypatch, tmp_path)
     monkeypatch.setattr(
@@ -264,7 +267,11 @@ def test_harness_cli_module_entrypoint(tmp_path: Path, monkeypatch) -> None:
         ],
     )
 
-    with pytest.raises(SystemExit) as exc_info:
-        runpy.run_module("llm_tools.apps.harness_cli", run_name="__main__")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        with pytest.raises(SystemExit) as exc_info:
+            runpy.run_module("llm_tools.apps.harness_cli", run_name="__main__")
 
     assert exc_info.value.code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"]["tasks"][0]["title"] == "Entrypoint"

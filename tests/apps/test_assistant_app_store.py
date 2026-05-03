@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import contextlib
+import os
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -51,6 +54,18 @@ def _store(tmp_path: Path) -> SQLiteNiceGUIChatStore:
     )
     store.initialize()
     return store
+
+
+@contextlib.contextmanager
+def _suppress_stderr_fd() -> Iterator[None]:
+    saved_stderr = os.dup(2)
+    try:
+        with Path(os.devnull).open("w", encoding="utf-8") as devnull:
+            os.dup2(devnull.fileno(), 2)
+            yield
+    finally:
+        os.dup2(saved_stderr, 2)
+        os.close(saved_stderr)
 
 
 def test_default_db_path_prefers_env_then_pointer(
@@ -269,7 +284,10 @@ def test_sqlcipher_database_rejects_plain_sqlite_and_wrong_key(
 
     wrong_key = tmp_path / "wrong-db.key"
     wrong_key.write_text("wrong-passphrase", encoding="utf-8")
-    with pytest.raises(Exception, match="initialize|file is encrypted|not a database"):
+    with (
+        _suppress_stderr_fd(),
+        pytest.raises(Exception, match="initialize|file is encrypted|not a database"),
+    ):
         SQLiteNiceGUIChatStore(
             db_path,
             db_key_file=wrong_key,
