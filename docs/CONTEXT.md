@@ -182,9 +182,29 @@ _Avoid_: failure, timeout
 The interactive product flow that keeps conversational state while executing **Workflow Turn** results.
 _Avoid_: chat UI, nicegui chat
 
+**Temporary Chat**:
+An Assistant chat session that uses normal runtime behavior but is not written to durable Assistant persistence or shown in recent sessions.
+_Avoid_: incognito chat, private mode
+
+**Local/Solo Assistant Use**:
+The documented Assistant product workflow where one user runs one Assistant app process for their own browser session and workspace.
+_Avoid_: hosted mode, multi-user deployment
+
+**Local Owner Account**:
+The first local Assistant account that can sign in, unlock per-user data, and change administrator-gated local settings for solo use.
+_Avoid_: hosted administrator, team admin
+
+**Experimental Feature**:
+An Assistant capability that may exist in code or behind administrator settings but is not yet part of the stable documented product workflow.
+_Avoid_: supported feature, roadmap item
+
 **Assistant Workbench**:
 The assistant product surface for inspecting runtime, execution, approval, protection, provider, and deep-task details.
-_Avoid_: canvas, artifact editor
+_Avoid_: canvas, artifact editor, artifact workbench
+
+**Assistant Help**:
+The in-app help surface that exposes the Assistant user guide from the product UI.
+_Avoid_: external docs only, support portal
 
 **Deep Task**:
 The assistant product flow that runs a user request through a durable **Harness Session**.
@@ -193,6 +213,10 @@ _Avoid_: research session
 **Assistant Runtime Assembly**:
 The app-layer construction of provider, **Tool** exposure, policy, prompts, protection, and execution objects for **Assistant Chat** or **Deep Task**.
 _Avoid_: bootstrap, setup
+
+**Final Answer Details**:
+Model-produced supplemental metadata shown with an assistant answer, such as citations, confidence, uncertainty, missing information, and follow-up suggestions.
+_Avoid_: verification result, proof, audit record
 
 **Project Defaults Module**:
 A repository-authored Python module shipped with a project or app variant to provide startup defaults for assistant app behavior without making those values persisted runtime configuration.
@@ -254,8 +278,12 @@ _Avoid_: bearer-token requirement
 - A **Workflow Turn** executes one parsed **Model Turn** through the **Tool Runtime**.
 - A **Project Defaults Module** may provide startup defaults for **Assistant Chat**, **Deep Task**, and **Provider Connection Presets**.
 - An **Assistant Chat** contains one or more **Workflow Turn** results.
+- A **Temporary Chat** is an **Assistant Chat** without durable Assistant persistence.
+- **Local/Solo Assistant Use** normally has exactly one **Local Owner Account**.
+- **Assistant Help** should make the user guide reachable from within the Assistant app.
 - The **Assistant Workbench** may inspect **Assistant Chat** and **Deep Task** runtime details.
 - A **Deep Task** owns exactly one active **Harness Session** at a time.
+- An **Experimental Feature** may be hidden by default or visible with limitations, but it should be documented separately from stable **Local/Solo Assistant Use**.
 - A **Harness Session** may persist zero or more **Workflow Turn** results.
 - A **Harness Session** has exactly one canonical **Harness State** at any persisted snapshot.
 - **Harness State** contains exactly one root user-requested **Harness Task**.
@@ -270,6 +298,7 @@ _Avoid_: bearer-token requirement
 - A **Resume Disposition** is derived from a persisted **Harness State** before execution continues.
 - A **No-Progress Signal** may cause a **Turn Decision** to stop a **Harness Session**.
 - **Assistant Runtime Assembly** prepares the app-layer objects used by **Assistant Chat** and **Deep Task**.
+- **Final Answer Details** may be tool-grounded when tools were used, but they are not the same as **Verification Evidence**.
 - A **Model Turn** requires exactly one **Selected Model**.
 - An **Assistant Chat** or **Deep Task** may exist with no **Selected Model** until its first **Model Turn**.
 - Model discovery results belong to exactly one **Provider Connection**.
@@ -299,6 +328,10 @@ _Avoid_: bearer-token requirement
 - **Workspace-Relative Tool Paths** are the model-facing contract; native absolute paths belong at app settings and runtime boundaries.
 - **Discovery** visibility is not the same as access permission; a **Hidden/Ignored Path** can be hidden from broad search while still readable through explicit, policy-governed **Direct Access**.
 - **Assistant Workbench** is inspector-first; it is not yet a Canvas-style artifact editing surface.
+- The current **Assistant Workbench** product story should not reserve or imply Canvas/artifact editing because that work is not on the current roadmap.
+- **Final Answer Details** are produced by the model and should not be described as app guarantees; scalar confidence is especially easy to overread.
+- **Temporary Chat** means non-durable in the Assistant database; it must not be described as provider-private, browser-private, or tool-private.
+- Older docs and startup flags mention hosted Assistant operation, but the current documented product workflow is **Local/Solo Assistant Use**; hosted/server mode is early plumbing, not a supported user workflow.
 - "response mode" has been used for both transport configuration and the **Model-Turn Protocol**; use **Model-Turn Protocol** when discussing the model-facing parse contract.
 - **Model-Turn Event** payloads are redacted at the **Model-Turn Protocol** seam; raw provider messages and responses should not be emitted to callers.
 - The app must not invent a **Selected Model** before model discovery, but explicit user or config-provided model identifiers are valid without discovery.
