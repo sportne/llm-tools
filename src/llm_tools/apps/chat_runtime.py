@@ -37,6 +37,8 @@ def create_provider(
     effective_api_key = api_key
     if effective_api_key is None and allow_env_api_key:
         effective_api_key = getenv("OPENAI_API_KEY")
+    if effective_api_key is None and not provider_connection.requires_bearer_token:
+        effective_api_key = "unused"
     return OpenAICompatibleProvider(
         model=selected_model,
         base_url=provider_connection.api_base_url,

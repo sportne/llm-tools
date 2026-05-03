@@ -17,7 +17,10 @@ from uuid import uuid4
 import common
 
 import llm_tools.apps.assistant_app.controller as nicegui_controller_module
-from llm_tools.apps.assistant_app.controller import NiceGUIChatController
+from llm_tools.apps.assistant_app.controller import (
+    PROVIDER_API_KEY_FIELD,
+    NiceGUIChatController,
+)
 from llm_tools.apps.assistant_app.models import NiceGUITranscriptEntry
 from llm_tools.apps.assistant_app.store import SQLiteNiceGUIChatStore
 from llm_tools.apps.protection_runtime import build_protection_environment
@@ -306,6 +309,9 @@ def _build_probe_controller(
         controller.set_beta_feature_flags(**beta_feature_flags)
     record = controller.active_record
     record.runtime = runtime.model_copy(deep=True)
+    provider_api_key = os.environ.get("OPENAI_API_KEY")
+    if record.runtime.provider_connection.requires_bearer_token and provider_api_key:
+        controller.set_session_secret(PROVIDER_API_KEY_FIELD, provider_api_key)
     controller.save_active_session()
     return controller
 

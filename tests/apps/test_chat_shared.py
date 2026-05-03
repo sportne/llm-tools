@@ -171,6 +171,20 @@ def test_chat_runtime_provider_factory_and_executor_defaults(
     assert env_provider.kind == "custom-provider"
     assert custom_calls[1]["api_key"] == "env-key"
     assert custom_calls[1]["model"] == "env-model"
+    no_bearer_provider = _CHAT_RUNTIME_MODULE.create_provider(
+        provider_protocol=ProviderProtocol.OPENAI_API,
+        provider_connection=ProviderConnectionConfig(
+            api_base_url="http://127.0.0.1:11434/v1",
+            requires_bearer_token=False,
+        ),
+        api_key=None,
+        selected_model="local-model",
+        response_mode_strategy="auto",
+        timeout_seconds=config.timeout_seconds,
+        allow_env_api_key=False,
+    )
+    assert no_bearer_provider.kind == "custom-provider"
+    assert custom_calls[2]["api_key"] == "unused"
     with pytest.raises(ValueError, match="Choose a model"):
         _CHAT_RUNTIME_MODULE.create_provider(
             provider_protocol=ProviderProtocol.OPENAI_API,
