@@ -19,6 +19,7 @@ from llm_tools.apps.assistant_app.auth import LocalAuthProvider
 from llm_tools.apps.assistant_app.controller import (
     PROVIDER_API_KEY_FIELD,
     NiceGUIChatController,
+    SessionSecretState,
 )
 from llm_tools.apps.assistant_app.models import (
     AssistantBranding,
@@ -732,6 +733,22 @@ def _is_tool_url_setting(name: str) -> bool:
     """Return whether a required tool value is a non-secret URL."""
     normalized = name.strip().upper()
     return normalized.endswith("_BASE_URL") or normalized.endswith("_URL")
+
+
+def _credential_display_name(name: str) -> str:
+    """Return a user-facing label for one credential key."""
+    if name == PROVIDER_API_KEY_FIELD:
+        return "Provider API key"
+    return name
+
+
+def _tool_credential_placeholder(state: SessionSecretState) -> str:
+    """Return the credential input placeholder for one state."""
+    if state == "present":
+        return "Stored for this session"
+    if state == "expired":
+        return "Expired; paste value"
+    return "Paste value"
 
 
 def _provider_endpoint_menu_rows(
@@ -1536,6 +1553,13 @@ def build_assistant_ui(  # noqa: C901
     composer_state: dict[str, str] = {"text": ""}
     approval_tool_label: Any = None
     approval_args: Any = None
+    credential_reentry_title: Any = None
+    credential_reentry_label: Any = None
+    credential_reentry_input: Any = None
+    credential_reentry_state: dict[str, str | Callable[[], None] | None] = {
+        "name": None,
+        "resume": None,
+    }
     dialogs: dict[str, Any] = {}
 
     def refresh_all() -> None:
@@ -1561,6 +1585,95 @@ def build_assistant_ui(  # noqa: C901
 
     def secret_entry_enabled() -> bool:
         return controller.hosted_config.secret_entry_enabled
+
+    def open_credential_reentry_dialog(
+        name: str, *, resume: Callable[[], None] | None = None
+    ) -> None:
+        if not secret_entry_enabled():
+            ui.notify(
+                controller.hosted_config.insecure_hosted_warning
+                or "Secret entry is disabled for this hosted session.",
+                type="negative",
+            )
+            return
+        credential_reentry_state["name"] = name
+        credential_reentry_state["resume"] = resume
+        display_name = _credential_display_name(name)
+        if credential_reentry_title is not None:
+            credential_reentry_title.set_text(f"Re-enter {display_name}")
+        if credential_reentry_label is not None:
+            credential_reentry_label.set_text(
+                f"{display_name} expired. Paste it again to continue."
+            )
+        if credential_reentry_input is not None:
+            credential_reentry_input.value = ""
+        dialogs["credential_reentry"].open()
+
+    def submit_credential_reentry() -> None:
+        name = credential_reentry_state.get("name")
+        if not isinstance(name, str) or not name:
+            dialogs["credential_reentry"].close()
+            return
+        value = str(credential_reentry_input.value or "").strip()
+        if not value:
+            ui.notify("Enter the credential to continue.", type="negative")
+            return
+        controller.set_session_secret(name, value)
+        credential_reentry_input.value = ""
+        resume = credential_reentry_state.get("resume")
+        credential_reentry_state["name"] = None
+        credential_reentry_state["resume"] = None
+        dialogs["credential_reentry"].close()
+        refresh_all()
+        if callable(resume):
+            resume()
+
+    def cancel_credential_reentry() -> None:
+        name = credential_reentry_state.get("name")
+        if isinstance(name, str) and name:
+            controller.clear_session_secret(name)
+        if credential_reentry_input is not None:
+            credential_reentry_input.value = ""
+        credential_reentry_state["name"] = None
+        credential_reentry_state["resume"] = None
+        dialogs["credential_reentry"].close()
+        refresh_all()
+
+    def required_provider_credential_expired() -> bool:
+        runtime = active_runtime()
+        return (
+            runtime.provider_connection.auth_scheme.requires_secret()
+            and controller.session_secret_state(
+                PROVIDER_API_KEY_FIELD, session_id=controller.active_session_id
+            )
+            == "expired"
+        )
+
+    def first_expired_tool_credential(tool_names: Sequence[str]) -> str | None:
+        specs = controller.visible_tool_specs()
+        for tool_name in sorted(set(tool_names)):
+            spec = specs.get(tool_name)
+            if spec is None:
+                continue
+            for secret_name in spec.required_secrets:
+                if _is_tool_url_setting(secret_name):
+                    continue
+                if (
+                    controller.session_secret_state(
+                        secret_name, session_id=controller.active_session_id
+                    )
+                    == "expired"
+                ):
+                    return secret_name
+        return None
+
+    def block_for_expired_credential(
+        name: str | None, *, resume: Callable[[], None]
+    ) -> bool:
+        if name is None:
+            return False
+        open_credential_reentry_dialog(name, resume=resume)
+        return True
 
     def clear_provider_api_key() -> None:
         controller.clear_session_secret(PROVIDER_API_KEY_FIELD)
@@ -1944,25 +2057,26 @@ def build_assistant_ui(  # noqa: C901
             for capability in capabilities
         }
 
-    def tool_required_value_entries() -> list[tuple[str, list[str], bool, bool]]:
+    def tool_required_value_entries() -> list[
+        tuple[str, list[str], SessionSecretState, bool]
+    ]:
         entries: dict[str, set[str]] = {}
         for tool_name, spec in controller.visible_tool_specs().items():
             for secret_name in spec.required_secrets:
                 entries.setdefault(secret_name, set()).add(tool_name)
-        effective_env = controller.effective_tool_env(
-            runtime=active_runtime(),
-            session_id=controller.active_session_id,
-        )
         return [
             (
                 secret_name,
                 sorted(tool_names),
                 (
-                    bool(active_runtime().tool_urls.get(secret_name))
-                    if _is_tool_url_setting(secret_name)
-                    else controller.has_session_secret(secret_name)
+                    "present"
+                    if active_runtime().tool_urls.get(secret_name)
+                    else "missing"
                 )
-                or bool(effective_env.get(secret_name)),
+                if _is_tool_url_setting(secret_name)
+                else controller.session_secret_state(
+                    secret_name, session_id=controller.active_session_id
+                ),
                 _is_tool_url_setting(secret_name),
             )
             for secret_name, tool_names in sorted(entries.items())
@@ -1986,7 +2100,8 @@ def build_assistant_ui(  # noqa: C901
                     controller.hosted_config.insecure_hosted_warning
                     or "Secret entry is disabled for this hosted session."
                 ).classes("text-xs text-negative")
-            for secret_name, tool_names, is_set, is_url in entries:
+            for secret_name, tool_names, state, is_url in entries:
+                is_set = state == "present"
                 with ui.row().classes("llmt-credential-row w-full items-end gap-2"):
                     with ui.column().classes("gap-0 min-w-0"):
                         ui.label(secret_name).classes("text-sm llmt-code")
@@ -2004,11 +2119,7 @@ def build_assistant_ui(  # noqa: C901
                         credential_input = (
                             ui.input(
                                 "Credential",
-                                placeholder=(
-                                    "Stored for this session"
-                                    if is_set
-                                    else "Paste value"
-                                ),
+                                placeholder=_tool_credential_placeholder(state),
                             )
                             .props("type=password autocomplete=off")
                             .classes("grow")
@@ -2238,6 +2349,12 @@ def build_assistant_ui(  # noqa: C901
         if tool_name in enabled:
             enabled.remove(tool_name)
         else:
+            expired_credential = first_expired_tool_credential([tool_name])
+            if block_for_expired_credential(
+                expired_credential,
+                resume=lambda: toggle_runtime_tool(tool_name),
+            ):
+                return
             enabled.add(tool_name)
         runtime.enabled_tools = sorted(enabled)
         controller.save_active_session()
@@ -2270,6 +2387,12 @@ def build_assistant_ui(  # noqa: C901
         if group_tool_names.issubset(enabled):
             enabled.difference_update(group_tool_names)
         else:
+            expired_credential = first_expired_tool_credential(sorted(group_tool_names))
+            if block_for_expired_credential(
+                expired_credential,
+                resume=lambda: toggle_tool_group(group_name),
+            ):
+                return
             enabled.update(group_tool_names)
         runtime.enabled_tools = sorted(enabled)
         controller.save_active_session()
@@ -2629,6 +2752,43 @@ def build_assistant_ui(  # noqa: C901
                             on_click=lambda _event, url=endpoint_url: copy_text(url),
                         ).props("flat round")
 
+    def update_composer_text(value: object) -> None:
+        composer_state["text"] = str(value or "")
+
+    def submit_text_with_credential_reentry(
+        text: str,
+        *,
+        resume: Callable[[], None],
+        clear_composer_on_success: bool,
+    ) -> None:
+        if not text.strip():
+            error = controller.submit_prompt(text)
+            if error:
+                ui.notify(error, type="negative")
+            refresh_all()
+            return
+        if required_provider_credential_expired():
+            open_credential_reentry_dialog(
+                PROVIDER_API_KEY_FIELD,
+                resume=resume,
+            )
+            return
+        expired_tool_credential = first_expired_tool_credential(
+            active_runtime().enabled_tools
+        )
+        if block_for_expired_credential(
+            expired_tool_credential,
+            resume=resume,
+        ):
+            return
+        error = controller.submit_prompt(text)
+        if error:
+            ui.notify(error, type="negative")
+        elif clear_composer_on_success:
+            composer_state["text"] = ""
+            composer_input.value = ""
+        refresh_all()
+
     def regenerate_last() -> None:
         users = [
             entry
@@ -2637,21 +2797,19 @@ def build_assistant_ui(  # noqa: C901
         ]
         if not users:
             return
-        controller.submit_prompt(users[-1].text)
-        refresh_all()
-
-    def update_composer_text(value: object) -> None:
-        composer_state["text"] = str(value or "")
+        submit_text_with_credential_reentry(
+            users[-1].text,
+            resume=regenerate_last,
+            clear_composer_on_success=False,
+        )
 
     def send_prompt() -> None:
         text = _first_nonempty_text(composer_state["text"], composer_input.value)
-        error = controller.submit_prompt(text)
-        if error:
-            ui.notify(error, type="negative")
-        else:
-            composer_state["text"] = ""
-            composer_input.value = ""
-        refresh_all()
+        submit_text_with_credential_reentry(
+            text,
+            resume=send_prompt,
+            clear_composer_on_success=True,
+        )
 
     def send_prompt_from_key(event: object) -> None:
         emitted_text = _event_payload_text(event)
@@ -3082,8 +3240,21 @@ def build_assistant_ui(  # noqa: C901
             )
         )
         provider_api_key = str(provider_api_key_input.value or "").strip()
-        current_model = str(model_input.value or active_runtime().selected_model or "")
         auth_scheme = ProviderAuthScheme(str(auth_scheme_select.value))
+        if (
+            not provider_api_key
+            and auth_scheme.requires_secret()
+            and controller.session_secret_state(
+                PROVIDER_API_KEY_FIELD, session_id=controller.active_session_id
+            )
+            == "expired"
+        ):
+            open_credential_reentry_dialog(
+                PROVIDER_API_KEY_FIELD,
+                resume=lambda: refresh_model_options(notify=notify),
+            )
+            return
+        current_model = str(model_input.value or active_runtime().selected_model or "")
         models = _discover_model_names(
             provider_protocol=provider_protocol,
             base_url=base_url,
@@ -3143,6 +3314,18 @@ def build_assistant_ui(  # noqa: C901
 
     def refresh_quick_model_options(*, notify: bool = True) -> None:
         runtime = active_runtime()
+        if (
+            runtime.provider_connection.auth_scheme.requires_secret()
+            and controller.session_secret_state(
+                PROVIDER_API_KEY_FIELD, session_id=controller.active_session_id
+            )
+            == "expired"
+        ):
+            open_credential_reentry_dialog(
+                PROVIDER_API_KEY_FIELD,
+                resume=lambda: refresh_quick_model_options(notify=notify),
+            )
+            return
         current_model = str(model_quick_select.value or runtime.selected_model or "")
         models = _discover_model_names(
             provider_protocol=runtime.provider_protocol,
@@ -3928,6 +4111,20 @@ def build_assistant_ui(  # noqa: C901
                 "flat"
             )
             ui.button("Apply", on_click=apply_information_security_settings_and_close)
+
+    with ui.dialog() as credential_reentry_dialog, ui.card().classes("w-[420px]"):
+        dialogs["credential_reentry"] = credential_reentry_dialog
+        credential_reentry_dialog.props("persistent")
+        credential_reentry_title = ui.label("Re-enter credential").classes("text-lg")
+        credential_reentry_label = ui.label("").classes("text-sm llmt-muted")
+        credential_reentry_input = (
+            ui.input("Credential")
+            .props("type=password autocomplete=off")
+            .classes("w-full")
+        )
+        with ui.row().classes("justify-end w-full"):
+            ui.button("Cancel", on_click=cancel_credential_reentry).props("flat")
+            ui.button("Continue", on_click=submit_credential_reentry)
 
     with ui.dialog() as provider_settings_dialog, ui.card().classes("w-[460px]"):
         dialogs["provider_settings"] = provider_settings_dialog

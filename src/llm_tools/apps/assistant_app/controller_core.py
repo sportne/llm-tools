@@ -141,6 +141,17 @@ class NiceGUIActiveTurnHandle:
 
 ProviderFactory = Callable[[NiceGUIRuntimeConfig], ModelTurnProvider]
 PROVIDER_API_KEY_FIELD = "__provider_api_key__"
+DEFAULT_SESSION_SECRET_TTL_SECONDS = 2 * 60 * 60
+SessionSecretState = Literal["missing", "present", "expired"]
+
+
+@dataclass
+class NiceGUISessionSecret:
+    """One memory-only credential with its entry time."""
+
+    value: str | None
+    entered_at: datetime
+    expired: bool = False
 
 
 def _now_iso() -> str:
@@ -254,6 +265,7 @@ class NiceGUIChatController:
         hosted_config: NiceGUIHostedConfig | None = None,
         current_user: NiceGUIUser | None = None,
         auth_provider: LocalAuthProvider | None = None,
+        credential_clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.store = store
         self.config = config
@@ -262,6 +274,7 @@ class NiceGUIChatController:
         self.hosted_config = hosted_config or NiceGUIHostedConfig()
         self.current_user = current_user
         self.auth_provider = auth_provider
+        self._credential_clock = credential_clock or (lambda: datetime.now(UTC))
         self.owner_user_id = current_user.user_id if current_user is not None else None
         self.preferences: NiceGUIPreferences = store.load_preferences(
             owner_user_id=self.owner_user_id
@@ -271,7 +284,7 @@ class NiceGUIChatController:
         self.session_order: list[str] = []
         self.turn_states: dict[str, NiceGUITurnState] = {}
         self.active_turns: dict[str, NiceGUIActiveTurnHandle] = {}
-        self.session_secrets: dict[str, dict[str, str]] = {}
+        self.session_secrets: dict[str, dict[str, NiceGUISessionSecret]] = {}
         self._lock = threading.RLock()
         self._load_initial_state()
 
@@ -400,7 +413,10 @@ class NiceGUIChatController:
         effective_session_id = session_id or self.active_session_id
         secrets = self.session_secrets.setdefault(effective_session_id, {})
         if cleaned_value:
-            secrets[cleaned_name] = cleaned_value
+            secrets[cleaned_name] = NiceGUISessionSecret(
+                value=cleaned_value,
+                entered_at=self._credential_now(),
+            )
 
     def clear_session_secret(self, name: str, *, session_id: str | None = None) -> None:
         """Clear one in-memory secret for the selected session."""
@@ -409,19 +425,39 @@ class NiceGUIChatController:
 
     def has_session_secret(self, name: str, *, session_id: str | None = None) -> bool:
         """Return whether the selected session has an in-memory secret."""
-        effective_session_id = session_id or self.active_session_id
-        return bool(self.session_secrets.get(effective_session_id, {}).get(name))
+        return bool(self.get_session_secret(name, session_id=session_id))
+
+    def session_secret_state(
+        self, name: str, *, session_id: str | None = None
+    ) -> SessionSecretState:
+        """Return whether a session secret is present, missing, or expired."""
+        entry = self._session_secret_entry(name, session_id=session_id)
+        if entry is None:
+            return "missing"
+        if entry.expired or not entry.value:
+            return "expired"
+        return "present"
+
+    def get_session_secret(
+        self, name: str, *, session_id: str | None = None
+    ) -> str | None:
+        """Return one non-expired session secret value."""
+        entry = self._session_secret_entry(name, session_id=session_id)
+        if entry is None or entry.expired or not entry.value:
+            return None
+        return entry.value
 
     def session_tool_env(self, *, session_id: str | None = None) -> dict[str, str]:
         """Return session-scoped tool credentials without provider-only secrets."""
         effective_session_id = session_id or self.active_session_id
-        return {
-            name: value
-            for name, value in self.session_secrets.get(
-                effective_session_id, {}
-            ).items()
-            if name != PROVIDER_API_KEY_FIELD
-        }
+        env: dict[str, str] = {}
+        for name in list(self.session_secrets.get(effective_session_id, {})):
+            if name == PROVIDER_API_KEY_FIELD:
+                continue
+            value = self.get_session_secret(name, session_id=effective_session_id)
+            if value:
+                env[name] = value
+        return env
 
     def runtime_tool_urls(
         self, runtime: NiceGUIRuntimeConfig | None = None
@@ -454,10 +490,32 @@ class NiceGUIChatController:
 
     def provider_api_key(self, *, session_id: str | None = None) -> str | None:
         """Return the selected session's in-memory provider API key."""
+        return self.get_session_secret(PROVIDER_API_KEY_FIELD, session_id=session_id)
+
+    def _credential_now(self) -> datetime:
+        """Return the current time for credential expiry checks."""
+        now = self._credential_clock()
+        if now.tzinfo is None:
+            return now.replace(tzinfo=UTC)
+        return now
+
+    def _session_secret_entry(
+        self, name: str, *, session_id: str | None = None
+    ) -> NiceGUISessionSecret | None:
+        """Return a secret record after clearing any expired secret value."""
         effective_session_id = session_id or self.active_session_id
-        return self.session_secrets.get(effective_session_id, {}).get(
-            PROVIDER_API_KEY_FIELD
-        )
+        entry = self.session_secrets.get(effective_session_id, {}).get(name)
+        if entry is None:
+            return None
+        if (
+            not entry.expired
+            and entry.value
+            and (self._credential_now() - entry.entered_at).total_seconds()
+            >= DEFAULT_SESSION_SECRET_TTL_SECONDS
+        ):
+            entry.value = None
+            entry.expired = True
+        return entry
 
     def interaction_mode_locked(self, *, session_id: str | None = None) -> bool:
         """Return whether the session has sent its first visible user message."""

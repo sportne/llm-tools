@@ -21,6 +21,7 @@ _.find_files  # filesystem service protocol method
 _.for_ollama  # provider public convenience constructor
 _.for_openai  # provider public convenience constructor
 _.get_file_info  # filesystem service protocol method
+_.has_session_secret  # assistant controller compatibility helper
 _._iter_registered_tools  # registry internal inspection surface used by tests
 _.list_directory  # filesystem service protocol method
 _.list_pending_approvals  # workflow executor public API
