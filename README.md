@@ -68,10 +68,6 @@ the lower library layers unless they intentionally target app behavior.
 - `docs/CONTEXT.md` defines the project domain language.
 - `docs/adr/` records architectural decisions and rationale.
 
-Older `docs/design/*` and `docs/security.md` artifacts remain during the
-documentation transition until a dedicated cleanup removes the superseded
-artifacts.
-
 ## Install
 
 Linux/macOS or WSL:
@@ -470,12 +466,5 @@ python scripts/e2e_assistant/run_ollama_skill_eval.py \
 - [Assistant User Guide](docs/assistant-user-guide.md)
 - [Domain Context](docs/CONTEXT.md)
 - [Architecture Decision Records](docs/adr/)
-- Legacy transition docs:
-  [Specification](docs/design/spec.md),
-  [Architecture](docs/design/architecture.md),
-  [Assistant App Design](docs/design/assistant_app.md),
-  [SQLite Persistence Design](docs/design/sqlite_persistence.md),
-  [Harness Architecture](docs/design/harness_api.md),
-  [Security](docs/security.md)
 - [Examples](examples/README.md)
 - [Agent Conventions](AGENTS.md)

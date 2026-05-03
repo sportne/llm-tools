@@ -401,7 +401,7 @@ _Avoid_: backlog item, planned feature
 - **Feature-Gated Capabilities** are documented in the owning subsystem section, not in a backlog section.
 - The **System Design Document** includes an **Implementation Source Map** appendix that links design areas to primary modules and tests; it is package/module traceability, not line-level source commentary.
 - The **System Design Document** uses a consolidated top-level structure: purpose and truth model, system architecture, subsystem designs, cross-cutting designs, built-in capabilities, dependency and supply-chain inventory, and verification and decision records.
-- The **System Design Document** contains a full security design section intended to supersede `docs/security.md` later, excluding active hardening backlog and dated review-log content.
+- The **System Design Document** contains the canonical security design section, excluding active hardening backlog and dated review-log content.
 - A **Software Bill of Materials** is generated as a full transitive artifact, while the **System Design Document** includes a curated Markdown dependency table.
 - The **Software Bill of Materials** generator is committed, but generated full transitive SBOM files are produced on demand rather than committed without a lockfile.
 - Curated direct-dependency purpose text lives in `docs/dependency-purposes.toml` and is consumed by the **Dependency Inventory** generator.
@@ -550,8 +550,8 @@ _Avoid_: backlog item, planned feature
 - The skills API owns reusable skill mechanics; **Assistant Runtime Assembly** owns app-session skill composition.
 - Assistant app inspector/debug UI should expose turn-visible **Available Skills Context**, **Loaded Skill Context**, **Skill Usage Records**, and skill validation or enablement warnings.
 - Supporting files should not be shown in inspector/debug UI unless the user explicitly opens or loads them.
-- The new **System Design Document** and **Assistant User Guide** are intended to replace the old `docs/design/*` and `docs/security.md` documents later, while `docs/CONTEXT.md` and `docs/adr/*` remain supporting records.
-- Old `docs/design/*` and `docs/security.md` artifacts remain until a dedicated cleanup removes the superseded documents.
+- The **System Design Document** and **Assistant User Guide** replace the superseded legacy design and security documents, while `docs/CONTEXT.md` and `docs/adr/*` remain supporting records.
+- Superseded legacy design and security artifacts are removed rather than kept as transition documents.
 - The first **System Design Document** pass includes `docs/system-design.md`, `docs/dependency-purposes.toml`, a dependency inventory generator, and supporting tests where practical.
 - The **System Design Document** is hand-authored, with generated dependency tables used as supporting content rather than generated system narrative.
 - The first **System Design Document** draft should be dense and section-complete, while avoiding source-code reference depth.

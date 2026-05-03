@@ -64,13 +64,17 @@ make package
 
 ## Documentation Guidance
 
-- `docs/design/spec.md` describes intended behavior and acceptance criteria.
-- `docs/design/architecture.md` describes subsystem boundaries and dependency
-  direction.
-- `docs/design/harness_api.md` describes the durable orchestration surface in
-  more detail.
-- `docs/security.md` is the canonical security posture, hardening backlog, and
-  review summary.
+- `docs/system-design.md` is the canonical system design, including subsystem
+  boundaries, dependency direction, architectural constraints, security design,
+  LLM interaction design, persistence design, built-in tool behavior, and
+  dependency inventory.
+- `docs/assistant-user-guide.md` is the canonical end-user guide for operating
+  the Assistant app.
+- `docs/CONTEXT.md` defines the project domain language and should be updated
+  when new durable concepts or documentation conventions are introduced.
+- `docs/adr/` records architectural decisions and rationale. ADRs may be
+  referenced from design work, but they should not replace updates to the
+  canonical system design when implemented behavior changes.
 - `TASKS.md` is the active implementation checklist and should reflect actual
   repository status.
 
