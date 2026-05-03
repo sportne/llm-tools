@@ -11,6 +11,7 @@ ARCHITECTURE_LAYERS = (
     "llm_adapters",
     "llm_providers",
     "tools",
+    "skills_api",
     "workflow_api",
     "harness_api",
     "apps",
@@ -19,6 +20,7 @@ HARNESS_API_APPROVED_LOWER_LAYERS = (
     "tool_api",
     "llm_adapters",
     "llm_providers",
+    "skills_api",
     "workflow_api",
 )
 LAYERS_THAT_MUST_NOT_IMPORT_HARNESS_API = (
@@ -27,6 +29,7 @@ LAYERS_THAT_MUST_NOT_IMPORT_HARNESS_API = (
     "llm_providers",
     "tools",
     "workflow_api",
+    "skills_api",
 )
 
 FORBIDDEN_IMPORTS_BY_LAYER = {
@@ -54,8 +57,17 @@ FORBIDDEN_IMPORTS_BY_LAYER = {
     "tools": (
         "llm_tools.llm_adapters",
         "llm_tools.llm_providers",
+        "llm_tools.skills_api",
         "llm_tools.workflow_api",
         "llm_tools.harness_api",
+        "llm_tools.apps",
+    ),
+    "skills_api": (
+        "llm_tools.llm_adapters",
+        "llm_tools.llm_providers",
+        "llm_tools.workflow_api",
+        "llm_tools.harness_api",
+        "llm_tools.tools",
         "llm_tools.apps",
     ),
     "workflow_api": (

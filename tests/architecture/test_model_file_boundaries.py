@@ -166,7 +166,7 @@ def test_model_files_contain_only_model_layer_code() -> None:
 
         tree = helpers.parse_module(source_file)
         base_model_aliases = _base_model_aliases(tree)
-        enum_aliases = _imported_aliases(tree, module="enum", names={"Enum"})
+        enum_aliases = _imported_aliases(tree, module="enum", names={"Enum", "StrEnum"})
         protocol_aliases = _imported_aliases(tree, module="typing", names={"Protocol"})
         protocol_aliases.update(
             _imported_aliases(tree, module="typing_extensions", names={"Protocol"})

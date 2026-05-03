@@ -66,7 +66,7 @@ where = ["src"]
 include = ["llm_tools*"]
 
 [tool.setuptools.package-data]
-llm_tools = ["py.typed"]
+llm_tools = ["py.typed", "skills_api/bundled/*/SKILL.md"]
 
 [tool.ruff]
 line-length = 88

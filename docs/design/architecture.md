@@ -5,15 +5,16 @@
 This document describes the current architecture of `llm-tools` as implemented,
 not an earlier scaffold or deferred design.
 
-The repository has seven practical layers:
+The repository has eight practical layers:
 
 1. `tool_api`
 2. `llm_adapters`
 3. `llm_providers`
 4. `tools`
-5. `workflow_api`
-6. `harness_api`
-7. `apps`
+5. `skills_api`
+6. `workflow_api`
+7. `harness_api`
+8. `apps`
 
 ## Truth resolution
 
@@ -27,18 +28,24 @@ that no longer matches the repository.
 apps
   -> harness_api
   -> workflow_api
+  -> skills_api
   -> llm_providers
   -> tool_api
   -> tools
 
 harness_api
   -> workflow_api
+  -> skills_api
   -> llm_adapters
   -> llm_providers
   -> tool_api
 
 workflow_api
+  -> skills_api
   -> llm_adapters
+  -> tool_api
+
+skills_api
   -> tool_api
 
 llm_providers
@@ -102,6 +109,16 @@ The current families are:
 
 The local assistant core uses filesystem and git most directly. GitLab
 and Atlassian are intentionally bundled remote integrations.
+
+### `skills_api`
+
+`skills_api` owns reusable support for local `SKILL.md` instruction packages.
+
+It discovers and validates skill metadata, resolves enabled skills by name or
+path, loads selected skill instructions, and renders structured available-skill
+and loaded-skill context contributions. It may reference **Tool** names or specs
+as metadata, but it does not execute tools, run scripts, install dependencies,
+own app UI, or perform automatic skill selection.
 
 ### `workflow_api`
 

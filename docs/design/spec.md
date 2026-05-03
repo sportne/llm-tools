@@ -38,6 +38,7 @@ The current supported library surfaces are:
 - `llm_tools.llm_adapters`
 - `llm_tools.llm_providers`
 - `llm_tools.tools` registration entrypoints
+- `llm_tools.skills_api`
 - `llm_tools.workflow_api`
 - `llm_tools.harness_api`
 
@@ -89,6 +90,21 @@ Some public workflow modules are now intentionally thin facades:
 
 The repo should preserve the clean one-turn workflow primitive even while
 assistant-oriented session helpers remain in the same package.
+
+### Skills layer
+
+`skills_api` is the reusable layer for local `SKILL.md` instruction packages.
+
+It owns:
+
+- skill discovery from caller-provided local roots
+- portable `SKILL.md` metadata parsing and validation
+- skill enablement-aware resolution by name or path
+- available-skills and loaded-skill context contributions
+- path-safe references to supporting files
+
+It does not execute scripts, install dependencies, own app UI, persist
+enablement choices, or perform heuristic skill selection.
 
 ### Harness layer
 
@@ -144,8 +160,11 @@ filesystem read/search pipeline rather than first-class tool families.
 - `tool_api` must remain independent of `workflow_api`, `harness_api`, `apps`,
   and the tool implementation packages.
 - `workflow_api` must not import `harness_api`.
+- `skills_api` must not import `workflow_api`, `harness_api`, `apps`, or
+  bundled `tools`.
 - `harness_api` may depend on `workflow_api`, `tool_api`, `llm_adapters`, and
-  `llm_providers`, but not on `apps` or `tools`.
+  `llm_providers`, and may consume `skills_api` metadata, but not on `apps` or
+  `tools`.
 - `tools` must not depend on `workflow_api`, `harness_api`, or `apps`.
 - `apps` may compose any lower layer, but app-local convenience code should not
   become the default public extension surface by accident.

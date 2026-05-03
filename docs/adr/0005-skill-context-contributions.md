@@ -1,0 +1,3 @@
+# Split Available and Loaded Skill Context
+
+Skill support will mirror Codex's two-stage context model without hardcoding provider message roles into `skills_api`. The reusable skills layer should emit structured **Available Skills Context** for budgeted metadata discovery and **Loaded Skill Context** for selected `SKILL.md` instructions, while workflow, harness, and app consumers decide how those contributions map to model messages. This preserves progressive disclosure and keeps prompt/message assembly with the existing model-turn and app-runtime layers instead of burying it inside skill parsing.

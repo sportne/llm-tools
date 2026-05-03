@@ -4,7 +4,9 @@ PYTHON := $(VENV)/bin/python
 SRC_DIR := src
 TEST_DIR := tests
 PACKAGE := llm_tools
-PYTEST_FLAGS ?=
+# Disable pytest capture by default because the desktop/WSL temp-file capture path
+# can fail during cleanup before collection. Callers can still override this.
+PYTEST_FLAGS ?= -s
 
 .PHONY: \
 	help setup-venv install-dev \

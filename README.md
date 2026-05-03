@@ -445,6 +445,14 @@ python scripts/e2e_assistant/run_ollama_agent_eval.py \
   --provider-modes json,prompt_tools
 ```
 
+To run a focused live probe that verifies a local `SKILL.md` package can be
+discovered, loaded, injected into an Ollama prompt, and followed by the model:
+
+```bash
+python scripts/e2e_assistant/run_ollama_skill_eval.py \
+  --model gemma4:e4b
+```
+
 ## Documentation
 
 - [Specification](docs/design/spec.md)

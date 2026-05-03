@@ -10,6 +10,62 @@ entrypoints.
 A typed callable capability exposed to a model and executed through the runtime.
 _Avoid_: function, plugin
 
+**Skill**:
+A discoverable instruction package that teaches an agent a repeatable workflow and may reference supporting files, scripts, examples, or existing **Tools**.
+_Avoid_: tool, plugin, prompt snippet
+
+**Skill Package**:
+A directory-based **Skill** distribution containing a required `SKILL.md` manifest and optional supporting files.
+_Avoid_: command file, prompt file, tool module
+
+**Skill Metadata**:
+The lightweight discoverability record for a **Skill**, including its name, description, source, scope, and validation status.
+_Avoid_: loaded skill, full skill
+
+**Loaded Skill**:
+A **Skill** whose full instructions have been selected for use in the current agent context.
+_Avoid_: discovered skill, installed skill
+
+**Skill Scope**:
+The authority level of a discovered **Skill**, used to resolve same-name skills across enterprise, user, project, and bundled sources.
+_Avoid_: folder, location
+
+**Skill Invocation**:
+An explicit request to use a **Skill** by name for the current agent task.
+_Avoid_: selection, discovery
+
+**Skill Selection**:
+A runtime or agent decision to use a **Skill** because its **Skill Metadata** is relevant to the current task.
+_Avoid_: invocation, discovery
+
+**Available Skills Context**:
+A budgeted model-visible catalog of discovered **Skill Metadata** used to support **Skill Selection**.
+_Avoid_: loaded skills, skill body
+
+**Loaded Skill Context**:
+The model-visible contribution for one **Loaded Skill**, including its name, source path, and full `SKILL.md` instructions.
+_Avoid_: available skills list, metadata
+
+**Skill Dependency**:
+A declarative requirement that a **Skill** expects from the surrounding agent environment, such as a **Tool**, connector, or MCP server.
+_Avoid_: installed tool, enabled app
+
+**Skill Discovery Result**:
+The outcome of scanning skill roots, containing valid **Skill Metadata** records plus path-specific validation errors.
+_Avoid_: loaded skills, registry
+
+**Skill Resolution**:
+The process of choosing one effective **Skill** from discovered candidates by invocation name, path, scope, and ambiguity rules.
+_Avoid_: discovery, selection
+
+**Skill Enablement**:
+A user- or administrator-controlled availability setting that can disable an otherwise valid and policy-allowed **Skill**.
+_Avoid_: validation, policy permission
+
+**Skill Usage Record**:
+A durable metadata record that a **Skill** was invoked or selected for a turn, without persisting the full skill body by default.
+_Avoid_: loaded skill context, transcript copy
+
 **Tool Runtime**:
 The policy-aware execution substrate that validates, mediates, invokes, and normalizes **Tool** calls.
 _Avoid_: executor, runner
@@ -65,6 +121,22 @@ _Avoid_: provider, provider protocol
 ## Relationships
 
 - A **Model-Turn Protocol** produces one parsed **Model Turn**.
+- A **Skill** may guide how an agent uses zero or more **Tools**.
+- A **Skill Package** contains exactly one canonical **Skill** manifest.
+- **Skill Metadata** may be discovered without creating a **Loaded Skill**.
+- A **Loaded Skill** is created from **Skill Metadata** when the user invokes it or the agent selects it as relevant.
+- Every discovered **Skill** has exactly one **Skill Scope**.
+- Same-name **Skills** resolve by **Skill Scope** precedence: enterprise, user, project, then bundled.
+- **Skill Invocation** and **Skill Selection** can both produce a **Loaded Skill**.
+- **Available Skills Context** is derived from **Skill Metadata**.
+- **Loaded Skill Context** is derived from a **Loaded Skill**.
+- A **Skill** may declare zero or more **Skill Dependencies**.
+- Skill scanning produces a **Skill Discovery Result**.
+- A **Skill Discovery Result** may contain valid **Skill Metadata** and validation errors from different **Skill Packages**.
+- **Skill Resolution** chooses from a **Skill Discovery Result** when a plain name or explicit path must identify one **Skill**.
+- **Skill Enablement** gates whether discovered **Skills** are eligible for **Skill Selection** or **Skill Invocation**.
+- **Workflow Turns** and **Harness Sessions** may contain **Skill Usage Records**.
+- **Skills** are discovered, parsed, and validated by a reusable skills API before workflow, harness, or app layers consume them.
 - A **Model-Turn Protocol** may emit zero or more **Model-Turn Events** before it produces a parsed **Model Turn**.
 - A **Workflow Turn** executes one parsed **Model Turn** through the **Tool Runtime**.
 - An **Assistant Chat** contains one or more **Workflow Turn** results.
@@ -154,3 +226,68 @@ _Avoid_: provider, provider protocol
 - Discovery for a bearer-token-required **Provider Connection** should be disabled with a transient notice when no in-memory credential is available.
 - A **Model Turn** for a bearer-token-required **Provider Connection** with no in-memory credential should be blocked before provider creation with a transient notice and no transcript mutation.
 - Missing tool credentials block tool exposure rather than the whole **Model Turn**, and the UI should visibly indicate selected tools that are blocked.
+- The canonical **Skill Package** format is the portable `SKILL.md` directory shape with required `name` and `description` frontmatter plus optional supporting files such as `scripts/`, `references/`, `examples/`, and `assets/`.
+- The skills API parses and validates **Skill Packages**, but does not execute referenced scripts during parsing or validation.
+- **Skill Metadata** is safe to include in broad discovery context; **Loaded Skill** instructions are included only after explicit invocation or relevance selection.
+- **Skill Scope** is domain authority, not a filesystem path; apps may map scopes to different directories.
+- Public **Skill Scope** values should be `enterprise`, `user`, `project`, and `bundled`.
+- **Skill Scope** precedence is `enterprise`, then `user`, then `project`, then `bundled`; user skills outrank project skills for plain-name resolution.
+- Plugin-provided **Skills** may use namespaced names later, but the first skill model does not require a plugin system.
+- The skills API supports deterministic **Skill Invocation** by name; heuristic or semantic **Skill Selection** belongs to workflow, harness, or app consumers until a selector API is explicitly introduced.
+- Bundled **Skills** are in scope primarily as examples of skill structure and use, not as a hidden way to add runtime capabilities.
+- Bundled **Skills** have the lowest **Skill Scope** precedence and should be opt-in or disable-able by consumers.
+- The skills API produces structured **Available Skills Context** and **Loaded Skill Context**; provider message role placement belongs to workflow, harness, or app consumers.
+- The default app/workflow integration should mirror Codex's two-stage context shape: **Available Skills Context** in developer/system-like instructions and **Loaded Skill Context** as tagged contextual task input.
+- **Available Skills Context** should be represented as structured data and render by default in a Codex-style `## Skills` block with skill metadata, paths or aliases, and progressive-disclosure usage instructions.
+- **Available Skills Context** rendering should support caller-provided budgets and return report or warning metadata when descriptions are truncated or skills are omitted.
+- **Loaded Skill Context** should be represented as structured data and render by default to a Codex-compatible `<skill>` envelope with `<name>`, `<path>`, and the full original `SKILL.md` contents.
+- Supporting files referenced by a **Skill Package** remain references until a consumer explicitly loads them.
+- The skills API owns safe **Skill Package** discovery, parsing, and path resolution, including resolving support-file paths relative to the skill directory.
+- The skills API must not execute **Skill Package** scripts or bypass **Tool Runtime**, app policy, or harness approval flows.
+- Script execution, shell approval, filesystem permissions, network access, and credential use remain governed by existing runtime and policy layers.
+- **Skill Dependencies** are declarative metadata; dependency installation, enablement, prompting, and blocking decisions belong to workflow, harness, or app consumers.
+- The first skills API should require only `name` and `description` in `SKILL.md`; optional dependency metadata may be added without becoming part of the required portable manifest.
+- "Codex-compatible skills" means the portable `SKILL.md` package shape for the first implementation, not immediate support for Codex's optional `agents/openai.yaml` sidecar metadata.
+- Unknown `SKILL.md` frontmatter fields should not make a **Skill Package** invalid unless they break required fields.
+- Codex's `agents/openai.yaml` sidecar metadata is the preferred first compatibility target if optional sidecar support is added later.
+- Skill scanning is tolerant: one malformed **Skill Package** should produce a path-specific validation error without preventing other valid **Skills** from loading.
+- A missing or invalid `name` or `description` makes that **Skill Package** invalid.
+- The skills API may normalize metadata whitespace and require single-line metadata, but should not silently invent canonical names from invalid explicit names.
+- Skill names should be trimmed, non-empty, single-line, length-limited, and restricted to letters, digits, `_`, `-`, `.`, and `:`.
+- Skill names should not be silently slugified; invalid names should produce validation errors.
+- Skill descriptions should be trimmed, non-empty, single-line, and length-limited because they are the primary discovery and selection metadata.
+- Plain-name **Skill Resolution** should be exact by default, with optional case-insensitive matching only when unambiguous.
+- Full Markdown instruction bodies are not semantically validated by the skills API.
+- **Skill Discovery Result** includes all valid **Skills**, including same-name skills from different scopes or paths.
+- Plain-name **Skill Resolution** applies **Skill Scope** precedence only when one effective winner is needed.
+- Same-name **Skills** at the same **Skill Scope** make plain-name **Skill Invocation** ambiguous unless an explicit path is provided.
+- Explicit-path **Skill Invocation** may target any enabled discovered **Skill** regardless of name ambiguity.
+- **Skill Enablement** is distinct from policy: a policy-allowed **Skill** may still be disabled by user or administrator choice.
+- Automatic **Skill Selection** must respect **Skill Enablement** and must not use a disabled **Skill** just because policy would otherwise allow it.
+- The skills API enforces caller-supplied **Skill Enablement** during context rendering and **Skill Resolution**, but does not persist enablement choices.
+- Apps, harness consumers, or embedding products own persistence of **Skill Enablement** choices.
+- The first implementation slice should establish the reusable skills API, deterministic resolution, context rendering, and example bundled **Skills** without app UI, auto-selection, sidecar metadata, plugin integration, or dependency prompting.
+- The second implementation slice should add **Skill Enablement** management and assistant app UI for viewing, enabling, disabling, and invoking **Skills**.
+- A **Loaded Skill** is turn-scoped by default and should not keep contributing instructions to later turns unless invoked, selected, or explicitly pinned again.
+- Persisting or pinning **Loaded Skills** across a **Harness Session** is a future explicit orchestration feature, not the base skills behavior.
+- **Skill Usage Records** should include metadata such as skill name, **Skill Scope**, source path or stable id, invocation type, and optionally a content hash.
+- Full `SKILL.md` bodies should not be persisted into transcripts or durable sessions by default.
+- Deterministic skill replay may later snapshot skill bodies or warn on content-hash mismatch, but that is explicit replay behavior.
+- The assistant app should use "Skills" as the user-facing label for **Skills**.
+- The assistant app should support `$skill-name` or picker-based **Skill Invocation** rather than treating **Skills** as slash commands.
+- Skill management UI should expose name, description, **Skill Scope** or source, enablement state, path, and validation errors.
+- Project or repo **Skills** may be discovered automatically, but they do not gain trust or execution rights beyond normal instruction loading.
+- Loading a project **Skill** must not bypass **Tool Runtime**, app policy, shell approval, credential, or filesystem restrictions.
+- Future automatic **Skill Selection** should keep **Skill Scope** visible and avoid treating project **Skills** as inherently more trusted than user or administrator choices.
+- The skills API is local-filesystem-only for the first implementation, and remote skill catalogs are not assumed to be required later.
+- Skill installation, update, marketplace discovery, and remote provenance are outside the first skills API boundary.
+- Skill scanning should recursively discover files named exactly `SKILL.md` under configured local roots, with bounded depth and directory-count limits.
+- Skill scanning should ignore hidden directories by default, dedupe by canonical path, and avoid following symlinks unless a caller explicitly opts in.
+- The first skills API may be synchronous because local skill discovery and loading are filesystem-bound, but its model should not preclude later async APIs.
+- Async skill APIs are expected to become useful for subagent orchestration or background refresh, so sync-first implementations should avoid global mutable state and blocking-only abstractions that cannot be mirrored asynchronously.
+- Public skills API data structures should use Pydantic models in `skills_api/*_models.py` or `skills_api/models.py`, matching existing public typed model conventions.
+- Skills API behavior should live in focused modules for discovery, resolution, loading, and rendering, with YAML parsing using the existing `PyYAML` dependency.
+- **Assistant Runtime Assembly** composes session-specific skill roots, **Skill Enablement**, available-skill context, and loaded-skill context for **Assistant Chat** and **Deep Task**.
+- The skills API owns reusable skill mechanics; **Assistant Runtime Assembly** owns app-session skill composition.
+- Assistant app inspector/debug UI should expose turn-visible **Available Skills Context**, **Loaded Skill Context**, **Skill Usage Records**, and skill validation or enablement warnings.
+- Supporting files should not be shown in inspector/debug UI unless the user explicitly opens or loads them.
