@@ -156,6 +156,7 @@ class NiceGUIRuntimeConfig(BaseModel):
     provider_connection: ProviderConnectionConfig = Field(
         default_factory=ProviderConnectionConfig
     )
+    provider_request_settings: dict[str, object] = Field(default_factory=dict)
     response_mode_strategy: ResponseModeStrategy = ResponseModeStrategy.AUTO
     selected_model: str | None = None
     temperature: float = 0.1

@@ -25,6 +25,7 @@ from llm_tools.apps.assistant_config import (  # noqa: E402
 )
 from llm_tools.apps.chat_config import (  # noqa: E402
     ChatLLMConfig,
+    ProviderAuthScheme,
     ProviderConnectionConfig,
     ProviderProtocol,
 )
@@ -33,6 +34,7 @@ from llm_tools.llm_providers import ResponseModeStrategy  # noqa: E402
 from llm_tools.tool_api import SideEffectClass  # noqa: E402
 
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
+DEFAULT_OLLAMA_NATIVE_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_MODEL = "gemma4:e4b"
 DEFAULT_TIMEOUT_SECONDS = 60.0
 DEFAULT_PROVIDER_MODES = [
@@ -93,7 +95,8 @@ def build_assistant_config(
     response_mode: ResponseModeStrategy,
     timeout_seconds: float,
     api_base_url: str | None = None,
-    requires_bearer_token: bool = False,
+    provider_protocol: ProviderProtocol = ProviderProtocol.OPENAI_API,
+    provider_auth_scheme: ProviderAuthScheme = ProviderAuthScheme.NONE,
 ) -> AssistantConfig:
     """Build the local-only assistant config used by the probe scripts."""
     effective_base_url = api_base_url or ollama_base_url
@@ -104,10 +107,10 @@ def build_assistant_config(
         update={
             "llm": template.llm.model_copy(
                 update={
-                    "provider_protocol": ProviderProtocol.OPENAI_API,
+                    "provider_protocol": provider_protocol,
                     "provider_connection": ProviderConnectionConfig(
                         api_base_url=effective_base_url,
-                        requires_bearer_token=requires_bearer_token,
+                        auth_scheme=provider_auth_scheme,
                     ),
                     "selected_model": model,
                     "response_mode_strategy": response_mode,
@@ -149,6 +152,7 @@ def build_runtime_config(
     return NiceGUIRuntimeConfig(
         provider_protocol=config.llm.provider_protocol,
         provider_connection=config.llm.provider_connection.model_copy(deep=True),
+        provider_request_settings=dict(config.llm.provider_request_settings),
         response_mode_strategy=config.llm.response_mode_strategy,
         selected_model=config.llm.selected_model,
         temperature=config.llm.temperature,
@@ -198,6 +202,7 @@ def create_provider_for_runtime(
     return create_provider(
         provider_protocol=runtime.provider_protocol,
         provider_connection=runtime.provider_connection,
+        provider_request_settings=runtime.provider_request_settings,
         api_key=api_key,
         selected_model=selected_model or runtime.selected_model or "",
         response_mode_strategy=runtime.response_mode_strategy,

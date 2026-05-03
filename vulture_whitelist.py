@@ -10,6 +10,7 @@ expectations  # protocol parameter on Verifier.verify
 
 _.append_message  # assistant store public method
 _.assign_unowned_sessions  # assistant store public method
+_.can_fallback_to_prompt_tools_async  # provider protocol method
 _.export_tool_descriptions  # adapter inspection/debugging API
 _.export_tools  # workflow executor public API
 _.execute_model_output  # workflow executor public API

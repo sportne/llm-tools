@@ -15,6 +15,9 @@ from llm_tools.apps.chat_config_models import (
     ChatUIConfig as ChatUIConfig,
 )
 from llm_tools.apps.chat_config_models import (
+    ProviderAuthScheme as ProviderAuthScheme,
+)
+from llm_tools.apps.chat_config_models import (
     ProviderConnectionConfig as ProviderConnectionConfig,
 )
 from llm_tools.apps.chat_config_models import (
@@ -26,6 +29,7 @@ __all__ = [
     "ChatLLMConfig",
     "ChatPolicyConfig",
     "ChatUIConfig",
+    "ProviderAuthScheme",
     "ProviderConnectionConfig",
     "ProviderProtocol",
 ]

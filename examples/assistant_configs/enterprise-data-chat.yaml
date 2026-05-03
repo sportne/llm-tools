@@ -8,7 +8,7 @@ llm:
   temperature: 0.1
   provider_connection:
     api_base_url: https://llm.example.internal/v1
-    requires_bearer_token: true
+    auth_scheme: bearer
   timeout_seconds: 60.0
   prompt_for_api_key_if_missing: true
 

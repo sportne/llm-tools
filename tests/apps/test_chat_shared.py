@@ -11,6 +11,7 @@ from llm_tools.apps.assistant_app.models import NiceGUIPreferences, NiceGUIRunti
 from llm_tools.apps.chat_config import (
     ChatLLMConfig,
     ChatPolicyConfig,
+    ProviderAuthScheme,
     ProviderConnectionConfig,
     ProviderProtocol,
 )
@@ -35,7 +36,9 @@ def test_chat_config_validation_and_metadata() -> None:
     assert metadata.expects_api_key is True
 
     custom_config = ChatLLMConfig(
-        provider_connection=ProviderConnectionConfig(requires_bearer_token=False),
+        provider_connection=ProviderConnectionConfig(
+            auth_scheme=ProviderAuthScheme.NONE
+        ),
         prompt_for_api_key_if_missing=False,
     )
     custom_metadata = custom_config.credential_prompt_metadata()
@@ -175,7 +178,7 @@ def test_chat_runtime_provider_factory_and_executor_defaults(
         provider_protocol=ProviderProtocol.OPENAI_API,
         provider_connection=ProviderConnectionConfig(
             api_base_url="http://127.0.0.1:11434/v1",
-            requires_bearer_token=False,
+            auth_scheme=ProviderAuthScheme.NONE,
         ),
         api_key=None,
         selected_model="local-model",
@@ -185,6 +188,117 @@ def test_chat_runtime_provider_factory_and_executor_defaults(
     )
     assert no_bearer_provider.kind == "custom-provider"
     assert custom_calls[2]["api_key"] == "unused"
+    ollama_calls: list[dict[str, object]] = []
+
+    class _FakeOllamaProvider:
+        def __init__(self, **kwargs: object) -> None:
+            ollama_calls.append(dict(kwargs))
+            self.kind = "ollama-native"
+
+    monkeypatch.setattr(
+        _CHAT_RUNTIME_MODULE, "OllamaNativeProvider", _FakeOllamaProvider
+    )
+    ollama_provider = _CHAT_RUNTIME_MODULE.create_provider(
+        provider_protocol=ProviderProtocol.OLLAMA_NATIVE,
+        provider_connection=ProviderConnectionConfig(
+            api_base_url="http://127.0.0.1:11434",
+            auth_scheme=ProviderAuthScheme.NONE,
+        ),
+        api_key=None,
+        selected_model="llama3.2",
+        response_mode_strategy="auto",
+        timeout_seconds=30,
+    )
+    assert ollama_provider.kind == "ollama-native"
+    assert ollama_calls == [
+        {
+            "model": "llama3.2",
+            "host": "http://127.0.0.1:11434",
+            "response_mode_strategy": "auto",
+            "default_request_params": {"timeout": 30},
+        }
+    ]
+    ask_sage_calls: list[dict[str, object]] = []
+
+    class _FakeAskSageProvider:
+        def __init__(self, **kwargs: object) -> None:
+            ask_sage_calls.append(dict(kwargs))
+            self.kind = "ask-sage-native"
+
+    monkeypatch.setattr(
+        _CHAT_RUNTIME_MODULE, "AskSageNativeProvider", _FakeAskSageProvider
+    )
+    ask_sage_provider = _CHAT_RUNTIME_MODULE.create_provider(
+        provider_protocol=ProviderProtocol.ASK_SAGE_NATIVE,
+        provider_connection=ProviderConnectionConfig(
+            api_base_url="https://api.asksage.ai/server",
+            auth_scheme=ProviderAuthScheme.X_ACCESS_TOKENS,
+        ),
+        provider_request_settings={"persona": 7},
+        api_key="token",
+        selected_model="gpt-4.1-mini",
+        response_mode_strategy="json",
+        timeout_seconds=45,
+    )
+    assert ask_sage_provider.kind == "ask-sage-native"
+    assert ask_sage_calls == [
+        {
+            "model": "gpt-4.1-mini",
+            "access_token": "token",
+            "base_url": "https://api.asksage.ai/server",
+            "response_mode_strategy": "json",
+            "request_settings": {"persona": 7},
+            "default_request_params": {"timeout": 45},
+        }
+    ]
+    with pytest.raises(ValueError, match="Ollama provider protocol uses auth"):
+        _CHAT_RUNTIME_MODULE.create_provider(
+            provider_protocol=ProviderProtocol.OLLAMA_NATIVE,
+            provider_connection=ProviderConnectionConfig(
+                api_base_url="http://127.0.0.1:11434",
+                auth_scheme=ProviderAuthScheme.BEARER,
+            ),
+            api_key=None,
+            selected_model="llama3.2",
+            response_mode_strategy="auto",
+            timeout_seconds=30,
+        )
+    with pytest.raises(ValueError, match="Ask Sage provider protocol uses auth"):
+        _CHAT_RUNTIME_MODULE.create_provider(
+            provider_protocol=ProviderProtocol.ASK_SAGE_NATIVE,
+            provider_connection=ProviderConnectionConfig(
+                api_base_url="https://api.asksage.ai/server",
+                auth_scheme=ProviderAuthScheme.BEARER,
+            ),
+            api_key="token",
+            selected_model="gpt-4.1-mini",
+            response_mode_strategy="json",
+            timeout_seconds=45,
+        )
+    with pytest.raises(ValueError, match="provider credentials"):
+        _CHAT_RUNTIME_MODULE.create_provider(
+            provider_protocol=ProviderProtocol.ASK_SAGE_NATIVE,
+            provider_connection=ProviderConnectionConfig(
+                api_base_url="https://api.asksage.ai/server",
+                auth_scheme=ProviderAuthScheme.X_ACCESS_TOKENS,
+            ),
+            api_key=None,
+            selected_model="gpt-4.1-mini",
+            response_mode_strategy="json",
+            timeout_seconds=45,
+        )
+    with pytest.raises(ValueError, match="does not support x_access_tokens"):
+        _CHAT_RUNTIME_MODULE.create_provider(
+            provider_protocol=ProviderProtocol.OPENAI_API,
+            provider_connection=ProviderConnectionConfig(
+                api_base_url="https://example.invalid/v1",
+                auth_scheme=ProviderAuthScheme.X_ACCESS_TOKENS,
+            ),
+            api_key="token",
+            selected_model="custom-model",
+            response_mode_strategy="auto",
+            timeout_seconds=config.timeout_seconds,
+        )
     with pytest.raises(ValueError, match="Choose a model"):
         _CHAT_RUNTIME_MODULE.create_provider(
             provider_protocol=ProviderProtocol.OPENAI_API,

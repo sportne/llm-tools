@@ -178,10 +178,14 @@ class _FakeOpenAICompatibleProvider:
 
 def _fake_provider_module() -> ModuleType:
     module = ModuleType("llm_tools.llm_providers")
+    module.AskSageNativeProvider = _FakeOpenAICompatibleProvider
+    module.OllamaNativeProvider = _FakeOpenAICompatibleProvider
     module.OpenAICompatibleProvider = _FakeOpenAICompatibleProvider
     module.ResponseModeStrategy = _FakeResponseModeStrategy
     module.ProviderPreflightResult = _FakeProviderPreflightResult
     module.__all__ = [
+        "AskSageNativeProvider",
+        "OllamaNativeProvider",
         "OpenAICompatibleProvider",
         "ResponseModeStrategy",
         "ProviderPreflightResult",

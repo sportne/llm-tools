@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from llm_tools.apps.chat_config import ProviderAuthScheme
 from llm_tools.llm_providers import ResponseModeStrategy
 
 SCRIPT_DIR = Path(__file__).resolve().parents[2] / "scripts" / "e2e_assistant"
@@ -33,7 +34,7 @@ def test_backend_matrix_config_supports_custom_openai_provider(tmp_path: Path) -
         model="gemini-3-flash-preview",
         response_mode=ResponseModeStrategy.JSON,
         timeout_seconds=30.0,
-        requires_bearer_token=True,
+        provider_auth_scheme=ProviderAuthScheme.BEARER,
     )
 
     assert config.llm.provider_protocol.value == "openai_api"
@@ -41,7 +42,7 @@ def test_backend_matrix_config_supports_custom_openai_provider(tmp_path: Path) -
         config.llm.provider_connection.api_base_url
         == "https://generativelanguage.googleapis.com/v1beta/openai"
     )
-    assert config.llm.provider_connection.requires_bearer_token is True
+    assert config.llm.provider_connection.auth_scheme is ProviderAuthScheme.BEARER
     assert config.llm.selected_model == "gemini-3-flash-preview"
 
 

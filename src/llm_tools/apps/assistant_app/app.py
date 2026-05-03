@@ -148,6 +148,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--response-mode-strategy", type=str)
     parser.add_argument("--temperature", type=float)
     parser.add_argument("--api-base-url", type=str)
+    parser.add_argument(
+        "--provider-auth-scheme",
+        choices=["none", "bearer", "x_access_tokens"],
+    )
     parser.add_argument("--requires-bearer-token", action="store_true")
     parser.add_argument("--no-bearer-token", action="store_true")
     parser.add_argument("--db-path", type=Path, default=None)
@@ -197,10 +201,12 @@ def resolve_assistant_config(args: argparse.Namespace) -> AssistantConfig:
     provider_connection = dict(raw["llm"].get("provider_connection") or {})
     if args.api_base_url is not None:
         provider_connection["api_base_url"] = args.api_base_url
+    if args.provider_auth_scheme is not None:
+        provider_connection["auth_scheme"] = args.provider_auth_scheme
     if args.requires_bearer_token:
-        provider_connection["requires_bearer_token"] = True
+        provider_connection["auth_scheme"] = "bearer"
     if args.no_bearer_token:
-        provider_connection["requires_bearer_token"] = False
+        provider_connection["auth_scheme"] = "none"
     raw["llm"]["provider_connection"] = provider_connection
     for field_name in (
         "max_context_tokens",

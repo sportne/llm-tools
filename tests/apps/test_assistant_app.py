@@ -101,13 +101,13 @@ from llm_tools.apps.assistant_app.models import (
     NiceGUITranscriptEntry,
 )
 from llm_tools.apps.assistant_app.provider_endpoints import (
-    COMMON_OPENAI_COMPATIBLE_ENDPOINTS,
+    COMMON_PROVIDER_ENDPOINTS,
 )
 from llm_tools.apps.assistant_app.store import SQLiteNiceGUIChatStore
 from llm_tools.apps.assistant_config import AssistantConfig
 from llm_tools.apps.assistant_tool_capabilities import AssistantToolCapability
 from llm_tools.apps.assistant_tool_registry import build_assistant_available_tool_specs
-from llm_tools.apps.chat_config import ProviderProtocol
+from llm_tools.apps.chat_config import ProviderAuthScheme, ProviderProtocol
 from llm_tools.harness_api import ApprovalResolution
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
 from llm_tools.tool_api import SideEffectClass, ToolInvocationRequest
@@ -204,7 +204,9 @@ def _controller(
     controller.active_record.runtime.provider_connection.api_base_url = (
         "http://127.0.0.1:11434/v1"
     )
-    controller.active_record.runtime.provider_connection.requires_bearer_token = False
+    controller.active_record.runtime.provider_connection.auth_scheme = (
+        ProviderAuthScheme.NONE
+    )
     controller.active_record.runtime.selected_model = "test-model"
     controller.save_active_session()
     return controller
@@ -620,7 +622,11 @@ def test_composer_runtime_helpers() -> None:
     assert _format_workbench_duration(0.25) == "250 ms"
     assert _format_workbench_duration(1.25) == "1.2 s"
     assert _format_workbench_duration(61.0) == "1m 1s"
-    assert NICEGUI_PROVIDER_OPTIONS == ["openai_api"]
+    assert NICEGUI_PROVIDER_OPTIONS == [
+        "openai_api",
+        "ollama_native",
+        "ask_sage_native",
+    ]
     assert NICEGUI_APPROVAL_OPTIONS == [
         SideEffectClass.LOCAL_READ,
         SideEffectClass.LOCAL_WRITE,
@@ -927,6 +933,9 @@ def test_model_discovery_payload_helpers() -> None:
     assert _extract_model_names_from_models_payload(
         {"models": [{"name": "ollama-a"}, {"name": "ollama-b"}]}
     ) == ["ollama-a", "ollama-b"]
+    assert _extract_model_names_from_models_payload(
+        {"models": [{"model": "native-a"}, {"model": "native-b"}]}
+    ) == ["native-a", "native-b"]
     assert _extract_model_names_from_models_payload({"data": "not-list"}) == []
     assert _extract_model_names_from_models_payload(["not-dict"]) == []
     assert _extract_model_names_from_models_payload({"data": ["plain-model"]}) == [
@@ -995,8 +1004,12 @@ def test_common_provider_endpoint_catalog_is_local_and_copyable() -> None:
     assert "https://api.anthropic.com/v1/" in urls
     assert all(name.strip() for name, _url in rows)
     assert all(url.startswith(("http://", "https://")) for _name, url in rows)
-    assert len(rows) == len(COMMON_OPENAI_COMPATIBLE_ENDPOINTS)
-    assert "OpenAI-compatible base URL" in _provider_base_url_help_text()
+    assert "Local Ollama Native" in names
+    assert "Ask Sage Native" in names
+    assert "http://127.0.0.1:11434" in urls
+    assert "https://api.asksage.ai/server" in urls
+    assert len(rows) == len(COMMON_PROVIDER_ENDPOINTS)
+    assert "API base URL" in _provider_base_url_help_text()
 
 
 def test_provider_connection_identity_normalizes_for_secret_scoping() -> None:
@@ -1008,13 +1021,13 @@ def test_provider_connection_identity_normalizes_for_secret_scoping() -> None:
     assert _provider_connection_identity(
         provider_protocol=ProviderProtocol.OPENAI_API,
         base_url=" https://example.test/v1/ ",
-        requires_bearer_token=True,
-    ) == ("openai_api", "https://example.test/v1", True)
+        auth_scheme=ProviderAuthScheme.BEARER,
+    ) == ("openai_api", "https://example.test/v1", "bearer")
     assert _provider_connection_identity(
         provider_protocol=ProviderProtocol.OPENAI_API,
         base_url="https://example.test/v1",
-        requires_bearer_token=False,
-    ) == ("openai_api", "https://example.test/v1", False)
+        auth_scheme=ProviderAuthScheme.NONE,
+    ) == ("openai_api", "https://example.test/v1", "none")
 
 
 def test_selected_model_unavailable_message_only_blocks_on_successful_discovery() -> (
@@ -1091,7 +1104,7 @@ def test_model_discovery_fetches_openai_compatible_models(
         provider_protocol=ProviderProtocol.OPENAI_API,
         base_url="https://example.test/v1",
         api_key="typed-key",
-        requires_bearer_token=True,
+        auth_scheme=ProviderAuthScheme.BEARER,
         timeout=1.5,
     ) == ["model-a", "model-b"]
     assert calls == [
@@ -1100,7 +1113,7 @@ def test_model_discovery_fetches_openai_compatible_models(
     assert _discover_model_names(
         provider_protocol=ProviderProtocol.OPENAI_API,
         base_url="http://127.0.0.1:11434/v1",
-        requires_bearer_token=False,
+        auth_scheme=ProviderAuthScheme.NONE,
         timeout=2.5,
     ) == ["model-a", "model-b"]
     assert calls[-1] == ("http://127.0.0.1:11434/v1/models", None, 2.5)
@@ -1196,7 +1209,7 @@ def test_cli_config_resolution_covers_runtime_overrides(tmp_path: Path) -> None:
     root = resolve_root_argument(args, config)
 
     assert config.llm.selected_model == "model-b"
-    assert config.llm.provider_connection.requires_bearer_token is False
+    assert config.llm.provider_connection.auth_scheme is ProviderAuthScheme.NONE
     assert config.llm.temperature == 0.2
     assert config.session.max_context_tokens == 1000
     assert config.tool_limits.max_tool_result_chars == 900
@@ -1906,7 +1919,9 @@ def test_controller_provider_creation_failure_persists_error(tmp_path: Path) -> 
     controller.active_record.runtime.provider_connection.api_base_url = (
         "http://127.0.0.1:11434/v1"
     )
-    controller.active_record.runtime.provider_connection.requires_bearer_token = False
+    controller.active_record.runtime.provider_connection.auth_scheme = (
+        ProviderAuthScheme.NONE
+    )
     controller.active_record.runtime.selected_model = "test-model"
 
     error = controller.submit_prompt("hello")

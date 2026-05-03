@@ -164,7 +164,7 @@ class AssistantRuntimeBundle:
     ) -> HarnessSessionService:
         """Build the Deep Task harness service for this assembled runtime."""
         harness_provider = AssistantHarnessTurnProvider(
-            provider=self.provider,  # type: ignore[arg-type]
+            provider=self.provider,
             temperature=self.effective_config.llm.temperature,
             system_prompt=self.deep_task_system_prompt,
             protection_controller=self.deep_task_protection_controller,
@@ -304,11 +304,15 @@ def _create_bundle_provider(
         return provider_factory(runtime)
     if runtime.selected_model is None:
         raise ValueError("Choose a model before running a model turn.")
-    if runtime.provider_connection.requires_bearer_token and not provider_api_key:
+    if (
+        runtime.provider_connection.auth_scheme.requires_secret()
+        and not provider_api_key
+    ):
         raise ValueError("Enter provider credentials before running a model turn.")
     return create_provider(
         provider_protocol=runtime.provider_protocol,
         provider_connection=runtime.provider_connection,
+        provider_request_settings=runtime.provider_request_settings,
         api_key=provider_api_key,
         selected_model=runtime.selected_model,
         response_mode_strategy=runtime.response_mode_strategy,
@@ -512,6 +516,7 @@ def build_live_harness_provider(
     provider = create_provider(
         provider_protocol=provider_config.provider_protocol,
         provider_connection=provider_config.provider_connection,
+        provider_request_settings=provider_config.provider_request_settings,
         api_key=api_key,
         selected_model=selected_model,
         response_mode_strategy=response_mode_strategy,

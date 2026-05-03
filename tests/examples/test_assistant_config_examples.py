@@ -26,6 +26,7 @@ from llm_tools.apps.chat_config import (
     ChatLLMConfig,
     ChatPolicyConfig,
     ChatUIConfig,
+    ProviderAuthScheme,
     ProviderProtocol,
 )
 from llm_tools.llm_adapters import ParsedModelResponse
@@ -161,7 +162,7 @@ def test_local_only_chat_example_loads_cleanly() -> None:
 
     assert config.llm.provider_protocol is ProviderProtocol.OPENAI_API
     assert config.llm.provider_connection.api_base_url == "http://127.0.0.1:11434/v1"
-    assert config.llm.provider_connection.requires_bearer_token is False
+    assert config.llm.provider_connection.auth_scheme is ProviderAuthScheme.NONE
     assert config.llm.selected_model == "gemma4:26b"
     assert config.llm.response_mode_strategy is ResponseModeStrategy.AUTO
     assert config.workspace.default_root == "."
@@ -181,7 +182,7 @@ def test_enterprise_data_chat_example_loads_cleanly() -> None:
     assert (
         config.llm.provider_connection.api_base_url == "https://llm.example.internal/v1"
     )
-    assert config.llm.provider_connection.requires_bearer_token is True
+    assert config.llm.provider_connection.auth_scheme is ProviderAuthScheme.BEARER
     assert config.llm.selected_model == "assistant-model"
     assert config.llm.response_mode_strategy is ResponseModeStrategy.JSON
     assert config.workspace.default_root is None
@@ -199,7 +200,7 @@ def test_harness_research_chat_example_loads_cleanly() -> None:
 
     assert config.llm.provider_protocol is ProviderProtocol.OPENAI_API
     assert config.llm.provider_connection.api_base_url == "http://127.0.0.1:11434/v1"
-    assert config.llm.provider_connection.requires_bearer_token is False
+    assert config.llm.provider_connection.auth_scheme is ProviderAuthScheme.NONE
     assert config.llm.selected_model == "gemma4:26b"
     assert config.workspace.default_root == "."
     assert config.research.enabled is True
