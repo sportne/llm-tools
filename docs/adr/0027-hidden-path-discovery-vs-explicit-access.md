@@ -1,4 +1,4 @@
-# ADR 0026: Separate Hidden-Path Discovery from Explicit Access
+# ADR 0027: Separate Hidden-Path Discovery from Explicit Access
 
 ## Status
 

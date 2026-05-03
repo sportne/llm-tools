@@ -1,4 +1,4 @@
-# ADR 0029: Default Assistant Sessions to Denied Tool Permissions
+# ADR 0030: Default Assistant Sessions to Denied Tool Permissions
 
 ## Status
 

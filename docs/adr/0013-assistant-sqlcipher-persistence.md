@@ -1,4 +1,4 @@
-# ADR 0012: Use Encrypted SQLite for Assistant Persistence
+# ADR 0013: Use Encrypted SQLite for Assistant Persistence
 
 ## Status
 

@@ -1,4 +1,4 @@
-# ADR 0013: Keep Assistant Credentials Session-Memory-Only
+# ADR 0014: Keep Assistant Credentials Session-Memory-Only
 
 ## Status
 

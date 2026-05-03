@@ -1,4 +1,4 @@
-# ADR 0019: Separate Provider Transport from Model-Output Adapters
+# ADR 0020: Separate Provider Transport from Model-Output Adapters
 
 ## Status
 

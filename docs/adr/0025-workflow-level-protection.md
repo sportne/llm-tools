@@ -1,4 +1,4 @@
-# ADR 0024: Treat Protection as Workflow-Level Behavior
+# ADR 0025: Treat Protection as Workflow-Level Behavior
 
 ## Status
 

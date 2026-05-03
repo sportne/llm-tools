@@ -1,4 +1,4 @@
-# ADR 0017: Separate One-Turn Workflow from Durable Harness Orchestration
+# ADR 0018: Separate One-Turn Workflow from Durable Harness Orchestration
 
 ## Status
 

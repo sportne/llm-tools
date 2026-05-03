@@ -1,4 +1,4 @@
-# ADR 0036: Keep Harness State Provider-Neutral
+# ADR 0037: Keep Harness State Provider-Neutral
 
 ## Status
 
@@ -20,7 +20,7 @@ Harness context projections should be derived from `HarnessState` and may be
 attached to execution metadata for inspection, but canonical harness models
 should not store provider prompts, provider messages, token fields, or transport
 payloads as primary durable state. Exact workflow execution results may still be
-embedded in `HarnessTurn` according to ADR 0035.
+embedded in `HarnessTurn` according to ADR 0036.
 
 ## Consequences
 

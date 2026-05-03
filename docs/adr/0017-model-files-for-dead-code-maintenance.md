@@ -1,4 +1,4 @@
-# ADR 0016: Keep Runtime Behavior Out of Model Files
+# ADR 0017: Keep Runtime Behavior Out of Model Files
 
 ## Status
 

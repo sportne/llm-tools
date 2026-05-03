@@ -1,4 +1,4 @@
-# ADR 0031: Treat Malformed Persistence as Corruption
+# ADR 0032: Treat Malformed Persistence as Corruption
 
 ## Status
 

@@ -1,4 +1,4 @@
-# ADR 0028: Preserve Public Facades Over Split Internals
+# ADR 0029: Preserve Public Facades Over Split Internals
 
 ## Status
 

@@ -1,4 +1,4 @@
-# ADR 0030: Keep Harness Planning Deterministic by Default
+# ADR 0031: Keep Harness Planning Deterministic by Default
 
 ## Status
 

@@ -1,4 +1,4 @@
-# ADR 0007: Treat llm-tools as a Layered Agent Framework
+# ADR 0008: Treat llm-tools as a Layered Agent Framework
 
 ## Status
 

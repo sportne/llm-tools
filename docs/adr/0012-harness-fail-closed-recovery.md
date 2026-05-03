@@ -1,4 +1,4 @@
-# ADR 0011: Fail Closed for Harness Recovery and Approval Pauses
+# ADR 0012: Fail Closed for Harness Recovery and Approval Pauses
 
 ## Status
 

@@ -1,4 +1,4 @@
-# ADR 0022: Use Staged Structured JSON Tool Use
+# ADR 0023: Use Staged Structured JSON Tool Use
 
 ## Status
 

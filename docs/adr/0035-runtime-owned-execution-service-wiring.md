@@ -1,4 +1,4 @@
-# ADR 0034: Let ToolRuntime Wire Execution Services
+# ADR 0035: Let ToolRuntime Wire Execution Services
 
 ## Status
 

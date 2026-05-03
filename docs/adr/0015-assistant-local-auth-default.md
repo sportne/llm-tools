@@ -1,4 +1,4 @@
-# ADR 0014: Require Local Assistant Authentication by Default
+# ADR 0015: Require Local Assistant Authentication by Default
 
 ## Status
 

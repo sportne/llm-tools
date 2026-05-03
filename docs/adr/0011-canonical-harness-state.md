@@ -1,4 +1,4 @@
-# ADR 0010: Treat HarnessState as the Canonical Durable Record
+# ADR 0011: Treat HarnessState as the Canonical Durable Record
 
 ## Status
 

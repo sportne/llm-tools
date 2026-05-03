@@ -1,4 +1,4 @@
-# ADR 0008: Mechanically Enforce Layer Boundaries
+# ADR 0009: Mechanically Enforce Layer Boundaries
 
 ## Status
 

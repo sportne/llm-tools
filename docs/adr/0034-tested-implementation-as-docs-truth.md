@@ -1,4 +1,4 @@
-# ADR 0033: Treat Tested Implementation as Documentation Truth
+# ADR 0034: Treat Tested Implementation as Documentation Truth
 
 ## Status
 

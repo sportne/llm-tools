@@ -1,4 +1,4 @@
-# ADR 0018: Support Prompt-Emitted Tool Calls as a First-Class Protocol
+# ADR 0019: Support Prompt-Emitted Tool Calls as a First-Class Protocol
 
 ## Status
 

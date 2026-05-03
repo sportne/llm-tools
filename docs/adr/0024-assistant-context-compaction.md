@@ -1,4 +1,4 @@
-# ADR 0023: Compact Provider Context Without Truncating Transcript
+# ADR 0024: Compact Provider Context Without Truncating Transcript
 
 ## Status
 

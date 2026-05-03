@@ -1,4 +1,4 @@
-# ADR 0025: Use Workspace-Relative POSIX Tool Paths
+# ADR 0026: Use Workspace-Relative POSIX Tool Paths
 
 ## Status
 

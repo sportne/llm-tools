@@ -1,4 +1,4 @@
-# ADR 0032: Use NiceGUI for the Assistant App
+# ADR 0033: Use NiceGUI for the Assistant App
 
 ## Status
 

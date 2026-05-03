@@ -1,4 +1,4 @@
-# ADR 0021: Use Pydantic as the Contract Boundary
+# ADR 0022: Use Pydantic as the Contract Boundary
 
 ## Status
 

@@ -1,4 +1,4 @@
-# ADR 0009: Mediate Tool Execution Through ToolRuntime
+# ADR 0010: Mediate Tool Execution Through ToolRuntime
 
 ## Status
 

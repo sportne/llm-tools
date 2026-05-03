@@ -1,4 +1,4 @@
-# ADR 0020: Make the Assistant Workbench an Inspector First
+# ADR 0021: Make the Assistant Workbench an Inspector First
 
 ## Status
 
