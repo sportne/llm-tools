@@ -1,6 +1,6 @@
 # Add Assistant Skills UI
 
-Status: ready-for-agent
+Status: completed
 
 ## Goal
 

@@ -163,6 +163,8 @@ class NiceGUIRuntimeConfig(BaseModel):
     root_path: str | None = None
     default_workspace_root: str | None = None
     enabled_tools: list[str] = Field(default_factory=list)
+    disabled_skill_names: list[str] = Field(default_factory=list)
+    disabled_skill_paths: list[str] = Field(default_factory=list)
     tool_urls: dict[str, str] = Field(default_factory=dict)
     require_approval_for: set[SideEffectClass] = Field(default_factory=set)
     allow_network: bool = True
@@ -199,6 +201,11 @@ class NiceGUIRuntimeConfig(BaseModel):
         if any(not entry for entry in cleaned):
             raise ValueError("enabled_tools must not contain empty values")
         return cleaned
+
+    @field_validator("disabled_skill_names", "disabled_skill_paths")
+    @classmethod
+    def validate_disabled_skills(cls, value: list[str]) -> list[str]:
+        return [entry.strip() for entry in value if entry.strip()]
 
     @field_validator("tool_urls")
     @classmethod

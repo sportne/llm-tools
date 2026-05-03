@@ -218,6 +218,20 @@ def _chat_store(tmp_path: Path) -> SQLiteNiceGUIChatStore:
     )
 
 
+def _write_skill(
+    path: Path,
+    *,
+    name: str,
+    description: str,
+    body: str = "Instructions.",
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n",
+        encoding="utf-8",
+    )
+
+
 def _drain_until_idle(controller: NiceGUIChatController) -> None:
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline:
@@ -1412,6 +1426,72 @@ def test_controller_direct_answer_persists_user_and_assistant(
     assert loaded.transcript[-1].text == "Plain answer"
     assert loaded.workflow_session_state.turns
     assert loaded.token_usage is not None
+
+
+def test_controller_invokes_skill_and_records_usage_metadata(
+    tmp_path: Path,
+) -> None:
+    _write_skill(
+        tmp_path / "demo" / "SKILL.md",
+        name="demo-skill",
+        description="Use the demo skill.",
+        body="SECRET SKILL BODY",
+    )
+    provider = _FakeProvider(
+        [
+            ParsedModelResponse(
+                final_response={
+                    "answer": "Skill answer",
+                    "citations": [],
+                    "confidence": 0.7,
+                    "uncertainty": [],
+                    "missing_information": [],
+                    "follow_up_suggestions": [],
+                }
+            )
+        ]
+    )
+    controller = _controller(tmp_path, provider)
+    skill = next(
+        skill for skill in controller.visible_skills() if skill.name == "demo-skill"
+    )
+
+    assert controller.skill_enabled(skill) is True
+    assert controller.submit_prompt("$demo-skill apply it") is None
+    _drain_until_idle(controller)
+
+    loaded = controller.store.load_session(controller.active_session_id)
+    assert loaded is not None
+    skill_items = [
+        item for item in loaded.workbench_items if item.title.endswith("Skills")
+    ]
+    assert skill_items
+    payload = skill_items[0].payload
+    assert isinstance(payload, dict)
+    assert payload["loaded_skills"][0]["name"] == "demo-skill"  # type: ignore[index]
+    assert payload["usage_records"][0]["name"] == "demo-skill"  # type: ignore[index]
+    transcript_text = "\n".join(entry.text for entry in loaded.transcript)
+    assert "SECRET SKILL BODY" not in transcript_text
+
+
+def test_controller_disabled_skill_is_not_invokable(tmp_path: Path) -> None:
+    _write_skill(
+        tmp_path / "demo" / "SKILL.md",
+        name="demo-skill",
+        description="Use the demo skill.",
+    )
+    controller = _controller(tmp_path, _FakeProvider([]))
+    skill = next(
+        skill for skill in controller.visible_skills() if skill.name == "demo-skill"
+    )
+
+    controller.set_skill_enabled(skill, False)
+    assert controller.skill_enabled(skill) is False
+
+    error = controller.submit_prompt("$demo-skill apply it")
+
+    assert error is not None
+    assert "skill not found: demo-skill" in error
 
 
 def test_controller_interaction_mode_locks_after_first_message(

@@ -34,8 +34,11 @@ from llm_tools.apps.assistant_app.store import (
 )
 from llm_tools.apps.assistant_config import AssistantConfig
 from llm_tools.apps.assistant_runtime import (
+    AssistantRuntimeBundle,
+    assistant_skill_is_enabled,
     build_assistant_available_tool_specs,
     build_assistant_runtime_bundle,
+    discover_assistant_skills,
     resolve_assistant_default_enabled_tools,
 )
 from llm_tools.harness_api import (
@@ -51,6 +54,7 @@ from llm_tools.harness_api import (
     ResumeDisposition,
     resume_session,
 )
+from llm_tools.skills_api import SkillError, SkillMetadata
 from llm_tools.tool_api import ToolSpec
 from llm_tools.workflow_api import (
     ChatSessionState,
@@ -517,6 +521,33 @@ class NiceGUIChatController:
             build_assistant_available_tool_specs(), self.admin_settings
         )
 
+    def visible_skills(self) -> tuple[SkillMetadata, ...]:
+        """Return discovered skills visible to the active session."""
+        return discover_assistant_skills(self.active_record.runtime).skills
+
+    def visible_skill_errors(self) -> tuple[SkillError, ...]:
+        """Return discovered skill validation errors for the active session."""
+        return discover_assistant_skills(self.active_record.runtime).errors
+
+    def skill_enabled(self, skill: SkillMetadata) -> bool:
+        """Return whether one discovered skill is enabled for the active session."""
+        return assistant_skill_is_enabled(self.active_record.runtime, skill)
+
+    def set_skill_enabled(self, skill: SkillMetadata, enabled: bool) -> None:
+        """Persist per-session enablement for one skill."""
+        runtime = self.active_record.runtime
+        disabled_paths = {
+            str(Path(path).expanduser().resolve(strict=False))
+            for path in runtime.disabled_skill_paths
+        }
+        skill_path = str(Path(skill.path).expanduser().resolve(strict=False))
+        if enabled:
+            disabled_paths.discard(skill_path)
+        else:
+            disabled_paths.add(skill_path)
+        runtime.disabled_skill_paths = sorted(disabled_paths)
+        self.save_active_session()
+
     def _coerce_sessions_for_feature_flags(self) -> None:
         """Drop now-hidden beta features from unlocked/current session runtime state."""
         visible_specs = self.visible_tool_specs()
@@ -595,6 +626,7 @@ class NiceGUIChatController:
                 runtime=record.runtime,
                 session_state=record.workflow_session_state,
                 user_message=cleaned,
+                turn_number=turn_state.active_turn_number + 1,
             )
         except Exception as exc:
             record.transcript.append(
@@ -642,7 +674,12 @@ class NiceGUIChatController:
         """Start a durable harness session for one deep task prompt."""
         turn_state = self.turn_state_for(session_id)
         try:
-            service = self._build_harness_service(session_id=session_id, record=record)
+            service = self._build_harness_service(
+                session_id=session_id,
+                record=record,
+                user_message=prompt,
+                turn_number=turn_state.active_turn_number + 1,
+            )
             budget_policy = BudgetPolicy(
                 max_turns=record.runtime.research.default_max_turns,
                 max_tool_invocations=record.runtime.research.default_max_tool_invocations,
@@ -997,6 +1034,7 @@ class NiceGUIChatController:
         runtime: NiceGUIRuntimeConfig,
         session_state: ChatSessionState,
         user_message: str,
+        turn_number: int,
     ) -> ChatSessionTurnRunner:
         bundle = build_assistant_runtime_bundle(
             config=self.config,
@@ -1014,6 +1052,12 @@ class NiceGUIChatController:
             chat_has_pending_protection_prompt=(
                 session_state.pending_protection_prompt is not None
             ),
+            skill_invocation_text=user_message,
+        )
+        self._record_skill_context(
+            record=self.sessions[session_id],
+            bundle=bundle,
+            turn_number=turn_number,
         )
         return bundle.build_chat_runner(
             session_state=session_state,
@@ -1039,7 +1083,12 @@ class NiceGUIChatController:
         return None
 
     def _build_harness_service(
-        self, *, session_id: str, record: NiceGUISessionRecord
+        self,
+        *,
+        session_id: str,
+        record: NiceGUISessionRecord,
+        user_message: str | None = None,
+        turn_number: int | None = None,
     ) -> HarnessSessionService:
         """Build the shared harness service for a NiceGUI deep task."""
         bundle = build_assistant_runtime_bundle(
@@ -1055,11 +1104,71 @@ class NiceGUIChatController:
             ),
             protection_controller_factory=build_protection_controller,
             information_protection_enabled=self.information_protection_enabled(),
+            skill_invocation_text=user_message,
         )
+        if turn_number is not None:
+            self._record_skill_context(
+                record=record,
+                bundle=bundle,
+                turn_number=turn_number,
+            )
         return bundle.build_harness_service(
             store=self.store.harness_store(
                 chat_session_id=session_id,
                 owner_user_id=record.summary.owner_user_id,
+            )
+        )
+
+    def _record_skill_context(
+        self,
+        *,
+        record: NiceGUISessionRecord,
+        bundle: AssistantRuntimeBundle,
+        turn_number: int,
+    ) -> None:
+        """Persist skill visibility and usage metadata without loaded skill bodies."""
+        if (
+            bundle.available_skills_context is None
+            and not bundle.loaded_skill_contexts
+            and not bundle.skill_discovery.errors
+        ):
+            return
+        payload = {
+            "available_skills_context": (
+                bundle.available_skills_context.model_dump(mode="json")
+                if bundle.available_skills_context is not None
+                else None
+            ),
+            "loaded_skills": [
+                {
+                    "name": context.name,
+                    "path": str(context.path),
+                    "content_hash": usage.content_hash,
+                }
+                for context, usage in zip(
+                    bundle.loaded_skill_contexts,
+                    bundle.skill_usage_records,
+                    strict=True,
+                )
+            ],
+            "usage_records": [
+                usage.model_dump(mode="json") for usage in bundle.skill_usage_records
+            ],
+            "validation_errors": [
+                error.model_dump(mode="json") for error in bundle.skill_discovery.errors
+            ],
+        }
+        now = _now_iso()
+        record.workbench_items.append(
+            NiceGUIWorkbenchItem(
+                item_id=f"workbench-{uuid4().hex}",
+                kind="inspector",
+                title=f"T{turn_number}: Skills",
+                payload=payload,
+                version=1,
+                active=True,
+                created_at=now,
+                updated_at=now,
             )
         )
 

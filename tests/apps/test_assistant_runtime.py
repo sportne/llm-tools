@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from llm_tools.apps.assistant_config import AssistantConfig
 from llm_tools.apps.assistant_runtime import (
@@ -16,6 +19,7 @@ from llm_tools.apps.assistant_runtime import (
     build_tool_group_capability_summaries,
 )
 from llm_tools.harness_api import BudgetPolicy, create_root_task
+from llm_tools.skills_api import SkillNotFoundError
 from llm_tools.tool_api import SideEffectClass, ToolSpec
 from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import ChatSessionConfig, ChatSessionState, ProtectionConfig
@@ -61,6 +65,8 @@ def _runtime(**overrides: object) -> SimpleNamespace:
         "root_path": None,
         "default_workspace_root": config.workspace.default_root,
         "enabled_tools": [],
+        "disabled_skill_names": [],
+        "disabled_skill_paths": [],
         "tool_urls": {},
         "require_approval_for": set(config.policy.require_approval_for),
         "allow_network": True,
@@ -96,6 +102,7 @@ def _bundle(
     env_overrides: dict[str, str] | None = None,
     information_protection_enabled: bool = False,
     chat_has_pending_protection_prompt: bool = False,
+    skill_invocation_text: str | None = None,
 ) -> AssistantRuntimeBundle:
     effective_provider = provider or _RuntimeProvider()
     return build_assistant_runtime_bundle(
@@ -107,6 +114,7 @@ def _bundle(
         env_overrides=env_overrides,
         information_protection_enabled=information_protection_enabled,
         chat_has_pending_protection_prompt=chat_has_pending_protection_prompt,
+        skill_invocation_text=skill_invocation_text,
     )
 
 
@@ -226,6 +234,40 @@ def test_assistant_runtime_bundle_builds_mode_prompts(tmp_path) -> None:
     assert "durable research assistant" in bundle.deep_task_system_prompt
     assert "read_file" in bundle.chat_system_prompt
     assert "read_file" in bundle.deep_task_system_prompt
+
+
+def test_assistant_runtime_bundle_loads_invoked_skills(tmp_path) -> None:
+    _write_skill(
+        tmp_path / "demo" / "SKILL.md",
+        name="demo-skill",
+        description="Use the demo skill.",
+        body="SECRET SKILL BODY",
+    )
+    runtime = _runtime(root_path=str(tmp_path))
+
+    bundle = _bundle(runtime=runtime, skill_invocation_text="$demo-skill do this")
+
+    assert bundle.available_skills_context is not None
+    assert "- demo-skill:" in bundle.chat_system_prompt
+    assert "<name>demo-skill</name>" in bundle.chat_system_prompt
+    assert "SECRET SKILL BODY" in bundle.deep_task_system_prompt
+    assert [usage.name for usage in bundle.skill_usage_records] == ["demo-skill"]
+
+
+def test_assistant_runtime_bundle_rejects_disabled_invoked_skills(tmp_path) -> None:
+    skill_path = tmp_path / "demo" / "SKILL.md"
+    _write_skill(
+        skill_path,
+        name="demo-skill",
+        description="Use the demo skill.",
+    )
+    runtime = _runtime(
+        root_path=str(tmp_path),
+        disabled_skill_paths=[str(skill_path)],
+    )
+
+    with pytest.raises(SkillNotFoundError):
+        _bundle(runtime=runtime, skill_invocation_text="$demo-skill do this")
 
 
 def test_assistant_runtime_bundle_wires_protection_when_ready(
@@ -470,3 +512,17 @@ def test_build_tool_group_capability_summaries_count_statuses_and_approval() -> 
     assert local_files.missing_credentials_tools == 0
     assert local_files.permission_blocked_tools == 0
     assert local_files.approval_gated_tools == 1
+
+
+def _write_skill(
+    path: Path,
+    *,
+    name: str,
+    description: str,
+    body: str = "Instructions.",
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n",
+        encoding="utf-8",
+    )

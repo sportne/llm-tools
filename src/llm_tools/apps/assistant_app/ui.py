@@ -680,6 +680,19 @@ def _tool_capability_tooltip(capability: AssistantToolCapability) -> str:
     return "\n".join(lines)
 
 
+def _skill_tooltip(skill: Any, *, enabled: bool) -> str:
+    """Return compact hover text for a skill."""
+    state = "Enabled" if enabled else "Disabled"
+    return "\n".join(
+        [
+            f"{skill.name} ({skill.scope.value})",
+            state,
+            skill.description,
+            str(skill.path),
+        ]
+    )
+
+
 def _selected_tool_chip_classes(capability: AssistantToolCapability) -> str:
     """Return selected tool chip classes."""
     classes = "llmt-tool-chip"
@@ -1998,6 +2011,52 @@ def build_assistant_ui(  # noqa: C901
                         if mode_locked:
                             tooltip += " Mode is locked after the first message."
                         ui.tooltip(tooltip).props("delay=700")
+            with ui.expansion("Skills", icon="psychology", value=True).classes(
+                "w-full"
+            ):
+                skills = controller.visible_skills()
+                errors = controller.visible_skill_errors()
+                if not skills and not errors:
+                    ui.label("No local skills discovered.").classes(
+                        "text-xs llmt-muted q-px-sm"
+                    )
+                for skill in skills:
+                    enabled = controller.skill_enabled(skill)
+                    icon = "check_box" if enabled else "check_box_outline_blank"
+                    with ui.row().classes("w-full items-center gap-1 no-wrap"):
+                        button = ui.button(
+                            skill.name,
+                            icon=icon,
+                            on_click=lambda _event, target=skill, state=enabled: (
+                                toggle_runtime_skill(target, not state)
+                            ),
+                        ).props("flat dense no-caps align=left")
+                        button.classes(
+                            "llmt-tool-name "
+                            + ("llmt-tool-chip-enabled" if enabled else "")
+                        )
+                        with button:
+                            ui.tooltip(_skill_tooltip(skill, enabled=enabled)).props(
+                                "delay=700"
+                            )
+                        invoke_button = ui.button(
+                            icon="add_comment",
+                            on_click=lambda _event, name=skill.name: (
+                                add_skill_invocation_to_composer(name)
+                            ),
+                        ).props("flat round dense")
+                        if not enabled:
+                            invoke_button.disable()
+                        with invoke_button:
+                            ui.tooltip(f"Insert ${skill.name}").props("delay=700")
+                for error in errors[:5]:
+                    ui.label(
+                        f"{Path(str(error.path)).parent.name}: {error.message}"
+                    ).classes("text-xs text-negative q-px-sm")
+                if len(errors) > 5:
+                    ui.label(f"{len(errors) - 5} more skill error(s)").classes(
+                        "text-xs text-negative q-px-sm"
+                    )
             with ui.expansion("Tools", icon="construction", value=True).classes(
                 "w-full"
             ):
@@ -2128,6 +2187,20 @@ def build_assistant_ui(  # noqa: C901
         controller.save_active_session()
         render_selected_tools()
         render_tool_menu()
+
+    def toggle_runtime_skill(skill: Any, enabled: bool) -> None:
+        controller.set_skill_enabled(skill, enabled)
+        render_tool_menu()
+
+    def add_skill_invocation_to_composer(skill_name: str) -> None:
+        current = _first_nonempty_text(composer_state["text"], composer_input.value)
+        invocation = f"${skill_name}"
+        next_text = (
+            current
+            if invocation in current.split()
+            else f"{invocation} {current}".strip()
+        )
+        _set_composer_draft(next_text, composer_state, composer_input)
 
     def toggle_tool_group(group_name: str) -> None:
         runtime = active_runtime()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +48,27 @@ from llm_tools.harness_api import (
 )
 from llm_tools.harness_api.context import TurnContextBundle
 from llm_tools.llm_providers import ResponseModeStrategy
+from llm_tools.skills_api import (
+    AvailableSkillsContext,
+    LoadedSkillContext,
+    SkillDiscoveryResult,
+    SkillEnablement,
+    SkillInvocation,
+    SkillInvocationType,
+    SkillMetadata,
+    SkillRoot,
+    SkillScope,
+    SkillUsageRecord,
+    build_skill_usage_record,
+    bundled_skill_root,
+    discover_skills,
+    enabled_skills,
+    is_skill_enabled,
+    load_skill_context,
+    render_available_skills_context,
+    render_loaded_skill_context,
+    resolve_skill,
+)
 from llm_tools.tool_api import ToolPolicy, ToolRegistry, ToolSpec
 from llm_tools.workflow_api import (
     ChatSessionState,
@@ -70,6 +92,7 @@ AssistantProtectionControllerFactory = Callable[
     ...,
     ProtectionController | None,
 ]
+_SKILL_INVOCATION_RE = re.compile(r"(?<!\w)\$([A-Za-z0-9_.:-]+)")
 
 
 class NiceGUIHarnessContextBuilder:
@@ -126,6 +149,10 @@ class AssistantRuntimeBundle:
     root: Path | None
     chat_system_prompt: str
     deep_task_system_prompt: str
+    skill_discovery: SkillDiscoveryResult
+    available_skills_context: AvailableSkillsContext | None
+    loaded_skill_contexts: tuple[LoadedSkillContext, ...]
+    skill_usage_records: tuple[SkillUsageRecord, ...]
     chat_protection_controller: ProtectionController | None
     deep_task_protection_controller: ProtectionController | None
 
@@ -193,6 +220,7 @@ def build_assistant_runtime_bundle(
     protection_controller_factory: AssistantProtectionControllerFactory | None = None,
     information_protection_enabled: bool = False,
     chat_has_pending_protection_prompt: bool = False,
+    skill_invocation_text: str | None = None,
 ) -> AssistantRuntimeBundle:
     """Build the app-layer runtime bundle for one assistant session."""
     effective_config = _effective_assistant_config(config=config, runtime=runtime)
@@ -229,20 +257,32 @@ def build_assistant_runtime_bundle(
         redaction_config=effective_config.policy.redaction,
     )
     registry, workflow_executor = build_assistant_executor(policy=policy)
-    chat_system_prompt = build_assistant_system_prompt(
-        tool_registry=registry,
-        tool_limits=effective_config.tool_limits,
-        enabled_tool_names=exposed_tool_names,
-        workspace_enabled=root is not None,
-        staged_schema_protocol=_is_staged_schema_protocol(provider),
-        interaction_protocol=_interaction_protocol(provider),
+    skill_context = build_assistant_skill_context(
+        runtime=runtime,
+        invocation_text=skill_invocation_text,
     )
-    deep_task_system_prompt = build_research_system_prompt(
-        tool_registry=registry,
-        tool_limits=effective_config.tool_limits,
-        enabled_tool_names=exposed_tool_names,
-        workspace_enabled=root is not None,
-        staged_schema_protocol=_is_staged_schema_protocol(provider),
+    chat_system_prompt = _prompt_with_skill_context(
+        build_assistant_system_prompt(
+            tool_registry=registry,
+            tool_limits=effective_config.tool_limits,
+            enabled_tool_names=exposed_tool_names,
+            workspace_enabled=root is not None,
+            staged_schema_protocol=_is_staged_schema_protocol(provider),
+            interaction_protocol=_interaction_protocol(provider),
+        ),
+        available_context=skill_context.available_skills_context,
+        loaded_contexts=skill_context.loaded_skill_contexts,
+    )
+    deep_task_system_prompt = _prompt_with_skill_context(
+        build_research_system_prompt(
+            tool_registry=registry,
+            tool_limits=effective_config.tool_limits,
+            enabled_tool_names=exposed_tool_names,
+            workspace_enabled=root is not None,
+            staged_schema_protocol=_is_staged_schema_protocol(provider),
+        ),
+        available_context=skill_context.available_skills_context,
+        loaded_contexts=skill_context.loaded_skill_contexts,
     )
     chat_protection_controller = _build_bundle_protection_controller(
         app_name="assistant_app",
@@ -288,9 +328,127 @@ def build_assistant_runtime_bundle(
         root=root,
         chat_system_prompt=chat_system_prompt,
         deep_task_system_prompt=deep_task_system_prompt,
+        skill_discovery=skill_context.discovery,
+        available_skills_context=skill_context.available_skills_context,
+        loaded_skill_contexts=skill_context.loaded_skill_contexts,
+        skill_usage_records=skill_context.usage_records,
         chat_protection_controller=chat_protection_controller,
         deep_task_protection_controller=deep_task_protection_controller,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantSkillContext:
+    """Resolved skill context for one assistant runtime turn."""
+
+    discovery: SkillDiscoveryResult
+    available_skills_context: AvailableSkillsContext | None
+    loaded_skill_contexts: tuple[LoadedSkillContext, ...]
+    usage_records: tuple[SkillUsageRecord, ...]
+
+
+def assistant_skill_roots(runtime: Any) -> tuple[SkillRoot, ...]:
+    """Return local skill roots for one assistant runtime."""
+    roots: list[SkillRoot] = []
+    root_path = getattr(runtime, "root_path", None)
+    if root_path:
+        roots.append(SkillRoot(path=Path(root_path), scope=SkillScope.PROJECT))
+    roots.append(bundled_skill_root())
+    return tuple(roots)
+
+
+def assistant_skill_enablement(runtime: Any) -> SkillEnablement:
+    """Return caller-supplied skill enablement for one assistant runtime."""
+    return SkillEnablement(
+        disabled_names=tuple(getattr(runtime, "disabled_skill_names", ()) or ()),
+        disabled_paths=tuple(
+            Path(path) for path in getattr(runtime, "disabled_skill_paths", ()) or ()
+        ),
+    )
+
+
+def discover_assistant_skills(runtime: Any) -> SkillDiscoveryResult:
+    """Discover local skills visible to one assistant runtime."""
+    return discover_skills(assistant_skill_roots(runtime))
+
+
+def assistant_enabled_skills(runtime: Any) -> tuple[SkillMetadata, ...]:
+    """Return enabled local skills visible to one assistant runtime."""
+    discovery = discover_assistant_skills(runtime)
+    return enabled_skills(discovery, assistant_skill_enablement(runtime))
+
+
+def assistant_skill_is_enabled(runtime: Any, skill: SkillMetadata) -> bool:
+    """Return whether one discovered assistant skill is enabled."""
+    return is_skill_enabled(skill, assistant_skill_enablement(runtime))
+
+
+def build_assistant_skill_context(
+    *,
+    runtime: Any,
+    invocation_text: str | None = None,
+) -> AssistantSkillContext:
+    """Build available and loaded skill context for one assistant turn."""
+    discovery = discover_assistant_skills(runtime)
+    enablement = assistant_skill_enablement(runtime)
+    available_context = render_available_skills_context(
+        discovery,
+        enablement=enablement,
+    )
+    loaded_contexts: list[LoadedSkillContext] = []
+    usage_records: list[SkillUsageRecord] = []
+    for skill_name in _skill_names_from_text(invocation_text or ""):
+        resolved = resolve_skill(
+            discovery,
+            SkillInvocation(name=skill_name),
+            enablement,
+        )
+        loaded = load_skill_context(resolved.skill)
+        loaded_contexts.append(loaded)
+        usage_records.append(
+            build_skill_usage_record(
+                resolved.skill,
+                invocation_type=SkillInvocationType.EXPLICIT,
+                contents=loaded.contents,
+            )
+        )
+    return AssistantSkillContext(
+        discovery=discovery,
+        available_skills_context=available_context,
+        loaded_skill_contexts=tuple(loaded_contexts),
+        usage_records=tuple(usage_records),
+    )
+
+
+def _skill_names_from_text(text: str) -> tuple[str, ...]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for match in _SKILL_INVOCATION_RE.finditer(text):
+        name = match.group(1)
+        if name not in seen:
+            names.append(name)
+            seen.add(name)
+    return tuple(names)
+
+
+def _prompt_with_skill_context(
+    prompt: str,
+    *,
+    available_context: AvailableSkillsContext | None,
+    loaded_contexts: Sequence[LoadedSkillContext],
+) -> str:
+    sections = [prompt]
+    if available_context is not None:
+        sections.append(available_context.rendered_text.strip())
+        if available_context.warning_message:
+            sections.append(f"Skills warning: {available_context.warning_message}")
+    if loaded_contexts:
+        sections.append(
+            "\n\n".join(
+                render_loaded_skill_context(context) for context in loaded_contexts
+            )
+        )
+    return "\n\n".join(section for section in sections if section.strip())
 
 
 def _create_bundle_provider(
@@ -546,6 +704,7 @@ def build_live_harness_provider(
 __all__ = [
     "AssistantProviderFactory",
     "AssistantRuntimeBundle",
+    "AssistantSkillContext",
     "AssistantHarnessTurnProvider",
     "AssistantToolApprovalGate",
     "AssistantToolCapability",
@@ -554,7 +713,12 @@ __all__ = [
     "AssistantToolGroupCapabilitySummary",
     "AssistantToolStatus",
     "NiceGUIHarnessContextBuilder",
+    "assistant_enabled_skills",
+    "assistant_skill_enablement",
+    "assistant_skill_is_enabled",
+    "assistant_skill_roots",
     "assistant_tool_group",
+    "build_assistant_skill_context",
     "build_assistant_available_tool_specs",
     "build_assistant_context",
     "build_assistant_executor",
@@ -568,6 +732,7 @@ __all__ = [
     "build_tool_capabilities",
     "build_tool_group_capability_summaries",
     "create_provider",
+    "discover_assistant_skills",
     "resolve_assistant_default_enabled_tools",
     "_effective_assistant_config",
     "_exposed_tool_names_for_runtime",

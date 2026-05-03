@@ -66,12 +66,16 @@ def test_nicegui_runtime_models_validate_and_normalize() -> None:
         selected_model="  demo  ",
         root_path="  ",
         enabled_tools=[" read_file ", "search_text"],
+        disabled_skill_names=[" demo ", ""],
+        disabled_skill_paths=[" /opt/demo/SKILL.md ", ""],
         response_mode_strategy="prompt_tools",
     )
     assert runtime.selected_model == "demo"
     assert runtime.provider_connection.api_base_url is None
     assert runtime.root_path is None
     assert runtime.enabled_tools == ["read_file", "search_text"]
+    assert runtime.disabled_skill_names == ["demo"]
+    assert runtime.disabled_skill_paths == ["/opt/demo/SKILL.md"]
     assert runtime.response_mode_strategy.value == "prompt_tools"
 
     assert NiceGUIRuntimeConfig().protection.enabled is False
