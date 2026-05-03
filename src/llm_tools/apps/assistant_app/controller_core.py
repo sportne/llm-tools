@@ -30,6 +30,7 @@ from llm_tools.apps.assistant_app.models import (
     NiceGUIUser,
     NiceGUIWorkbenchItem,
 )
+from llm_tools.apps.assistant_app.project_defaults import PROJECT_DEFAULTS
 from llm_tools.apps.assistant_app.store import (
     SQLiteNiceGUIChatStore,
     remember_default_db_path,
@@ -266,7 +267,9 @@ class NiceGUIChatController:
         self.preferences: NiceGUIPreferences = store.load_preferences(
             owner_user_id=self.owner_user_id
         )
-        self.admin_settings: NiceGUIAdminSettings = store.load_admin_settings()
+        self.admin_settings: NiceGUIAdminSettings = store.load_admin_settings(
+            defaults=PROJECT_DEFAULTS.admin_settings
+        )
         self.sessions: dict[str, NiceGUISessionRecord] = {}
         self.session_order: list[str] = []
         self.turn_states: dict[str, NiceGUITurnState] = {}

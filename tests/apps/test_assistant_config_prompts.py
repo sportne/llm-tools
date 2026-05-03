@@ -17,6 +17,7 @@ from llm_tools.apps.assistant_prompts import (
     build_assistant_system_prompt,
     build_research_system_prompt,
 )
+from llm_tools.apps.chat_config import ProviderAuthScheme, ProviderConnectionConfig
 from llm_tools.tool_api import ToolRegistry
 from llm_tools.tools import register_filesystem_tools
 from llm_tools.tools.filesystem import ToolLimits
@@ -61,6 +62,37 @@ def test_load_assistant_config_rejects_bad_paths_and_shapes(tmp_path: Path) -> N
     empty = tmp_path / "empty.yaml"
     empty.write_text("", encoding="utf-8")
     assert isinstance(load_assistant_config(empty), AssistantConfig)
+
+
+def test_load_assistant_config_deeply_overlays_project_defaults(
+    tmp_path: Path,
+) -> None:
+    base_config = AssistantConfig(
+        llm={
+            "selected_model": "base-model",
+            "provider_connection": ProviderConnectionConfig(
+                api_base_url="http://127.0.0.1:11434/v1",
+                auth_scheme=ProviderAuthScheme.NONE,
+            ),
+        },
+        policy={"enabled_tools": ["read_file", "search_text"]},
+    )
+    config_file = tmp_path / "assistant.yaml"
+    config_file.write_text(
+        "llm:\n"
+        "  selected_model: overlay-model\n"
+        "policy:\n"
+        "  enabled_tools:\n"
+        "    - list_directory\n",
+        encoding="utf-8",
+    )
+
+    config = load_assistant_config(config_file, base_config=base_config)
+
+    assert config.llm.selected_model == "overlay-model"
+    assert config.llm.provider_connection.api_base_url == "http://127.0.0.1:11434/v1"
+    assert config.llm.provider_connection.auth_scheme is ProviderAuthScheme.NONE
+    assert config.policy.enabled_tools == ["list_directory"]
 
 
 def test_build_assistant_context_uses_session_only_environment(tmp_path: Path) -> None:

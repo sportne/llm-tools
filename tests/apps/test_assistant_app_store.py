@@ -568,6 +568,18 @@ def test_admin_settings_round_trip(tmp_path: Path) -> None:
     assert store.load_admin_settings().deep_task_mode_enabled is False
     assert store.load_admin_settings().skills_enabled is False
     assert store.load_admin_settings().branding.app_name == "LLM Tools Assistant"
+    fallback = NiceGUIAdminSettings(
+        deep_task_mode_enabled=True,
+        branding=AssistantBranding(
+            app_name="Fallback Assistant",
+            short_name="Fallback",
+            icon_name="auto_awesome",
+            favicon_svg='<svg viewBox="0 0 1 1"></svg>',
+        ),
+    )
+    assert store.load_admin_settings(defaults=fallback).branding.app_name == (
+        "Fallback Assistant"
+    )
 
     store.save_admin_settings(
         NiceGUIAdminSettings(
@@ -592,6 +604,9 @@ def test_admin_settings_round_trip(tmp_path: Path) -> None:
     assert loaded.branding.app_name == "Custom Assistant"
     assert loaded.branding.short_name == "Custom"
     assert loaded.branding.icon_name == "auto_awesome"
+    assert store.load_admin_settings(defaults=fallback).branding.app_name == (
+        "Custom Assistant"
+    )
 
 
 def test_temporary_sessions_are_not_persisted(tmp_path: Path) -> None:

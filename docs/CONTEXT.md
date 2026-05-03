@@ -102,6 +102,10 @@ _Avoid_: research session
 The app-layer construction of provider, **Tool** exposure, policy, prompts, protection, and execution objects for **Assistant Chat** or **Deep Task**.
 _Avoid_: bootstrap, setup
 
+**Project Defaults Module**:
+A repository-authored Python module shipped with a project or app variant to provide startup defaults for assistant app behavior without making those values persisted runtime configuration.
+_Avoid_: app defaults, runtime config, operator hook
+
 **Selected Model**:
 The provider-specific model identifier chosen for a **Model Turn** after discovery or explicit user entry.
 _Avoid_: default model, initial model
@@ -115,7 +119,7 @@ The model-service API shape used by a **Provider Connection**, such as an OpenAI
 _Avoid_: provider preset, vendor
 
 **Provider Connection Preset**:
-A saved or built-in non-secret template for a **Provider Connection** that can populate protocol, endpoint, auth policy, and capability settings.
+A saved, built-in, or project-supplied non-secret template that can populate **Provider Protocol**, **Provider Connection**, response mode, and optionally **Selected Model** by stable preset id.
 _Avoid_: provider, provider protocol
 
 **Provider Auth Scheme**:
@@ -143,6 +147,7 @@ _Avoid_: bearer-token requirement
 - **Skills** are discovered, parsed, and validated by a reusable skills API before workflow, harness, or app layers consume them.
 - A **Model-Turn Protocol** may emit zero or more **Model-Turn Events** before it produces a parsed **Model Turn**.
 - A **Workflow Turn** executes one parsed **Model Turn** through the **Tool Runtime**.
+- A **Project Defaults Module** may provide startup defaults for **Assistant Chat**, **Deep Task**, and **Provider Connection Presets**.
 - An **Assistant Chat** contains one or more **Workflow Turn** results.
 - A **Deep Task** owns exactly one active **Harness Session** at a time.
 - A **Harness Session** persists one or more **Workflow Turn** results.
@@ -195,11 +200,20 @@ _Avoid_: bearer-token requirement
 - Structured-output and fallback behavior should be explicit **Model-Turn Protocol** capability configuration, not inferred from vendor identity.
 - The initial **Provider Protocol** selector should expose one option, "OpenAI API"; native Gemini, Ollama, and Ask Sage protocols can be added later.
 - **Provider Connection Presets** may populate provider fields, but tokens are not persisted to disk as part of a preset.
+- **Provider Connection Presets** should have stable ids separate from display labels so later user- or administrator-managed overrides can target them.
 - The initial **Provider Protocol** should be named `openai_api` internally and "OpenAI API" in the app.
 - OpenAI API protocol endpoints should be entered and stored as actual API base URLs, including path prefixes such as `/v1` when required by the endpoint.
 - Native **Provider Protocol** endpoints should be entered and stored as protocol-specific API base URLs that append native paths rather than pretending to use OpenAI API path prefixes.
 - Packaged app defaults should not include a concrete **Provider Connection** endpoint; presets or deployment configuration may provide one explicitly.
-- Built-in **Provider Connection Presets** should live in one easy-to-edit repo file and may include local Ollama's OpenAI API URL.
+- **Provider Connection Presets** should start from the **Project Defaults Module** catalog; the packaged module contains the generic starting catalog.
+- The assistant app should load exactly one conventional in-package **Project Defaults Module** rather than selecting one through CLI startup arguments.
+- A **Project Defaults Module** should expose one typed defaults object covering assistant startup configuration, **Provider Connection Presets**, provider Base URL help text, and initial administrator settings.
+- A **Project Defaults Module** should not own process/runtime deployment settings such as database paths, encryption key paths, host, port, TLS, auth mode, or browser launch behavior.
+- The assistant app **Project Defaults Module** is `llm_tools.apps.assistant_app.project_defaults` and should export `PROJECT_DEFAULTS`.
+- Assistant startup configuration precedence is **Project Defaults Module** baseline, then optional YAML config overlay, then CLI overrides.
+- YAML startup configuration should deeply overlay mapping fields from the **Project Defaults Module**, while list fields replace rather than concatenate.
+- Initial administrator settings from a **Project Defaults Module** apply only when no persisted administrator settings exist; persisted administrator settings win afterward.
+- Loading initial administrator settings should use **Project Defaults Module** values as an absent-row fallback without writing them to persistence until an administrator saves settings.
 - Changing to a different **Provider Connection** should clear the **Selected Model** unless the connection identity is unchanged.
 - **Provider Connection** identity for model/discovery invalidation is defined by **Provider Protocol**, normalized API base URL, **Provider Auth Scheme**, and credential identity.
 - Applying provider settings with a **Selected Model** that is not available for the current **Provider Connection** should show a transient app notice.
@@ -227,8 +241,10 @@ _Avoid_: bearer-token requirement
 - For the OpenAI API **Provider Protocol**, `auto` response mode should try `tools`, then `json`, then `prompt_tools`.
 - **Provider Connection Presets** may populate a visible, editable recommended response mode.
 - **Provider Connection Presets** may include a **Selected Model** when authored for a specific deployment; generic built-in presets should avoid model assumptions.
-- The repo should provide one built-in preset catalog and a local/customer Python extension hook for deployment-specific presets.
-- Local/customer **Provider Connection Presets** may add or override built-in presets by stable preset id, with local definitions winning on id collision.
+- Selecting a **Provider Connection Preset** should copy its **Selected Model**, when present, into the editable model field before Apply.
+- The repo should provide one packaged **Project Defaults Module** for generic use that can be replaced by deployment-specific branches or build variants.
+- A **Project Defaults Module** replaces the packaged starting catalog without preventing later user- or administrator-managed preset additions or overrides.
+- User- or administrator-managed **Provider Connection Preset** persistence is deferred until a concrete workflow requires it.
 - Applying a **Provider Connection Preset** copies fields into the **Provider Connection**; execution uses resolved fields, not preset lookup.
 - Credentials for a **Provider Connection** are application-memory-only secrets, not persisted configuration, and should remain in browser UI only long enough to submit them to the backend.
 - In-memory provider credentials are scoped to **Provider Connection** identity and should be cleared when that identity changes unless a new credential is submitted in the same Apply operation.

@@ -26,8 +26,10 @@ from llm_tools.apps.assistant_app.models import (
     NiceGUIInteractionMode,
     NiceGUIRuntimeConfig,
     NiceGUIUser,
+    ProviderConnectionPreset,
 )
 from llm_tools.apps.assistant_app.paths import expand_app_path, expanded_path_text
+from llm_tools.apps.assistant_app.project_defaults import PROJECT_DEFAULTS
 from llm_tools.apps.assistant_app.provider_endpoints import (
     COMMON_PROVIDER_ENDPOINTS,
 )
@@ -738,18 +740,28 @@ def _provider_endpoint_menu_rows(
     visible_protocols: Sequence[str] | None = None,
 ) -> list[tuple[str, str]]:
     """Return copyable common provider endpoint rows."""
+    return [
+        (preset.label, preset.url)
+        for preset in _provider_connection_presets(visible_protocols)
+    ]
+
+
+def _provider_connection_presets(
+    visible_protocols: Sequence[str] | None = None,
+) -> list[ProviderConnectionPreset]:
+    """Return provider presets visible under the current feature flags."""
     allowed = set(visible_protocols) if visible_protocols is not None else None
     return [
-        (entry.name, entry.url)
-        for entry in COMMON_PROVIDER_ENDPOINTS
-        if entry.name.strip() and entry.url.strip()
-        if allowed is None or entry.provider_protocol.value in allowed
+        preset
+        for preset in COMMON_PROVIDER_ENDPOINTS
+        if preset.label.strip() and preset.url.strip()
+        if allowed is None or preset.provider_protocol.value in allowed
     ]
 
 
 def _provider_base_url_help_text() -> str:
     """Return concise helper text for provider Base URL inputs."""
-    return "Use the provider's documented API base URL for the selected protocol."
+    return PROJECT_DEFAULTS.provider_base_url_help_text
 
 
 def _models_endpoint_url(base_url: str) -> str:
@@ -778,6 +790,19 @@ def _provider_connection_identity(
         _normalized_provider_base_url(base_url),
         auth_scheme.value,
     )
+
+
+def _provider_preset_apply_values(
+    *,
+    preset_identity: tuple[str, str | None, str] | None,
+    new_provider_identity: tuple[str, str | None, str],
+    preset_selected_model: str | None,
+    preset_response_mode_strategy: ResponseModeStrategy | None,
+) -> tuple[str | None, ResponseModeStrategy | None]:
+    """Return preset values only when Apply still targets the preset connection."""
+    if preset_identity != new_provider_identity:
+        return None, None
+    return preset_selected_model, preset_response_mode_strategy
 
 
 def _selected_model_unavailable_message(
@@ -919,7 +944,9 @@ def render_hosted_nicegui_page(
     auth_provider: LocalAuthProvider,
 ) -> None:
     """Render first-run admin, login, or authenticated chat UI."""
-    branding = store.load_admin_settings().branding
+    branding = store.load_admin_settings(
+        defaults=PROJECT_DEFAULTS.admin_settings
+    ).branding
     _apply_branding_page_metadata(branding)
     if not auth_provider.has_users():
         render_first_admin_page(auth_provider)
@@ -952,7 +979,12 @@ def render_first_admin_page(
     """Render first-run admin creation."""
     from nicegui import ui
 
-    branding = branding or auth_provider.store.load_admin_settings().branding
+    branding = (
+        branding
+        or auth_provider.store.load_admin_settings(
+            defaults=PROJECT_DEFAULTS.admin_settings
+        ).branding
+    )
     _apply_branding_page_metadata(branding)
     ui.dark_mode(value=True)
     _add_auth_page_styles()
@@ -999,7 +1031,12 @@ def render_login_page(
     """Render login."""
     from nicegui import ui
 
-    branding = branding or auth_provider.store.load_admin_settings().branding
+    branding = (
+        branding
+        or auth_provider.store.load_admin_settings(
+            defaults=PROJECT_DEFAULTS.admin_settings
+        ).branding
+    )
     _apply_branding_page_metadata(branding)
     ui.dark_mode(value=True)
     _add_auth_page_styles()
@@ -1438,6 +1475,13 @@ def build_assistant_ui(  # noqa: C901
     dark_mode_control = ui.dark_mode(value=controller.preferences.theme_mode == "dark")
     session_filter = {"value": ""}
     model_options_state: dict[str, list[str]] = {"values": []}
+    provider_quick_preset_identity: dict[str, tuple[str, str | None, str] | None] = {
+        "value": None
+    }
+    provider_quick_preset_model: dict[str, str | None] = {"value": None}
+    provider_quick_preset_response_mode: dict[str, ResponseModeStrategy | None] = {
+        "value": None
+    }
     workspace_browser_path: dict[str, Path] = {
         "value": Path(controller.active_record.runtime.root_path or Path.cwd())
     }
@@ -1597,18 +1641,27 @@ def build_assistant_ui(  # noqa: C901
             roots.insert(0, runtime.root_path)
             del roots[10:]
 
-    def base_url_options(runtime: NiceGUIRuntimeConfig) -> list[str]:
-        options = list(
-            controller.preferences.recent_base_urls.get(
-                runtime.provider_protocol.value, []
-            )
-        )
-        if (
-            runtime.provider_connection.api_base_url
-            and runtime.provider_connection.api_base_url not in options
+    def provider_base_url_options(
+        provider_protocol: ProviderProtocol, current_url: str | None
+    ) -> list[str]:
+        options = [
+            preset.url
+            for preset in _provider_connection_presets(provider_protocol_options())
+            if preset.provider_protocol is provider_protocol
+        ]
+        for recent_url in list(
+            controller.preferences.recent_base_urls.get(provider_protocol.value, [])
         ):
-            options.insert(0, runtime.provider_connection.api_base_url)
+            if recent_url not in options:
+                options.append(recent_url)
+        if current_url and current_url not in options:
+            options.insert(0, current_url)
         return options
+
+    def base_url_options(runtime: NiceGUIRuntimeConfig) -> list[str]:
+        return provider_base_url_options(
+            runtime.provider_protocol, runtime.provider_connection.api_base_url
+        )
 
     def provider_protocol_options() -> list[str]:
         return controller.visible_provider_protocol_options()
@@ -1841,6 +1894,9 @@ def build_assistant_ui(  # noqa: C901
 
     def open_provider_dialog() -> None:
         runtime = active_runtime()
+        provider_quick_preset_identity["value"] = None
+        provider_quick_preset_model["value"] = None
+        provider_quick_preset_response_mode["value"] = None
         provider_quick_select.set_options(
             provider_protocol_options(),
             value=runtime.provider_protocol.value,
@@ -2606,27 +2662,82 @@ def build_assistant_ui(  # noqa: C901
         ui.run_javascript(f"navigator.clipboard.writeText({text!r})")
         ui.notify("Copied")
 
-    def render_provider_endpoint_help_button() -> None:
+    def apply_provider_preset_to_settings(preset: ProviderConnectionPreset) -> None:
+        if provider_select is not None:
+            provider_select.set_options(
+                provider_protocol_options(), value=preset.provider_protocol.value
+            )
+        if base_url_input is not None:
+            base_url_input.set_options(
+                provider_base_url_options(preset.provider_protocol, preset.url),
+                value=preset.url,
+            )
+            base_url_input.value = preset.url
+        if auth_scheme_select is not None:
+            auth_scheme_select.value = preset.provider_connection.auth_scheme.value
+        if preset.response_mode_strategy is not None and mode_select is not None:
+            mode_select.value = preset.response_mode_strategy.value
+        if preset.selected_model is not None:
+            set_model_options(
+                model_options_state["values"], selected=preset.selected_model
+            )
+        ui.notify(f"Applied {preset.label}")
+
+    def apply_provider_preset_to_quick_settings(
+        preset: ProviderConnectionPreset,
+    ) -> None:
+        provider_quick_preset_identity["value"] = _provider_connection_identity(
+            provider_protocol=preset.provider_protocol,
+            base_url=preset.url,
+            auth_scheme=preset.provider_connection.auth_scheme,
+        )
+        provider_quick_preset_model["value"] = preset.selected_model
+        provider_quick_preset_response_mode["value"] = preset.response_mode_strategy
+        if provider_quick_select is not None:
+            provider_quick_select.set_options(
+                provider_protocol_options(), value=preset.provider_protocol.value
+            )
+        if base_url_quick_input is not None:
+            base_url_quick_input.set_options(
+                provider_base_url_options(preset.provider_protocol, preset.url),
+                value=preset.url,
+            )
+            base_url_quick_input.value = preset.url
+        if auth_scheme_quick_select is not None:
+            auth_scheme_quick_select.value = (
+                preset.provider_connection.auth_scheme.value
+            )
+        if preset.selected_model is not None:
+            set_model_options(
+                model_options_state["values"], selected=preset.selected_model
+            )
+        ui.notify(f"Applied {preset.label}")
+
+    def render_provider_endpoint_help_button(
+        *,
+        on_apply: Callable[[ProviderConnectionPreset], None] | None = None,
+    ) -> None:
         with ui.button(icon="help_outline").props("flat round"):
-            ui.tooltip("Common OpenAI-compatible Base URLs").props("delay=700")
+            ui.tooltip("Provider presets").props("delay=700")
             with ui.menu().classes("w-[420px] max-w-[90vw]"):
-                ui.label("Common OpenAI-compatible Base URLs").classes(
+                ui.label("Provider presets").classes(
                     "text-sm llmt-muted q-px-md q-pt-sm"
                 )
-                for provider_name, endpoint_url in _provider_endpoint_menu_rows(
-                    provider_protocol_options()
-                ):
+                for preset in _provider_connection_presets(provider_protocol_options()):
                     with ui.row().classes(
                         "w-full items-center justify-between gap-2 no-wrap q-px-sm"
                     ):
                         with ui.column().classes("gap-0 min-w-0 grow"):
-                            ui.label(provider_name).classes("text-sm")
-                            ui.label(endpoint_url).classes(
-                                "text-xs llmt-muted ellipsis"
-                            )
+                            ui.label(preset.label).classes("text-sm")
+                            ui.label(preset.url).classes("text-xs llmt-muted ellipsis")
+                        if on_apply is not None:
+                            ui.button(
+                                icon="check",
+                                on_click=lambda _event, entry=preset: on_apply(entry),
+                            ).props("flat round")
                         ui.button(
                             icon="content_copy",
-                            on_click=lambda _event, url=endpoint_url: copy_text(url),
+                            on_click=lambda _event, url=preset.url: copy_text(url),
                         ).props("flat round")
 
     def regenerate_last() -> None:
@@ -3176,6 +3287,20 @@ def build_assistant_ui(  # noqa: C901
             base_url=base_url,
             auth_scheme=auth_scheme,
         )
+        preset_selected_model, preset_response_mode_strategy = (
+            _provider_preset_apply_values(
+                preset_identity=provider_quick_preset_identity["value"],
+                new_provider_identity=new_provider_identity,
+                preset_selected_model=provider_quick_preset_model["value"],
+                preset_response_mode_strategy=provider_quick_preset_response_mode[
+                    "value"
+                ],
+            )
+        )
+        selected_model = preset_selected_model or runtime.selected_model
+        response_mode_strategy = (
+            preset_response_mode_strategy or runtime.response_mode_strategy
+        )
         provider_api_key = str(provider_api_key_quick_input.value or "").strip()
         existing_provider_api_key = (
             controller.provider_api_key(session_id=controller.active_session_id)
@@ -3186,11 +3311,13 @@ def build_assistant_ui(  # noqa: C901
             provider_protocol=provider_protocol,
             base_url=base_url,
             auth_scheme=auth_scheme,
-            selected_model=runtime.selected_model,
+            selected_model=selected_model,
             api_key=provider_api_key or existing_provider_api_key,
         ):
             return
         runtime.provider_protocol = provider_protocol
+        runtime.selected_model = selected_model
+        runtime.response_mode_strategy = response_mode_strategy
         runtime.provider_connection.api_base_url = base_url
         runtime.provider_connection.auth_scheme = auth_scheme
         update_provider_secret_for_connection(
@@ -3666,7 +3793,9 @@ def build_assistant_ui(  # noqa: C901
                     )
                     with base_url_input:
                         ui.tooltip(_provider_base_url_help_text()).props("delay=700")
-                    render_provider_endpoint_help_button()
+                    render_provider_endpoint_help_button(
+                        on_apply=apply_provider_preset_to_settings
+                    )
                 auth_scheme_select = ui.select(
                     NICEGUI_PROVIDER_AUTH_OPTIONS,
                     label="Auth scheme",
@@ -3949,7 +4078,9 @@ def build_assistant_ui(  # noqa: C901
             )
             with base_url_quick_input:
                 ui.tooltip(_provider_base_url_help_text()).props("delay=700")
-            render_provider_endpoint_help_button()
+            render_provider_endpoint_help_button(
+                on_apply=apply_provider_preset_to_quick_settings
+            )
         auth_scheme_quick_select = ui.select(
             NICEGUI_PROVIDER_AUTH_OPTIONS,
             label="Auth scheme",

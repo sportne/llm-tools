@@ -51,6 +51,7 @@ from llm_tools.apps.assistant_app.app import (
     _provider_base_url_help_text,
     _provider_connection_identity,
     _provider_endpoint_menu_rows,
+    _provider_preset_apply_values,
     _referenced_document_text,
     _runtime_summary_parts,
     _runtime_summary_text,
@@ -116,6 +117,7 @@ from llm_tools.apps.chat_config import (
 )
 from llm_tools.harness_api import ApprovalResolution
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
+from llm_tools.llm_providers import ResponseModeStrategy
 from llm_tools.tool_api import SideEffectClass, ToolInvocationRequest
 from llm_tools.tools.filesystem import ToolLimits
 from llm_tools.workflow_api import (
@@ -1020,10 +1022,14 @@ def test_common_provider_endpoint_catalog_is_local_and_copyable() -> None:
     assert "http://127.0.0.1:11434/v1" in urls
     assert "https://api.openai.com/v1" in urls
     assert "https://api.x.ai/v1" in urls
-    assert "https://generativelanguage.googleapis.com/v1beta/openai/" in urls
-    assert "https://api.anthropic.com/v1/" in urls
+    assert "https://generativelanguage.googleapis.com/v1beta/openai" in urls
+    assert "https://api.anthropic.com/v1" in urls
     assert all(name.strip() for name, _url in rows)
     assert all(url.startswith(("http://", "https://")) for _name, url in rows)
+    assert all(preset.id.strip() for preset in COMMON_PROVIDER_ENDPOINTS)
+    assert len({preset.id for preset in COMMON_PROVIDER_ENDPOINTS}) == len(
+        COMMON_PROVIDER_ENDPOINTS
+    )
     assert "Local Ollama Native" in names
     assert "Ask Sage Native" in names
     assert "http://127.0.0.1:11434" in urls
@@ -1048,6 +1054,37 @@ def test_provider_connection_identity_normalizes_for_secret_scoping() -> None:
         base_url="https://example.test/v1",
         auth_scheme=ProviderAuthScheme.NONE,
     ) == ("openai_api", "https://example.test/v1", "none")
+
+
+def test_provider_preset_apply_values_require_same_connection_identity() -> None:
+    preset_identity = _provider_connection_identity(
+        provider_protocol=ProviderProtocol.OPENAI_API,
+        base_url="https://example.test/v1/",
+        auth_scheme=ProviderAuthScheme.BEARER,
+    )
+    matching_identity = _provider_connection_identity(
+        provider_protocol=ProviderProtocol.OPENAI_API,
+        base_url="https://example.test/v1",
+        auth_scheme=ProviderAuthScheme.BEARER,
+    )
+    changed_identity = _provider_connection_identity(
+        provider_protocol=ProviderProtocol.OPENAI_API,
+        base_url="https://other.example.test/v1",
+        auth_scheme=ProviderAuthScheme.BEARER,
+    )
+
+    assert _provider_preset_apply_values(
+        preset_identity=preset_identity,
+        new_provider_identity=matching_identity,
+        preset_selected_model="preset-model",
+        preset_response_mode_strategy=ResponseModeStrategy.JSON,
+    ) == ("preset-model", ResponseModeStrategy.JSON)
+    assert _provider_preset_apply_values(
+        preset_identity=preset_identity,
+        new_provider_identity=changed_identity,
+        preset_selected_model="preset-model",
+        preset_response_mode_strategy=ResponseModeStrategy.JSON,
+    ) == (None, None)
 
 
 def test_selected_model_unavailable_message_only_blocks_on_successful_discovery() -> (

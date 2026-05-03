@@ -887,7 +887,9 @@ class SQLiteNiceGUIChatStore:
                     .values(payload_json=payload)
                 )
 
-    def load_admin_settings(self) -> NiceGUIAdminSettings:
+    def load_admin_settings(
+        self, *, defaults: NiceGUIAdminSettings | None = None
+    ) -> NiceGUIAdminSettings:
         """Load global administrator feature settings."""
         key = _admin_settings_key()
         with self.engine.begin() as connection:
@@ -901,7 +903,11 @@ class SQLiteNiceGUIChatStore:
                 .first()
             )
         if row is None:
-            return NiceGUIAdminSettings()
+            return (
+                defaults.model_copy(deep=True)
+                if defaults is not None
+                else NiceGUIAdminSettings()
+            )
         return _load_model_json(
             raw=self._decrypt_field(
                 None,

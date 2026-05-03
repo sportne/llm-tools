@@ -22,6 +22,7 @@ from llm_tools.apps.assistant_app.controller import (
     default_runtime_config,
 )
 from llm_tools.apps.assistant_app.paths import expand_app_path
+from llm_tools.apps.assistant_app.project_defaults import PROJECT_DEFAULTS
 from llm_tools.apps.assistant_app.store import SQLiteNiceGUIChatStore, default_db_path
 from llm_tools.apps.assistant_app.ui import (
     NICEGUI_APPROVAL_LABELS,
@@ -62,6 +63,7 @@ from llm_tools.apps.assistant_app.ui import (
     _provider_base_url_help_text,
     _provider_connection_identity,
     _provider_endpoint_menu_rows,
+    _provider_preset_apply_values,
     _referenced_document_text,
     _runtime_summary_parts,
     _runtime_summary_text,
@@ -182,9 +184,9 @@ def build_parser() -> argparse.ArgumentParser:
 def resolve_assistant_config(args: argparse.Namespace) -> AssistantConfig:
     """Resolve config file and CLI overrides."""
     base_config = (
-        load_assistant_config(args.config)
+        load_assistant_config(args.config, base_config=PROJECT_DEFAULTS.config)
         if args.config is not None
-        else AssistantConfig()
+        else PROJECT_DEFAULTS.config.model_copy(deep=True)
     )
     raw = base_config.model_dump(mode="python")
     raw.setdefault("llm", {})
@@ -273,7 +275,9 @@ def run_assistant_app(
         ),
     )
     store.initialize()
-    branding = store.load_admin_settings().branding
+    branding = store.load_admin_settings(
+        defaults=PROJECT_DEFAULTS.admin_settings
+    ).branding
     startup = validate_hosted_startup(
         auth_mode=auth_mode,
         host=host,
@@ -405,6 +409,7 @@ __all__ = [
     "_provider_base_url_help_text",
     "_provider_connection_identity",
     "_provider_endpoint_menu_rows",
+    "_provider_preset_apply_values",
     "_referenced_document_text",
     "_runtime_summary_parts",
     "_runtime_summary_text",
