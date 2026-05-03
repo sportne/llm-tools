@@ -23,6 +23,9 @@ config files, browser storage, or provider connection presets. Credential input
 fields should clear after submission. Missing provider credentials block model
 turn submission for credential-required provider connections; missing tool
 credentials block the affected tool exposure rather than the whole model turn.
+In-memory credentials expire after a bounded session TTL, initially two hours,
+and must be re-entered through the app the next time the expired credential is
+needed.
 When the Assistant is reachable over non-loopback HTTP, secret entry should be
 blocked unless the operator passes an explicit insecure-hosted-secrets override;
 normal hosted use should terminate TLS before accepting credentials.
@@ -38,6 +41,6 @@ server process into hosted users by default.
 
 This is less convenient for local users who expect environment variables to be
 picked up automatically, and credentials must be re-entered after restart,
-logout, or browser session reset. The trade-off is intentional because the same
-Assistant code must support local and hosted use without treating server
-environment secrets as user-scoped app secrets.
+logout, browser session reset, or TTL expiry. The trade-off is intentional
+because the same Assistant code must support local and hosted use without
+treating server environment secrets as user-scoped app secrets.
