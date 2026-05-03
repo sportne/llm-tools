@@ -29,7 +29,7 @@ from llm_tools.apps.assistant_app.models import (
 )
 from llm_tools.apps.assistant_app.paths import expand_app_path, expanded_path_text
 from llm_tools.apps.assistant_app.provider_endpoints import (
-    COMMON_OPENAI_COMPATIBLE_ENDPOINTS,
+    COMMON_PROVIDER_ENDPOINTS,
 )
 from llm_tools.apps.assistant_app.store import SQLiteNiceGUIChatStore
 from llm_tools.apps.assistant_config import AssistantConfig
@@ -38,7 +38,7 @@ from llm_tools.apps.assistant_tool_capabilities import (
     build_tool_capabilities,
     build_tool_group_capability_summaries,
 )
-from llm_tools.apps.chat_config import ProviderProtocol
+from llm_tools.apps.chat_config import ProviderAuthScheme, ProviderProtocol
 from llm_tools.apps.chat_presentation import final_response_details
 from llm_tools.llm_providers import ResponseModeStrategy
 from llm_tools.tool_api import SideEffectClass
@@ -54,6 +54,13 @@ from llm_tools.workflow_api import (
 
 NICEGUI_PROVIDER_OPTIONS = [
     ProviderProtocol.OPENAI_API.value,
+    ProviderProtocol.OLLAMA_NATIVE.value,
+    ProviderProtocol.ASK_SAGE_NATIVE.value,
+]
+NICEGUI_PROVIDER_AUTH_OPTIONS = [
+    ProviderAuthScheme.NONE.value,
+    ProviderAuthScheme.BEARER.value,
+    ProviderAuthScheme.X_ACCESS_TOKENS.value,
 ]
 NICEGUI_APPROVAL_OPTIONS = [
     SideEffectClass.LOCAL_READ,
@@ -250,8 +257,8 @@ def _runtime_summary_parts(
     model = runtime.selected_model or "No model"
     credential = (
         "credential needed"
-        if runtime.provider_connection.requires_bearer_token
-        else "no token"
+        if runtime.provider_connection.auth_scheme.requires_secret()
+        else "no credential"
     )
     parts = [
         ("provider_protocol", runtime.provider_protocol.value),
@@ -728,17 +735,17 @@ def _is_tool_url_setting(name: str) -> bool:
 
 
 def _provider_endpoint_menu_rows() -> list[tuple[str, str]]:
-    """Return copyable common OpenAI-compatible endpoint rows."""
+    """Return copyable common provider endpoint rows."""
     return [
         (entry.name, entry.url)
-        for entry in COMMON_OPENAI_COMPATIBLE_ENDPOINTS
+        for entry in COMMON_PROVIDER_ENDPOINTS
         if entry.name.strip() and entry.url.strip()
     ]
 
 
 def _provider_base_url_help_text() -> str:
     """Return concise helper text for provider Base URL inputs."""
-    return "Use the provider's documented OpenAI-compatible base URL."
+    return "Use the provider's documented API base URL for the selected protocol."
 
 
 def _models_endpoint_url(base_url: str) -> str:
@@ -759,13 +766,13 @@ def _provider_connection_identity(
     *,
     provider_protocol: ProviderProtocol,
     base_url: str | None,
-    requires_bearer_token: bool,
-) -> tuple[str, str | None, bool]:
+    auth_scheme: ProviderAuthScheme,
+) -> tuple[str, str | None, str]:
     """Return the non-secret identity for provider credential scoping."""
     return (
         provider_protocol.value,
         _normalized_provider_base_url(base_url),
-        requires_bearer_token,
+        auth_scheme.value,
     )
 
 
@@ -796,7 +803,7 @@ def _extract_model_names_from_models_payload(payload: object) -> list[str]:
     for entry in raw_entries:
         raw_name: object
         if isinstance(entry, dict):
-            raw_name = entry.get("id") or entry.get("name") or ""
+            raw_name = entry.get("id") or entry.get("name") or entry.get("model") or ""
         else:
             raw_name = entry
         name = str(raw_name or "").strip()
@@ -811,11 +818,41 @@ def _discover_model_names(
     *,
     provider_protocol: ProviderProtocol,
     base_url: str | None,
-    requires_bearer_token: bool = True,
+    auth_scheme: ProviderAuthScheme = ProviderAuthScheme.BEARER,
     api_key: str | None = None,
     timeout: float = 5.0,
 ) -> list[str]:
-    """Discover available models from an OpenAI-compatible provider endpoint."""
+    """Discover available models from the configured provider endpoint."""
+    if provider_protocol is ProviderProtocol.OLLAMA_NATIVE:
+        if not base_url or auth_scheme is not ProviderAuthScheme.NONE:
+            return []
+        try:
+            import ollama
+
+            response = ollama.Client(host=base_url).list()
+        except Exception:
+            return []
+        return _extract_model_names_from_models_payload(
+            response.model_dump(mode="json")
+        )
+    if provider_protocol is ProviderProtocol.ASK_SAGE_NATIVE:
+        if (
+            not base_url
+            or auth_scheme is not ProviderAuthScheme.X_ACCESS_TOKENS
+            or not api_key
+        ):
+            return []
+        try:
+            from llm_tools.llm_providers import AskSageNativeProvider
+
+            return AskSageNativeProvider(
+                model="discovery",
+                access_token=api_key,
+                base_url=base_url,
+                default_request_params={"timeout": timeout},
+            ).list_available_models()
+        except Exception:
+            return []
     if provider_protocol.value != ProviderProtocol.OPENAI_API.value:
         return []
     if not base_url:
@@ -827,10 +864,12 @@ def _discover_model_names(
     if parsed_url.scheme not in {"http", "https"}:
         return []
     headers = {"Accept": "application/json"}
-    if requires_bearer_token and not api_key:
+    if auth_scheme.requires_secret() and not api_key:
         return []
-    if api_key:
+    if api_key and auth_scheme is ProviderAuthScheme.BEARER:
         headers["Authorization"] = f"Bearer {api_key}"
+    if api_key and auth_scheme is ProviderAuthScheme.X_ACCESS_TOKENS:
+        headers["x-access-tokens"] = api_key
     request = Request(url, headers=headers, method="GET")  # noqa: S310
     try:
         with urlopen(request, timeout=timeout) as response:  # noqa: S310
@@ -1414,14 +1453,14 @@ def build_assistant_ui(  # noqa: C901
     provider_select: Any = None
     model_input: Any = None
     base_url_input: Any = None
-    bearer_token_required_switch: Any = None
+    auth_scheme_select: Any = None
     provider_api_key_input: Any = None
     mode_select: Any = None
     workspace_input: Any = None
     database_path_input: Any = None
     provider_quick_select: Any = None
     base_url_quick_input: Any = None
-    bearer_token_required_quick_switch: Any = None
+    auth_scheme_quick_select: Any = None
     provider_api_key_quick_input: Any = None
     model_quick_select: Any = None
     mode_quick_select: Any = None
@@ -1605,10 +1644,8 @@ def build_assistant_ui(  # noqa: C901
                 value=runtime.provider_connection.api_base_url or None,
             )
             base_url_input.value = runtime.provider_connection.api_base_url or ""
-        if bearer_token_required_switch is not None:
-            bearer_token_required_switch.value = (
-                runtime.provider_connection.requires_bearer_token
-            )
+        if auth_scheme_select is not None:
+            auth_scheme_select.value = runtime.provider_connection.auth_scheme.value
         if temperature_input is not None:
             temperature_input.value = str(runtime.temperature)
         if timeout_seconds_input is not None:
@@ -1797,9 +1834,7 @@ def build_assistant_ui(  # noqa: C901
             value=runtime.provider_connection.api_base_url or None,
         )
         base_url_quick_input.value = runtime.provider_connection.api_base_url or ""
-        bearer_token_required_quick_switch.value = (
-            runtime.provider_connection.requires_bearer_token
-        )
+        auth_scheme_quick_select.value = runtime.provider_connection.auth_scheme.value
         provider_api_key_quick_input.value = ""
         dialogs["provider_settings"].open()
 
@@ -2843,17 +2878,17 @@ def build_assistant_ui(  # noqa: C901
         old_provider_identity = _provider_connection_identity(
             provider_protocol=runtime.provider_protocol,
             base_url=runtime.provider_connection.api_base_url,
-            requires_bearer_token=runtime.provider_connection.requires_bearer_token,
+            auth_scheme=runtime.provider_connection.auth_scheme,
         )
         provider_protocol = ProviderProtocol(str(provider_select.value))
         selected_model = str(model_input.value or "").strip() or None
         response_mode_strategy = ResponseModeStrategy(str(mode_select.value))
         base_url = _normalized_provider_base_url(str(base_url_input.value or ""))
-        requires_bearer_token = bool(bearer_token_required_switch.value)
+        auth_scheme = ProviderAuthScheme(str(auth_scheme_select.value))
         new_provider_identity = _provider_connection_identity(
             provider_protocol=provider_protocol,
             base_url=base_url,
-            requires_bearer_token=requires_bearer_token,
+            auth_scheme=auth_scheme,
         )
         provider_api_key = str(provider_api_key_input.value or "").strip()
         existing_provider_api_key = (
@@ -2864,7 +2899,7 @@ def build_assistant_ui(  # noqa: C901
         if not validate_selected_model_for_apply(
             provider_protocol=provider_protocol,
             base_url=base_url,
-            requires_bearer_token=requires_bearer_token,
+            auth_scheme=auth_scheme,
             selected_model=selected_model,
             api_key=provider_api_key or existing_provider_api_key,
         ):
@@ -2873,7 +2908,7 @@ def build_assistant_ui(  # noqa: C901
         runtime.selected_model = selected_model
         runtime.response_mode_strategy = response_mode_strategy
         runtime.provider_connection.api_base_url = base_url
-        runtime.provider_connection.requires_bearer_token = requires_bearer_token
+        runtime.provider_connection.auth_scheme = auth_scheme
         runtime.temperature = updated_runtime.temperature
         runtime.timeout_seconds = updated_runtime.timeout_seconds
         runtime.show_token_usage = updated_runtime.show_token_usage
@@ -3013,11 +3048,11 @@ def build_assistant_ui(  # noqa: C901
         )
         provider_api_key = str(provider_api_key_input.value or "").strip()
         current_model = str(model_input.value or active_runtime().selected_model or "")
-        requires_bearer_token = bool(bearer_token_required_switch.value)
+        auth_scheme = ProviderAuthScheme(str(auth_scheme_select.value))
         models = _discover_model_names(
             provider_protocol=provider_protocol,
             base_url=base_url,
-            requires_bearer_token=requires_bearer_token,
+            auth_scheme=auth_scheme,
             api_key=provider_api_key
             or controller.provider_api_key(session_id=controller.active_session_id),
         )
@@ -3034,7 +3069,7 @@ def build_assistant_ui(  # noqa: C901
         *,
         provider_protocol: ProviderProtocol,
         base_url: str | None,
-        requires_bearer_token: bool,
+        auth_scheme: ProviderAuthScheme,
         selected_model: str | None,
         api_key: str | None,
     ) -> bool:
@@ -3043,7 +3078,7 @@ def build_assistant_ui(  # noqa: C901
         models = _discover_model_names(
             provider_protocol=provider_protocol,
             base_url=base_url,
-            requires_bearer_token=requires_bearer_token,
+            auth_scheme=auth_scheme,
             api_key=api_key,
         )
         message = _selected_model_unavailable_message(
@@ -3061,8 +3096,8 @@ def build_assistant_ui(  # noqa: C901
 
     def update_provider_secret_for_connection(
         *,
-        old_identity: tuple[str, str | None, bool],
-        new_identity: tuple[str, str | None, bool],
+        old_identity: tuple[str, str | None, str],
+        new_identity: tuple[str, str | None, str],
         provider_api_key: str,
     ) -> None:
         if provider_api_key and secret_entry_enabled():
@@ -3077,7 +3112,7 @@ def build_assistant_ui(  # noqa: C901
         models = _discover_model_names(
             provider_protocol=runtime.provider_protocol,
             base_url=runtime.provider_connection.api_base_url,
-            requires_bearer_token=runtime.provider_connection.requires_bearer_token,
+            auth_scheme=runtime.provider_connection.auth_scheme,
             api_key=controller.provider_api_key(
                 session_id=controller.active_session_id
             ),
@@ -3096,15 +3131,15 @@ def build_assistant_ui(  # noqa: C901
         old_provider_identity = _provider_connection_identity(
             provider_protocol=runtime.provider_protocol,
             base_url=runtime.provider_connection.api_base_url,
-            requires_bearer_token=runtime.provider_connection.requires_bearer_token,
+            auth_scheme=runtime.provider_connection.auth_scheme,
         )
         provider_protocol = ProviderProtocol(str(provider_quick_select.value))
         base_url = _normalized_provider_base_url(str(base_url_quick_input.value or ""))
-        requires_bearer_token = bool(bearer_token_required_quick_switch.value)
+        auth_scheme = ProviderAuthScheme(str(auth_scheme_quick_select.value))
         new_provider_identity = _provider_connection_identity(
             provider_protocol=provider_protocol,
             base_url=base_url,
-            requires_bearer_token=requires_bearer_token,
+            auth_scheme=auth_scheme,
         )
         provider_api_key = str(provider_api_key_quick_input.value or "").strip()
         existing_provider_api_key = (
@@ -3115,14 +3150,14 @@ def build_assistant_ui(  # noqa: C901
         if not validate_selected_model_for_apply(
             provider_protocol=provider_protocol,
             base_url=base_url,
-            requires_bearer_token=requires_bearer_token,
+            auth_scheme=auth_scheme,
             selected_model=runtime.selected_model,
             api_key=provider_api_key or existing_provider_api_key,
         ):
             return
         runtime.provider_protocol = provider_protocol
         runtime.provider_connection.api_base_url = base_url
-        runtime.provider_connection.requires_bearer_token = requires_bearer_token
+        runtime.provider_connection.auth_scheme = auth_scheme
         update_provider_secret_for_connection(
             old_identity=old_provider_identity,
             new_identity=new_provider_identity,
@@ -3141,7 +3176,7 @@ def build_assistant_ui(  # noqa: C901
         if not validate_selected_model_for_apply(
             provider_protocol=runtime.provider_protocol,
             base_url=runtime.provider_connection.api_base_url,
-            requires_bearer_token=runtime.provider_connection.requires_bearer_token,
+            auth_scheme=runtime.provider_connection.auth_scheme,
             selected_model=selected_model,
             api_key=controller.provider_api_key(
                 session_id=controller.active_session_id
@@ -3564,11 +3599,10 @@ def build_assistant_ui(  # noqa: C901
                     with base_url_input:
                         ui.tooltip(_provider_base_url_help_text()).props("delay=700")
                     render_provider_endpoint_help_button()
-                bearer_token_required_switch = ui.switch(
-                    "Requires bearer token",
-                    value=(
-                        controller.active_record.runtime.provider_connection.requires_bearer_token
-                    ),
+                auth_scheme_select = ui.select(
+                    NICEGUI_PROVIDER_AUTH_OPTIONS,
+                    label="Auth scheme",
+                    value=controller.active_record.runtime.provider_connection.auth_scheme.value,
                 )
                 with ui.row().classes("w-full items-end gap-2 no-wrap"):
                     provider_api_key_input = (
@@ -3848,11 +3882,10 @@ def build_assistant_ui(  # noqa: C901
             with base_url_quick_input:
                 ui.tooltip(_provider_base_url_help_text()).props("delay=700")
             render_provider_endpoint_help_button()
-        bearer_token_required_quick_switch = ui.switch(
-            "Requires bearer token",
-            value=(
-                controller.active_record.runtime.provider_connection.requires_bearer_token
-            ),
+        auth_scheme_quick_select = ui.select(
+            NICEGUI_PROVIDER_AUTH_OPTIONS,
+            label="Auth scheme",
+            value=controller.active_record.runtime.provider_connection.auth_scheme.value,
         )
         with ui.row().classes("w-full items-end gap-2 no-wrap"):
             provider_api_key_quick_input = (

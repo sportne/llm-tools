@@ -1,4 +1,4 @@
-# ADR 0004: Add a Reusable Skills API Layer
+# ADR 0005: Add a Reusable Skills API Layer
 
 ## Status
 

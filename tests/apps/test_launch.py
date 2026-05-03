@@ -71,6 +71,7 @@ def test_dependency_groups_keep_nicegui_in_base_install_and_streamlit_removed() 
     dev_dependencies = optional_dependencies["dev"]
 
     assert any(dependency.startswith("nicegui>=") for dependency in dependencies)
+    assert any(dependency.startswith("ollama>=") for dependency in dependencies)
     assert any(dependency.startswith("PyYAML>=") for dependency in dependencies)
     assert all(not dependency.startswith("streamlit") for dependency in dependencies)
     assert "streamlit" not in optional_dependencies

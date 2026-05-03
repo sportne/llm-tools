@@ -1,4 +1,4 @@
-# ADR 0005: Split Available and Loaded Skill Context
+# ADR 0006: Split Available and Loaded Skill Context
 
 ## Status
 

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from llm_tools.llm_providers import ResponseModeStrategy
 from llm_tools.tool_api import SideEffectClass
@@ -15,13 +16,29 @@ class ProviderProtocol(str, Enum):  # noqa: UP042
     """Model-service API protocols available in app surfaces."""
 
     OPENAI_API = "openai_api"
+    OLLAMA_NATIVE = "ollama_native"
+    ASK_SAGE_NATIVE = "ask_sage_native"
+
+
+class ProviderAuthScheme(str, Enum):  # noqa: UP042
+    """Credential header shape for one provider connection."""
+
+    NONE = "none"
+    BEARER = "bearer"
+    X_ACCESS_TOKENS = "x_access_tokens"
+
+    def requires_secret(self) -> bool:
+        """Return whether this provider auth scheme requires a credential."""
+        return self is not ProviderAuthScheme.NONE
 
 
 class ProviderConnectionConfig(BaseModel):
     """Non-secret endpoint and auth settings for one provider connection."""
 
+    model_config = ConfigDict(extra="forbid")
+
     api_base_url: str | None = None
-    requires_bearer_token: bool = True
+    auth_scheme: ProviderAuthScheme = ProviderAuthScheme.BEARER
 
     @field_validator("api_base_url")
     @classmethod
@@ -50,6 +67,7 @@ class ChatLLMConfig(BaseModel):
     provider_connection: ProviderConnectionConfig = Field(
         default_factory=ProviderConnectionConfig
     )
+    provider_request_settings: dict[str, Any] = Field(default_factory=dict)
     response_mode_strategy: ResponseModeStrategy = ResponseModeStrategy.AUTO
     selected_model: str | None = None
     temperature: float = 0.1
@@ -82,7 +100,7 @@ class ChatLLMConfig(BaseModel):
 
     def credential_prompt_metadata(self) -> ChatCredentialPromptMetadata:
         """Return UI-safe credential-prompt metadata derived from config."""
-        expects_api_key = self.provider_connection.requires_bearer_token
+        expects_api_key = self.provider_connection.auth_scheme.requires_secret()
         return ChatCredentialPromptMetadata(
             prompt_for_api_key_if_missing=self.prompt_for_api_key_if_missing,
             expects_api_key=expects_api_key,
@@ -120,6 +138,7 @@ __all__ = [
     "ChatLLMConfig",
     "ChatPolicyConfig",
     "ChatUIConfig",
+    "ProviderAuthScheme",
     "ProviderConnectionConfig",
     "ProviderProtocol",
 ]

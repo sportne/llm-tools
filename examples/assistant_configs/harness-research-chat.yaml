@@ -10,7 +10,7 @@ llm:
   temperature: 0.1
   provider_connection:
     api_base_url: http://127.0.0.1:11434/v1
-    requires_bearer_token: false
+    auth_scheme: none
   timeout_seconds: 60.0
   prompt_for_api_key_if_missing: true
 

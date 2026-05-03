@@ -37,6 +37,7 @@ DEFAULT_MODEL_PROFILES = [
     },
 ]
 DEFAULT_PROVIDER_MODES = [
+    "tools",
     "json",
     "prompt_tools",
 ]
@@ -76,7 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--ollama-base-url",
-        default=common.DEFAULT_OLLAMA_BASE_URL,
+        default=common.DEFAULT_OLLAMA_NATIVE_BASE_URL,
+    )
+    parser.add_argument(
+        "--provider-protocol",
+        choices=[protocol.value for protocol in common.ProviderProtocol],
+        default=common.ProviderProtocol.OLLAMA_NATIVE.value,
     )
     parser.add_argument(
         "--timeout-seconds",
@@ -120,6 +126,8 @@ def main(argv: list[str] | None = None) -> int:
                 ",".join(scenarios),
                 "--ollama-base-url",
                 args.ollama_base_url,
+                "--provider-protocol",
+                args.provider_protocol,
                 "--timeout-seconds",
                 str(args.timeout_seconds),
                 "--output-dir",

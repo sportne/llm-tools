@@ -216,6 +216,7 @@ def default_runtime_config(
     return NiceGUIRuntimeConfig(
         provider_protocol=config.llm.provider_protocol,
         provider_connection=config.llm.provider_connection.model_copy(deep=True),
+        provider_request_settings=dict(config.llm.provider_request_settings),
         response_mode_strategy=config.llm.response_mode_strategy,
         selected_model=config.llm.selected_model,
         temperature=config.llm.temperature,
@@ -1079,7 +1080,7 @@ class NiceGUIChatController:
         if runtime.selected_model is None:
             return "Choose a model before running a model turn."
         if (
-            runtime.provider_connection.requires_bearer_token
+            runtime.provider_connection.auth_scheme.requires_secret()
             and not self.provider_api_key(session_id=session_id)
         ):
             return "Enter provider credentials before running a model turn."

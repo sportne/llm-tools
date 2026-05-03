@@ -170,6 +170,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--api-base-url",
         help="OpenAI-compatible API base URL. Overrides --ollama-base-url.",
     )
+    parser.add_argument(
+        "--provider-protocol",
+        choices=[protocol.value for protocol in common.ProviderProtocol],
+        default=common.ProviderProtocol.OPENAI_API.value,
+    )
     parser.add_argument("--model", default=common.DEFAULT_MODEL)
     parser.add_argument("--output-dir")
     parser.add_argument(
@@ -310,7 +315,7 @@ def _build_probe_controller(
     record = controller.active_record
     record.runtime = runtime.model_copy(deep=True)
     provider_api_key = os.environ.get("OPENAI_API_KEY")
-    if record.runtime.provider_connection.requires_bearer_token and provider_api_key:
+    if record.runtime.provider_connection.auth_scheme.requires_secret() and provider_api_key:
         controller.set_session_secret(PROVIDER_API_KEY_FIELD, provider_api_key)
     controller.save_active_session()
     return controller
@@ -1471,15 +1476,32 @@ def main(argv: list[str] | None = None) -> int:
             os.environ["LLM_TOOLS_PROMPT_TOOL_STRATEGY"] = prompt_tool_strategy
         else:
             os.environ.pop("LLM_TOOLS_PROMPT_TOOL_STRATEGY", None)
+        provider_protocol = common.ProviderProtocol(args.provider_protocol)
+        ollama_base_url = args.ollama_base_url
+        if (
+            provider_protocol is common.ProviderProtocol.OLLAMA_NATIVE
+            and args.api_base_url is None
+            and ollama_base_url == common.DEFAULT_OLLAMA_BASE_URL
+        ):
+            ollama_base_url = common.DEFAULT_OLLAMA_NATIVE_BASE_URL
+        provider_auth_scheme = common.ProviderAuthScheme.NONE
+        if provider_protocol is common.ProviderProtocol.ASK_SAGE_NATIVE:
+            provider_auth_scheme = common.ProviderAuthScheme.X_ACCESS_TOKENS
+        elif (
+            provider_protocol is common.ProviderProtocol.OPENAI_API
+            and args.api_base_url
+        ):
+            provider_auth_scheme = common.ProviderAuthScheme.BEARER
         config = common.build_assistant_config(
             workspace=workspace,
             output_dir=mode_output_dir,
-            ollama_base_url=args.ollama_base_url,
+            ollama_base_url=ollama_base_url,
             model=args.model,
             response_mode=provider_mode,
             timeout_seconds=args.timeout_seconds,
             api_base_url=args.api_base_url,
-            requires_bearer_token=bool(args.api_base_url),
+            provider_protocol=provider_protocol,
+            provider_auth_scheme=provider_auth_scheme,
         )
         runtime = common.build_runtime_config(config, workspace=workspace)
         provider_health = common.build_provider_health(config, runtime)

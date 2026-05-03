@@ -35,7 +35,7 @@ caller-supplied enablement state.
 
 ## References
 
-- [ADR 0004](../../docs/adr/0004-skills-api-layer.md)
-- [ADR 0005](../../docs/adr/0005-skill-context-contributions.md)
+- [ADR 0005](../../docs/adr/0005-skills-api-layer.md)
+- [ADR 0006](../../docs/adr/0006-skill-context-contributions.md)
 - [Architecture](../../docs/design/architecture.md)
 - [Context](../../docs/CONTEXT.md)

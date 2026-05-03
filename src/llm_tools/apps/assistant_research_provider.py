@@ -18,8 +18,9 @@ from llm_tools.llm_adapters import (
     ActionEnvelopeAdapter,
     ParsedModelResponse,
 )
-from llm_tools.llm_providers import OpenAICompatibleProvider, ResponseModeStrategy
+from llm_tools.llm_providers import ResponseModeStrategy
 from llm_tools.tool_api import ToolContext, ToolRegistry
+from llm_tools.workflow_api import ModelTurnProvider
 from llm_tools.workflow_api.executor import PreparedModelInteraction
 from llm_tools.workflow_api.model_turn_protocol import (
     ModelTurnProtectionContext,
@@ -34,12 +35,12 @@ from llm_tools.workflow_api.staged_structured import (
 
 
 class AssistantHarnessTurnProvider:
-    """Live harness provider wrapper backed by the OpenAI-compatible client."""
+    """Live harness provider wrapper backed by a model-turn provider."""
 
     def __init__(
         self,
         *,
-        provider: OpenAICompatibleProvider,
+        provider: ModelTurnProvider,
         temperature: float,
         system_prompt: str,
         protection_controller: ProtectionController | None = None,
@@ -51,7 +52,12 @@ class AssistantHarnessTurnProvider:
 
     def prefers_simplified_json_schema_contract(self) -> bool:
         """Return whether research turns should use the simplified JSON contract."""
-        return self._provider.prefers_simplified_json_schema_contract()
+        preference = getattr(
+            self._provider, "prefers_simplified_json_schema_contract", None
+        )
+        if not callable(preference):
+            return False
+        return bool(preference())
 
     def uses_staged_schema_protocol(self) -> bool:
         """Return whether research turns should use staged strict schemas."""
@@ -167,6 +173,7 @@ def build_live_harness_provider(
     provider = create_provider(
         provider_protocol=provider_config.provider_protocol,
         provider_connection=provider_config.provider_connection,
+        provider_request_settings=provider_config.provider_request_settings,
         api_key=api_key,
         selected_model=selected_model,
         response_mode_strategy=response_mode_strategy,

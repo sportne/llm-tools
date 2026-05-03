@@ -118,6 +118,10 @@ _Avoid_: provider preset, vendor
 A saved or built-in non-secret template for a **Provider Connection** that can populate protocol, endpoint, auth policy, and capability settings.
 _Avoid_: provider, provider protocol
 
+**Provider Auth Scheme**:
+The non-secret credential shape required by a **Provider Connection**, such as no credential, bearer token, or `x-access-tokens` header.
+_Avoid_: bearer-token requirement
+
 ## Relationships
 
 - A **Model-Turn Protocol** produces one parsed **Model Turn**.
@@ -147,6 +151,7 @@ _Avoid_: provider, provider protocol
 - An **Assistant Chat** or **Deep Task** may exist with no **Selected Model** until its first **Model Turn**.
 - Model discovery results belong to exactly one **Provider Connection**.
 - A **Provider Connection** uses exactly one **Provider Protocol**.
+- A **Provider Connection** uses exactly one **Provider Auth Scheme**.
 - A **Provider Connection Preset** can populate fields for one **Provider Connection**.
 
 ## Example Dialogue
@@ -173,17 +178,30 @@ _Avoid_: provider, provider protocol
 - Discovery results should be refreshed or invalidated when the **Provider Connection** changes.
 - The app UX may group **Provider Protocol**, endpoint, credential, and **Selected Model** controls under the label "Provider"; internally those concepts stay distinct.
 - Ollama, Gemini, Ask Sage, and similar endpoints may initially be reached through an OpenAI-compatible **Provider Protocol**, with native **Provider Protocols** added later.
+- Native Ollama, Gemini, and Ask Sage **Provider Protocols** mean those services' native API shapes, not vendor-branded presets over the OpenAI API shape.
+- Native Gemini **Provider Protocol** work is deferred until provider-native capabilities such as grounding with Google Search are in scope.
+- Native Ollama **Provider Protocol** work should land before native Ask Sage **Provider Protocol** work, with Ask Sage following immediately after.
+- **Provider Auth Scheme** refactor should land as a prep slice before native Ollama **Provider Protocol** work.
+- Native **Provider Protocol** transports should first satisfy the existing **Model-Turn Protocol** provider surface before introducing a lower-level provider abstraction.
+- Native Ollama **Provider Protocol** should initially support JSON-schema structured output, prompt-tool text, and Ollama's native tool-calling API shape.
+- For native Ollama **Provider Protocol**, `auto` response mode should try native tools, then JSON-schema structured output, then prompt tools.
+- Native provider tool-call responses may map to multiple canonical **Tool** invocations in one **Model Turn**.
+- Native provider responses that contain both tool calls and substantive final-answer text are ambiguous and should be rejected or repaired before becoming a parsed **Model Turn**.
+- Native Ollama **Provider Protocol** uses the `ollama` Python package rather than direct HTTP because its transitive dependencies already overlap the app runtime.
+- Native Ollama tool schemas should be passed as plain mappings generated from `llm-tools` schemas; Ollama package Pydantic types should stay at the client boundary.
+- Ask Sage native persona, dataset, reference-limit, and similar controls are provider-native request settings, not **Provider Connection** identity.
 - OpenAI-compatible transport should not infer behavior from vendor-specific provider families; endpoint capabilities and auth requirements should be explicit connection or protocol settings.
-- Whether bearer-token authentication is required belongs to the **Provider Connection**.
+- The **Provider Auth Scheme** belongs to the **Provider Connection**.
 - Structured-output and fallback behavior should be explicit **Model-Turn Protocol** capability configuration, not inferred from vendor identity.
 - The initial **Provider Protocol** selector should expose one option, "OpenAI API"; native Gemini, Ollama, and Ask Sage protocols can be added later.
 - **Provider Connection Presets** may populate provider fields, but tokens are not persisted to disk as part of a preset.
 - The initial **Provider Protocol** should be named `openai_api` internally and "OpenAI API" in the app.
 - OpenAI API protocol endpoints should be entered and stored as actual API base URLs, including path prefixes such as `/v1` when required by the endpoint.
+- Native **Provider Protocol** endpoints should be entered and stored as protocol-specific API base URLs that append native paths rather than pretending to use OpenAI API path prefixes.
 - Packaged app defaults should not include a concrete **Provider Connection** endpoint; presets or deployment configuration may provide one explicitly.
 - Built-in **Provider Connection Presets** should live in one easy-to-edit repo file and may include local Ollama's OpenAI API URL.
 - Changing to a different **Provider Connection** should clear the **Selected Model** unless the connection identity is unchanged.
-- **Provider Connection** identity for model/discovery invalidation is defined by **Provider Protocol**, normalized API base URL, bearer-token requirement, and credential identity.
+- **Provider Connection** identity for model/discovery invalidation is defined by **Provider Protocol**, normalized API base URL, **Provider Auth Scheme**, and credential identity.
 - Applying provider settings with a **Selected Model** that is not available for the current **Provider Connection** should show a transient app notice.
 - Applying provider settings should block an unavailable **Selected Model** only when discovery succeeds with a non-empty model list; discovery failure should allow explicit model entry with a transient warning.
 - Model controls should support manual **Selected Model** entry even when discovery populates known options.
@@ -216,16 +234,17 @@ _Avoid_: provider, provider protocol
 - In-memory provider credentials are scoped to **Provider Connection** identity and should be cleared when that identity changes unless a new credential is submitted in the same Apply operation.
 - Credential identity may initially be represented by the in-memory provider secret version rather than a user-facing credential name.
 - The first provider-configuration refactor should not add user-facing provider credential slots, API-key labels, or persisted preset metadata unless a concrete use case requires them.
-- The first **Provider Connection** config should contain only endpoint and bearer-token requirement; **Provider Protocol**, **Selected Model**, and response mode remain sibling settings.
+- **Provider Connection** config should contain endpoint and **Provider Auth Scheme**; **Provider Protocol**, **Selected Model**, and response mode remain sibling settings.
 - A saved **Provider Connection** may omit an endpoint, but discovery or **Model Turn** actions should block with a transient notice until an API base URL is provided.
 - Apply may save an incomplete Provider configuration; action handlers enforce readiness for discovery and **Model Turns**.
 - Provider transport creation should receive execution-ready resolved fields, not unresolved app config plus overrides.
 - Model discovery may remain a lightweight protocol-specific helper, but it should consume the same resolved **Provider Connection** and credential fields as provider transport creation.
 - Assistant app credentials are entered and held in memory; lower-level library or CLI provider calls may still accept explicit or conventional environment-variable credentials.
 - Saved sessions may persist non-secret **Provider Connection** fields and **Selected Model** while requiring credentials to be re-entered after restart or logout.
-- Discovery for a bearer-token-required **Provider Connection** should be disabled with a transient notice when no in-memory credential is available.
-- A **Model Turn** for a bearer-token-required **Provider Connection** with no in-memory credential should be blocked before provider creation with a transient notice and no transcript mutation.
+- Discovery for a credential-required **Provider Connection** should be disabled with a transient notice when no in-memory credential is available.
+- A **Model Turn** for a credential-required **Provider Connection** with no in-memory credential should be blocked before provider creation with a transient notice and no transcript mutation.
 - Missing tool credentials block tool exposure rather than the whole **Model Turn**, and the UI should visibly indicate selected tools that are blocked.
+- "Requires bearer token" was the first provider credential shape; prefer **Provider Auth Scheme** now that native Ask Sage requires a non-bearer `x-access-tokens` header.
 - The canonical **Skill Package** format is the portable `SKILL.md` directory shape with required `name` and `description` frontmatter plus optional supporting files such as `scripts/`, `references/`, `examples/`, and `assets/`.
 - The skills API parses and validates **Skill Packages**, but does not execute referenced scripts during parsing or validation.
 - **Skill Metadata** is safe to include in broad discovery context; **Loaded Skill** instructions are included only after explicit invocation or relevance selection.

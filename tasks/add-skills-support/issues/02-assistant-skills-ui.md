@@ -46,7 +46,7 @@ Add assistant app management and invocation UI for skills after the core
 ## References
 
 - [Feature PRD](../PRD.md)
-- [ADR 0004](../../../docs/adr/0004-skills-api-layer.md)
-- [ADR 0005](../../../docs/adr/0005-skill-context-contributions.md)
+- [ADR 0005](../../../docs/adr/0005-skills-api-layer.md)
+- [ADR 0006](../../../docs/adr/0006-skill-context-contributions.md)
 - [Assistant app design](../../../docs/design/assistant_app.md)
 - [Context](../../../docs/CONTEXT.md)
