@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from llm_tools.llm_providers import ResponseModeStrategy
 from llm_tools.tool_api import SideEffectClass
@@ -34,6 +34,8 @@ class ProviderAuthScheme(str, Enum):  # noqa: UP042
 
 class ProviderConnectionConfig(BaseModel):
     """Non-secret endpoint and auth settings for one provider connection."""
+
+    model_config = ConfigDict(extra="forbid")
 
     api_base_url: str | None = None
     auth_scheme: ProviderAuthScheme = ProviderAuthScheme.BEARER

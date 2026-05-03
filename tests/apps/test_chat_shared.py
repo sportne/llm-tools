@@ -60,6 +60,8 @@ def test_chat_config_validation_and_metadata() -> None:
         ChatLLMConfig(temperature=1.5)
     with pytest.raises(ValidationError):
         ChatLLMConfig(timeout_seconds=0)
+    with pytest.raises(ValidationError, match="requires_bearer_token"):
+        ProviderConnectionConfig(requires_bearer_token=False)
     with pytest.raises(ValidationError):
         ChatPolicyConfig(enabled_tools=["read_file", " "])
 
@@ -251,6 +253,19 @@ def test_chat_runtime_provider_factory_and_executor_defaults(
             "default_request_params": {"timeout": 45},
         }
     ]
+    monkeypatch.undo()
+    with pytest.raises(ValueError, match="HTTPS base URL"):
+        _CHAT_RUNTIME_MODULE.create_provider(
+            provider_protocol=ProviderProtocol.ASK_SAGE_NATIVE,
+            provider_connection=ProviderConnectionConfig(
+                api_base_url="http://api.asksage.ai/server",
+                auth_scheme=ProviderAuthScheme.X_ACCESS_TOKENS,
+            ),
+            api_key="token",
+            selected_model="gpt-4.1-mini",
+            response_mode_strategy="json",
+            timeout_seconds=45,
+        )
     with pytest.raises(ValueError, match="Ollama provider protocol uses auth"):
         _CHAT_RUNTIME_MODULE.create_provider(
             provider_protocol=ProviderProtocol.OLLAMA_NATIVE,

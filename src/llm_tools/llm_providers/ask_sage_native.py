@@ -7,7 +7,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ValidationError
@@ -44,7 +44,7 @@ class AskSageNativeProvider:
     ) -> None:
         self.model = model
         self.access_token = access_token
-        self.base_url = base_url.rstrip("/")
+        self.base_url = self._validate_https_base_url(base_url)
         self.response_mode_strategy = ResponseModeStrategy(response_mode_strategy)
         self.request_settings = dict(request_settings or {})
         self.default_request_params = dict(default_request_params or {})
@@ -329,6 +329,16 @@ class AskSageNativeProvider:
             raise AskSageNativeProviderError(
                 "Ask Sage native API request failed."
             ) from exc
+
+    @staticmethod
+    def _validate_https_base_url(base_url: str) -> str:
+        normalized = base_url.strip().rstrip("/")
+        parsed_url = urlparse(normalized)
+        if parsed_url.scheme != "https" or not parsed_url.netloc:
+            raise AskSageNativeProviderError(
+                "Ask Sage native provider requires an HTTPS base URL."
+            )
+        return normalized
 
     def _timeout_seconds(self) -> float | None:
         timeout = self.default_request_params.get("timeout")

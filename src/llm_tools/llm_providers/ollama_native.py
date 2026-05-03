@@ -10,11 +10,13 @@ import ollama
 from pydantic import BaseModel, ValidationError
 
 from llm_tools.llm_adapters import ActionEnvelopeAdapter, ParsedModelResponse
+from llm_tools.llm_providers.ollama_native_models import ProviderPreflightToolInput
 from llm_tools.llm_providers.openai_compatible_models import (
     ProviderPreflightResult,
     ResponseModeStrategy,
     _ProviderPreflightResponse,
 )
+from llm_tools.tool_api import ToolSpec
 
 
 class StructuredOutputValidationError(ValueError):
@@ -95,6 +97,9 @@ class OllamaNativeProvider:
             if self.response_mode_strategy is ResponseModeStrategy.PROMPT_TOOLS:
                 self._run_prompt_tools_preflight(request_params=request_params)
                 resolved_mode = ResponseModeStrategy.PROMPT_TOOLS
+            elif self.response_mode_strategy is ResponseModeStrategy.TOOLS:
+                self._run_native_tools_preflight(request_params=request_params)
+                resolved_mode = ResponseModeStrategy.TOOLS
             else:
                 self.run_structured(
                     messages=self._preflight_messages(),
@@ -632,6 +637,51 @@ class OllamaNativeProvider:
             raise StructuredOutputValidationError(
                 "Prompt-tools preflight did not return the expected text.",
                 invalid_payload=text,
+            )
+
+    def _run_native_tools_preflight(
+        self,
+        *,
+        request_params: dict[str, Any] | None,
+    ) -> None:
+        adapter = ActionEnvelopeAdapter()
+        response_model = adapter.build_response_model(
+            [
+                ToolSpec(
+                    name="provider_preflight",
+                    description="Validate native provider tool-call support.",
+                )
+            ],
+            {"provider_preflight": ProviderPreflightToolInput},
+        )
+        parsed = self._run_native_tools(
+            adapter=adapter,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Use the provider_preflight tool. Do not answer in text."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Validate this endpoint and model by calling "
+                        "provider_preflight with status set to ok."
+                    ),
+                },
+            ],
+            response_model=response_model,
+            request_params=request_params,
+        )
+        if (
+            len(parsed.invocations) != 1
+            or parsed.invocations[0].tool_name != "provider_preflight"
+            or parsed.invocations[0].arguments.get("status") != "ok"
+        ):
+            raise StructuredOutputValidationError(
+                "Native tools preflight did not return the expected tool call.",
+                invalid_payload=parsed,
             )
 
     @staticmethod

@@ -263,6 +263,28 @@ def test_lazy_clients_use_host_and_timeout(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_ollama_preflight_success_and_prompt_tools_mode() -> None:
+    tools_client = _SyncOllamaClient(
+        [
+            _chat_response(
+                tool_calls=[
+                    _tool_call("provider_preflight", {"status": "ok"}),
+                ]
+            )
+        ]
+    )
+    tools_provider = OllamaNativeProvider(
+        model="llama3.2",
+        client=tools_client,
+        response_mode_strategy=ResponseModeStrategy.TOOLS,
+    )
+
+    tools_result = tools_provider.preflight()
+
+    assert tools_result.ok is True
+    assert tools_result.resolved_mode is ResponseModeStrategy.TOOLS
+    assert "tools" in tools_client.calls[0]
+    assert "format" not in tools_client.calls[0]
+
     json_provider = OllamaNativeProvider(
         model="llama3.2",
         client=_SyncOllamaClient([_chat_response(content='{"status": "ok"}')]),
@@ -285,6 +307,20 @@ def test_ollama_preflight_success_and_prompt_tools_mode() -> None:
 
     assert prompt_result.ok is True
     assert prompt_result.resolved_mode is ResponseModeStrategy.PROMPT_TOOLS
+
+
+def test_ollama_tools_preflight_rejects_missing_tool_call() -> None:
+    provider = OllamaNativeProvider(
+        model="llama3.2",
+        client=_SyncOllamaClient([_chat_response(content="plain text")]),
+        response_mode_strategy=ResponseModeStrategy.TOOLS,
+    )
+
+    result = provider.preflight()
+
+    assert result.ok is False
+    assert result.selected_mode_supported is False
+    assert "Native tools preflight" in result.actionable_message
 
 
 def test_ollama_preflight_reports_model_errors() -> None:

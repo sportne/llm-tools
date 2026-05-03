@@ -88,6 +88,21 @@ def test_ask_sage_run_text_posts_native_query_payload() -> None:
     ]
 
 
+def test_ask_sage_rejects_non_https_base_urls() -> None:
+    with pytest.raises(AskSageNativeProviderError, match="HTTPS base URL"):
+        AskSageNativeProvider(
+            model="gpt-4.1-mini",
+            access_token=ACCESS_VALUE,
+            base_url="http://api.asksage.ai/server",
+        )
+    with pytest.raises(AskSageNativeProviderError, match="HTTPS base URL"):
+        AskSageNativeProvider(
+            model="gpt-4.1-mini",
+            access_token=ACCESS_VALUE,
+            base_url="not-a-url",
+        )
+
+
 def test_ask_sage_json_mode_parses_structured_payload() -> None:
     transport = _FakeAskSageTransport([{"answer": '{"status": "ok"}'}])
     provider = AskSageNativeProvider(
