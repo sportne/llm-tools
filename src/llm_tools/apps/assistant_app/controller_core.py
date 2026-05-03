@@ -423,10 +423,6 @@ class NiceGUIChatController:
         effective_session_id = session_id or self.active_session_id
         self.session_secrets.setdefault(effective_session_id, {}).pop(name, None)
 
-    def has_session_secret(self, name: str, *, session_id: str | None = None) -> bool:
-        """Return whether the selected session has an in-memory secret."""
-        return bool(self.get_session_secret(name, session_id=session_id))
-
     def session_secret_state(
         self, name: str, *, session_id: str | None = None
     ) -> SessionSecretState:
