@@ -228,6 +228,8 @@ def test_read_file_tool_returns_bounded_character_ranges(tmp_path: str) -> None:
     assert result.content == "two\nthree"
     assert result.start_char == 4
     assert result.end_char == 13
+    assert result.line_start == 2
+    assert result.line_end == 3
     assert result.character_count == len(file_path.read_text(encoding="utf-8"))
     assert result.truncated is True
 

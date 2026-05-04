@@ -147,6 +147,8 @@ class FileReadResult(BaseModel):
     character_count: int | None = None
     start_char: int | None = None
     end_char: int | None = None
+    line_start: int | None = None
+    line_end: int | None = None
     file_size_bytes: int
     max_read_input_bytes: int
     max_file_size_characters: int

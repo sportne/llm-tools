@@ -27,13 +27,18 @@ Do not invent local or remote facts.
 
 FIELD_GUIDANCE: dict[str, str] = {
     "answer": "Main answer. It may be tool-grounded or direct model knowledge when no tool evidence is needed.",
-    "citations": "Support data-dependent claims with source identifiers when available. source_path may be local or remote.",
+    "citations": "Support data-dependent claims with source identifiers when available. Use line_start and line_end only for real source line numbers supplied by tool evidence; source_path may be local or remote.",
     "confidence": "Optional 0.0-1.0 confidence based on evidence quality and completeness.",
     "uncertainty": "List caveats, ambiguity, or places where evidence is incomplete.",
     "missing_information": "List explicit gaps that prevented a stronger answer.",
     "follow_up_suggestions": "Suggest useful next questions or source-driven follow-up steps.",
 }
 DEFAULT_FIELD_GUIDANCE = "Return a valid value that matches the response schema."
+CITATION_RANGE_GUIDANCE = (
+    "- For citations, use line_start and line_end only when tool results provide "
+    "real source line numbers. Do not use start_char or end_char as citation line "
+    "numbers; they are character offsets.\n"
+)
 
 
 def _strip_schema_titles(value: object) -> object:
@@ -134,6 +139,7 @@ def build_assistant_system_prompt(
             "- Prefer narrow reads and specific searches before broad file or remote fetches.\n"
             "- If a tool call fails because of missing access, missing credentials, or bad arguments, do not repeat the same failing call.\n"
             "- Answer conservatively and cite the evidence you actually have.\n\n"
+            f"{CITATION_RANGE_GUIDANCE}\n"
             "Relevant limits:\n"
             "- search-style tools may cap result counts per call.\n"
             f"- read-oriented content is bounded by configured readable-character limits near {tool_limits.max_file_size_characters} characters.\n"
@@ -159,6 +165,7 @@ def build_assistant_system_prompt(
             "- Prefer narrow reads and specific searches before broad file or remote fetches.\n"
             "- If a tool call fails because of missing access, missing credentials, or bad arguments, do not repeat the same failing call.\n"
             "- Answer conservatively and cite the evidence you actually have.\n\n"
+            f"{CITATION_RANGE_GUIDANCE}\n"
             "Relevant limits:\n"
             "- search-style tools may cap result counts per call.\n"
             f"- read-oriented content is bounded by configured readable-character limits near {tool_limits.max_file_size_characters} characters.\n"
@@ -192,6 +199,7 @@ def build_assistant_system_prompt(
             "- Prefer narrow reads and specific searches before broad file or remote fetches.\n"
             "- If a tool call fails because of missing access, missing credentials, or bad arguments, do not repeat the same failing call.\n"
             "- Answer conservatively and cite the evidence you actually have.\n\n"
+            f"{CITATION_RANGE_GUIDANCE}\n"
             "Relevant limits:\n"
             "- search-style tools may cap result counts per call.\n"
             f"- read-oriented content is bounded by configured readable-character limits near {tool_limits.max_file_size_characters} characters.\n"
@@ -227,6 +235,7 @@ def build_assistant_system_prompt(
         "- Atlassian and GitLab tools require network access plus the documented credentials.\n"
         "- If a tool call fails because of missing access, missing credentials, or bad arguments, do not repeat the same failing call.\n"
         "- Answer conservatively and cite the evidence you actually have.\n\n"
+        f"{CITATION_RANGE_GUIDANCE}\n"
         "Relevant limits:\n"
         "- search-style tools may cap result counts per call.\n"
         f"- read-oriented content is bounded by configured readable-character limits near {tool_limits.max_file_size_characters} characters.\n"

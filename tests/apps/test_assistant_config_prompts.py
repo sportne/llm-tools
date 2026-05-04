@@ -152,6 +152,10 @@ def test_assistant_prompt_protocol_variants_are_protocol_specific() -> None:
     assert "Final answer content should include" in native_tools
     assert "Structured interaction protocol" in staged_json
     assert "Required action format" in action_envelope
+    assert "Do not use start_char or end_char as citation line numbers" in native_tools
+    assert (
+        "Do not use start_char or end_char as citation line numbers" in action_envelope
+    )
     assert "max_tool_result_chars" not in prompt_tools
     assert "5678" in action_envelope
 

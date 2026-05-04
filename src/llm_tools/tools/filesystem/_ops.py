@@ -9,6 +9,7 @@ from llm_tools.tools.filesystem._content import (
     effective_full_read_char_limit,
     estimate_token_count,
     is_within_character_limit,
+    line_range_for_character_range,
     load_readable_content,
     normalize_range,
 )
@@ -319,6 +320,11 @@ def read_file_impl(
     truncated_end = min(normalized_end, normalized_start + full_read_char_limit)
     truncated = truncated_end < character_count or truncated_end < normalized_end
     content_slice = content[normalized_start:truncated_end]
+    line_start, line_end = line_range_for_character_range(
+        content,
+        start_char=normalized_start,
+        end_char=truncated_end,
+    )
     return FileReadResult(
         requested_path=resolved_request.requested_path,
         resolved_path=resolved_request.resolved_path,
@@ -330,6 +336,8 @@ def read_file_impl(
         character_count=character_count,
         start_char=normalized_start,
         end_char=truncated_end,
+        line_start=line_start,
+        line_end=line_end,
         file_size_bytes=resolved_request.resolved.stat().st_size,
         max_read_input_bytes=tool_limits.max_read_input_bytes,
         max_file_size_characters=tool_limits.max_file_size_characters,

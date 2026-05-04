@@ -715,6 +715,20 @@ def normalize_range(
     return normalized_start, min(normalized_end, character_count)
 
 
+def line_range_for_character_range(
+    content: str, *, start_char: int, end_char: int
+) -> tuple[int | None, int | None]:
+    """Return 1-based source line bounds for a returned character slice."""
+    if end_char <= start_char or not content:
+        return None, None
+    line_start = content.count("\n", 0, start_char) + 1
+    last_char_index = min(end_char, len(content)) - 1
+    while last_char_index > start_char and content[last_char_index] == "\n":
+        last_char_index -= 1
+    line_end = content.count("\n", 0, last_char_index) + 1
+    return line_start, line_end
+
+
 def build_file_info_result(
     *,
     requested_path: str,

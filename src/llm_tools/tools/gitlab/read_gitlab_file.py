@@ -9,6 +9,7 @@ from llm_tools.tools.filesystem._content import (
     effective_full_read_char_limit,
     estimate_token_count,
     is_within_character_limit,
+    line_range_for_character_range,
     normalize_range,
 )
 from llm_tools.tools.gitlab._shared import (
@@ -101,6 +102,11 @@ class ReadGitLabFileTool(Tool[ReadGitLabFileInput, ReadGitLabFileOutput]):
         truncated_end = min(normalized_end, normalized_start + full_read_char_limit)
         content_slice = content[normalized_start:truncated_end]
         truncated = truncated_end < character_count or truncated_end < normalized_end
+        line_start, line_end = line_range_for_character_range(
+            content,
+            start_char=normalized_start,
+            end_char=truncated_end,
+        )
 
         context.log(
             f"Read GitLab file '{args.file_path}' from project '{args.project}'."
@@ -124,6 +130,8 @@ class ReadGitLabFileTool(Tool[ReadGitLabFileInput, ReadGitLabFileOutput]):
             character_count=character_count,
             start_char=normalized_start,
             end_char=truncated_end,
+            line_start=line_start,
+            line_end=line_end,
             file_size_bytes=file_size_bytes,
             max_read_input_bytes=tool_limits.max_read_input_bytes,
             max_file_size_characters=tool_limits.max_file_size_characters,
