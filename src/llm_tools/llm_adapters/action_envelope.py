@@ -46,6 +46,8 @@ from llm_tools.llm_adapters.base import ParsedModelResponse
 from llm_tools.tool_api import ToolInvocationRequest, ToolSpec
 
 
+# Pydantic validates runtime-built Literal/union annotations; cast them only
+# at create_model calls because their shapes cannot be proven statically.
 class ActionEnvelopeAdapter:
     """Build and parse canonical structured action envelopes."""
 
@@ -74,7 +76,10 @@ class ActionEnvelopeAdapter:
                     "ActionEnvelopeNoTools",
                     __base__=_NoActionsEnvelopeMixin,
                     actions=(list[dict[str, Any]], Field(default_factory=list)),
-                    final_response=(_optional_annotation(final_response_model), None),
+                    final_response=(
+                        cast(Any, _optional_annotation(final_response_model)),
+                        None,
+                    ),
                 ),
             )
             envelope_model.__module__ = __name__
@@ -96,7 +101,10 @@ class ActionEnvelopeAdapter:
                 "ActionEnvelope",
                 __base__=_EnvelopeModeMixin,
                 actions=(actions_annotation, Field(default_factory=list)),
-                final_response=(_optional_annotation(final_response_model), None),
+                final_response=(
+                    cast(Any, _optional_annotation(final_response_model)),
+                    None,
+                ),
             ),
         )
         envelope_model.__module__ = __name__
@@ -134,8 +142,8 @@ class ActionEnvelopeAdapter:
             create_model(
                 "DecisionStep",
                 __base__=_DecisionStepMixin,
-                mode=(mode_annotation, ...),
-                tool_name=(tool_name_annotation, None),
+                mode=(cast(Any, mode_annotation), ...),
+                tool_name=(cast(Any, tool_name_annotation), None),
             ),
         )
         model.__module__ = __name__
@@ -153,7 +161,7 @@ class ActionEnvelopeAdapter:
             create_model(
                 f"{_sanitize_name(tool_name)}InvocationStep",
                 __base__=_ToolInvocationStepMixin,
-                tool_name=(Literal[tool_name], Field(default=tool_name)),
+                tool_name=(cast(Any, Literal[tool_name]), Field(default=tool_name)),
                 arguments=(input_model, ...),
             ),
         )
@@ -171,7 +179,7 @@ class ActionEnvelopeAdapter:
             create_model(
                 "FinalResponseStep",
                 __base__=_FinalResponseStepMixin,
-                final_response=(final_response_model, ...),
+                final_response=(cast(Any, final_response_model), ...),
             ),
         )
         model.__module__ = __name__
@@ -195,8 +203,11 @@ class ActionEnvelopeAdapter:
             create_model(
                 "SingleActionStep",
                 __base__=_SingleActionStepMixin,
-                tool_name=(tool_name_annotation, None),
-                final_response=(_optional_annotation(final_response_model), None),
+                tool_name=(cast(Any, tool_name_annotation), None),
+                final_response=(
+                    cast(Any, _optional_annotation(final_response_model)),
+                    None,
+                ),
             ),
         )
         model.__module__ = __name__
@@ -353,7 +364,7 @@ class ActionEnvelopeAdapter:
         action_model = create_model(
             class_name,
             __config__=ConfigDict(extra="forbid"),
-            tool_name=(Literal[tool_name], Field(default=tool_name)),
+            tool_name=(cast(Any, Literal[tool_name]), Field(default=tool_name)),
             arguments=(input_model, ...),
         )
         action_model.__module__ = __name__
@@ -373,7 +384,7 @@ class ActionEnvelopeAdapter:
                 "ActionEnvelopeSimplified",
                 __base__=_SimplifiedEnvelopeMixin,
                 actions=(list[_LooseAction], Field(default_factory=list)),
-                final_response=(simplified_final_response, None),
+                final_response=(cast(Any, simplified_final_response), None),
             ),
         )
         envelope_model.__module__ = __name__

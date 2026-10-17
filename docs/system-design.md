@@ -2506,7 +2506,7 @@ workflows.
 | --- | --- | --- | --- | --- | --- |
 | argon2-cffi | argon2-cffi>=23,<26 | 25.1.0 | Password hashing for the assistant app's local username/password authentication. | https://argon2-cffi.readthedocs.io/ | MIT |
 | atlassian-python-api | atlassian-python-api>=4,<5 | 4.0.7 | Client library for bundled Jira, Confluence, and Bitbucket read integrations, which are default-hidden in the assistant behind atlassian_tools_enabled. | https://github.com/atlassian-api/atlassian-python-api | Apache Software License |
-| cryptography | cryptography>=42,<47 | 46.0.7 | Authenticated encryption and key wrapping for assistant persistence. | https://github.com/pyca/cryptography/ | Apache-2.0 OR BSD-3-Clause |
+| cryptography | cryptography>=50,<51 | 50.0.2 | Authenticated encryption and key wrapping for assistant persistence. | https://github.com/pyca/cryptography/ | Apache-2.0 OR BSD-3-Clause |
 | instructor | instructor>=1,<2 | 1.12.0 | Structured response parsing support for OpenAI-compatible provider interactions. | https://github.com/instructor-ai/instructor | MIT |
 | markitdown | markitdown>=0.1.5,<0.2 | 0.1.5 | Document-to-Markdown conversion for readable filesystem file access. | https://github.com/microsoft/markitdown | MIT |
 | mpxj | mpxj>=16,<17 | 16.1.0 | Microsoft Project file conversion support in the filesystem read pipeline. | https://github.com/joniles/mpxj | LGPL-2.0-or-later |
@@ -2526,10 +2526,10 @@ workflows.
 | --- | --- | --- | --- | --- | --- |
 | build | build>=1.2,<2 | 1.4.3 | Package build frontend used by the local packaging workflow. | https://github.com/pypa/build | MIT |
 | mypy | mypy>=1.10,<2 | 1.20.1 | Strict static type checking for the Python package. | https://github.com/python/mypy | MIT |
-| pytest | pytest>=8.3,<9 | 8.4.2 | Test runner for unit, integration, architecture, and example tests. | https://github.com/pytest-dev/pytest | MIT License |
+| pytest | pytest>=9.0.3,<10 | 9.1.1 | Test runner for unit, integration, architecture, and example tests. | https://github.com/pytest-dev/pytest | MIT License |
 | pytest-cov | pytest-cov>=5,<7 | 6.3.0 | Coverage reporting integration for pytest. | https://pytest-cov.readthedocs.io/ | MIT |
 | ruff | ruff>=0.6,<1 | 0.15.11 | Formatter and linter for source and test code. | https://github.com/astral-sh/ruff | MIT |
-| setuptools | setuptools>=82,<83 | 82.0.1 | Build backend and editable-install support for the src-layout package. | https://github.com/pypa/setuptools | MIT |
+| setuptools | setuptools>=83,<84 | 83.0.0 | Build backend and editable-install support for the src-layout package. | https://github.com/pypa/setuptools | MIT |
 | vulture | vulture>=2.16,<3 | 2.16 | Dead-code review lead generation for reachability maintenance. | https://github.com/jendrikseipp/vulture | MIT License |
 | wheel | wheel>=0.46,<0.47 | 0.46.3 | Wheel distribution build support. | https://github.com/pypa/wheel | MIT |
 
